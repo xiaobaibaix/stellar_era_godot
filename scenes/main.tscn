@@ -51,13 +51,17 @@ showClouds = false
 showGodrays = false
 walkSpeed = 5.0
 
-[node name="Main" type="Node" unique_id=502546147 node_paths=PackedStringArray("camera", "player", "toggle", "display_ball", "preload_ball", "planet")]
+[node name="Main" type="Node" unique_id=502546147 node_paths=PackedStringArray("camera", "player", "toggle", "wire_toggle", "ball_toggle", "display_ball", "preload_ball", "player_display_ball", "player_preload_ball", "planet")]
 script = ExtResource("6_main")
 camera = NodePath("Camera/Camera3D")
 player = NodePath("Planet/Player/CharacterBody3D")
 toggle = NodePath("CheckButtonPlay")
+wire_toggle = NodePath("CheckButtonWire")
+ball_toggle = NodePath("CheckButtonBall")
 display_ball = NodePath("Camera/DisplayBall")
 preload_ball = NodePath("Camera/PreloadBall")
+player_display_ball = NodePath("Planet/DisplayBall")
+player_preload_ball = NodePath("Planet/PreloadBall")
 planet = NodePath("Planet")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1411384491]
@@ -93,8 +97,31 @@ camera = NodePath("../Camera/Camera3D")
 [node name="Player" parent="Planet" unique_id=818653580 instance=ExtResource("5_tbgi4")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 602, 0)
 
-[node name="CheckButtonPlay" type="CheckButton" parent="." unique_id=1056460260]
-offset_top = 29.0
+[node name="DisplayBall" type="MeshInstance3D" parent="Planet" unique_id=811932217]
+transform = Transform3D(0.51340926, 0, 0, 0, 0.51340926, 0, 0, 0, 0.51340926, 0, 0, 0)
+visible = false
+material_override = SubResource("StandardMaterial3D_tefeu")
+mesh = SubResource("SphereMesh_3xd07")
+
+[node name="PreloadBall" type="MeshInstance3D" parent="Planet" unique_id=292467668]
+transform = Transform3D(0.35938647, 0, 0, 0, 0.35938647, 0, 0, 0, 0.35938647, 0, 0, 0)
+visible = false
+material_override = SubResource("StandardMaterial3D_o6xl0")
+mesh = SubResource("SphereMesh_jq8tk")
+
+[node name="CheckButtonWire" type="CheckButton" parent="." unique_id=204736276]
+offset_top = 31.0
 offset_right = 112.0
-offset_bottom = 60.0
+offset_bottom = 62.0
+text = "显示线框"
+
+[node name="CheckButtonBall" type="CheckButton" parent="." unique_id=771799726]
+offset_top = 62.0
+offset_right = 112.0
+offset_bottom = 93.0
+text = "显示Ball"
+
+[node name="CheckButtonPlay" type="CheckButton" parent="." unique_id=1056460260]
+offset_right = 112.0
+offset_bottom = 31.0
 text = "跟随角色"

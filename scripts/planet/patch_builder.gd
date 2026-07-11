@@ -11,8 +11,8 @@ class_name PatchBuilder
 extends RefCounted
 
 
-@warning_ignore("integer_division")
 static func _row_index(i: int, j: int, N: int) -> int:
+	@warning_ignore("integer_division")
 	return i * (N + 1) - (i * (i - 1)) / 2 + j
 
 
@@ -63,6 +63,7 @@ static func build_patch_arrays(A: Vector3, B: Vector3, C: Vector3, N: int, R: fl
 	var s_ac: int = int(strides[1])
 	var s_bc: int = int(strides[2])
 
+	@warning_ignore("integer_division")
 	var main_count: int = ((N + 1) * (N + 2)) / 2
 
 	var edge_ab := dyadic_edge(A, B, N)

@@ -262,6 +262,7 @@ func _gen_array_mesh(data: Dictionary) -> ArrayMesh:
 	var normals: PackedFloat32Array = data.normals
 	var colors: PackedFloat32Array = data.colors
 	var indices: PackedInt32Array = data.indices
+	@warning_ignore("integer_division")
 	var vcount: int = positions.size() / 3
 	var verts := PackedVector3Array()
 	verts.resize(vcount)
@@ -373,6 +374,8 @@ func rebuild() -> void:
 func set_wireframe(on: bool) -> void:
 	_wire = on
 	material.wireframe = on
+	# 线框模式关掉背面剔除 → 前后三角边都画出来 = 纯透视 wireframe(只显示线, 非叠在实心面上)
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED if on else BaseMaterial3D.CULL_BACK
 
 
 # 地形参数快照(传给 worker 线程, 避免跨线程读 PlanetParams)

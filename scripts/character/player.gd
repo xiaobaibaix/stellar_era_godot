@@ -8,10 +8,6 @@ class_name Player
 extends CharacterBody3D
 
 @export var planet: Planet
-@export var move_speed: float = 60.0        # 切向移动速度
-@export var turn_speed: float = 2.2         # Q/E 转向角速度(rad/s)
-@export var jump_speed: float = 60.0        # 径向起跳速度
-@export var gravity: float = 100.0          # 径向重力加速度
 @export var feet_offset: float = 1.0        # 胶囊中心到脚底的偏移(贴地距离)
 @export var camera_slot: Node3D             # 第三人称相机挂点(运行时每帧驱动其全局变换)
 @export var mouse_look: bool = false        # true: 鼠标接管朝向(相机控制角色模式)
@@ -68,20 +64,20 @@ func _physics_process(delta: float) -> void:
 	var in_fwd: float = _key(KEY_W) - _key(KEY_S)
 	var in_right: float = _key(KEY_A) - _key(KEY_D)
 	if Input.is_physical_key_pressed(KEY_Q):
-		_yaw += turn_speed * delta
+		_yaw += planet.params.turnSpeed * delta
 	if Input.is_physical_key_pressed(KEY_E):
-		_yaw -= turn_speed * delta
+		_yaw -= planet.params.turnSpeed * delta
 
-	# 切向速度(定速; 释放即停)
+	# 切向速度(定速; 释放即停) —— 速度来自 PlanetParams.walkSpeed
 	var wish: Vector3 = fwd * in_fwd + right * in_right
-	var tangent_v: Vector3 = wish.normalized() * move_speed if wish.length() > 1e-4 else Vector3.ZERO
+	var tangent_v: Vector3 = wish.normalized() * planet.params.walkSpeed if wish.length() > 1e-4 else Vector3.ZERO
 
-	# 径向分量: 重力下拉 + 起跳(沿当前 up)
+	# 径向分量: 重力下拉 + 起跳(沿当前 up) —— 来自 PlanetParams
 	var radial_v: float = _vel.dot(up)
-	radial_v -= gravity * delta
+	radial_v -= planet.params.gravity * delta
 	var jump_now: bool = Input.is_physical_key_pressed(KEY_SPACE)
 	if _on_ground and jump_now and not _jump_prev:
-		radial_v = jump_speed
+		radial_v = planet.params.jumpForce
 	_jump_prev = jump_now
 
 	# 积分: 切向 + 径向
@@ -158,7 +154,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	# 相机控制角色模式: 鼠标横向转角色朝向, 纵向调相机俯仰
 	if mouse_look and event is InputEventMouseMotion:
 		_yaw -= event.relative.x * mouse_sensitivity
-		_cam_pitch = clampf(_cam_pitch + event.relative.y * mouse_sensitivity, cam_pitch_min, cam_pitch_max)
+		# 纵向受 PlanetParams.invertY 控制: true=反转(保持当前手感), false=正向
+		var pitch_sgn := 1.0 if (planet != null and planet.params.invertY) else -1.0
+		_cam_pitch = clampf(_cam_pitch + event.relative.y * mouse_sensitivity * pitch_sgn, cam_pitch_min, cam_pitch_max)
 	elif mouse_look and event is InputEventMouseButton and event.is_pressed():
 		# 滚轮缩放相机距离(俯仰不变, 仅拉远/拉近)
 		match event.button_index:

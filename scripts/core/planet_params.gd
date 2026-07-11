@@ -50,6 +50,15 @@ signal bulk_changed
 ## 角色表面行走速度。
 @export_range(1.0, 200.0, 1.0) var walkSpeed: float = 25.0:
 	set(v): walkSpeed = v; param_changed.emit("walkSpeed")
+## 角色转向角速度(Q/E, 弧度/秒)。
+@export_range(0.0, 10.0, 0.05) var turnSpeed: float = 2.2:
+	set(v): turnSpeed = v; param_changed.emit("turnSpeed")
+## 起跳的径向初速度(沿径向向外)。
+@export_range(0.0, 300.0, 1.0) var jumpForce: float = 60.0:
+	set(v): jumpForce = v; param_changed.emit("jumpForce")
+## 径向重力加速度(角色始终被拉向行星中心)。
+@export_range(0.0, 600.0, 1.0) var gravity: float = 100.0:
+	set(v): gravity = v; param_changed.emit("gravity")
 ## 鼠标纵向是否反转。
 @export var invertY: bool = true:
 	set(v): invertY = v; param_changed.emit("invertY")

@@ -37,7 +37,7 @@ const COL_ROCK := Color(0.50, 0.50, 0.52)
 const COL_SNOW := Color(0.97, 0.97, 1.0)
 
 
-static func _mk_noise(seedv: int, freq: float, octaves: int, gain: float, lac: float, fractal: int) -> FastNoiseLite:
+static func _mk_noise(seedv: int, freq: float, octaves: int, gain: float, lac: float, fractal: FastNoiseLite.FractalType) -> FastNoiseLite:
 	var n := FastNoiseLite.new()
 	n.noise_type = FastNoiseLite.TYPE_SIMPLEX
 	n.seed = seedv
@@ -62,9 +62,8 @@ static func _mk_cellular(seedv: int, freq: float) -> FastNoiseLite:
 	n.noise_type = FastNoiseLite.TYPE_CELLULAR
 	n.seed = seedv
 	n.frequency = freq
-	# cellular_distance 用默认(EUCLIDEAN); return_type=4 即 DISTANCE2_SUB → F2-F1(细胞边界处→0 起脊)。
-	# 用整数值而非枚举常量名, 避免不同 Godot 版本枚举名差异导致脚本解析失败(曾因此让整个 Terrain 类编译不过)。
-	n.cellular_return_type = 4
+	# cellular_distance 用默认(EUCLIDEAN); DISTANCE2_SUB = F2-F1(细胞边界处→0 起脊)。
+	n.cellular_return_type = FastNoiseLite.CELLULAR_RETURN_DISTANCE2_SUB
 	return n
 
 
