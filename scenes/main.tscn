@@ -4,6 +4,8 @@
 [ext_resource type="PackedScene" uid="uid://nuulebu1sk8m" path="res://scenes/planet.tscn" id="2_sugp2"]
 [ext_resource type="Script" uid="uid://cjg2w1cypjy4u" path="res://scripts/core/orbit_camera.gd" id="3_cam"]
 [ext_resource type="Script" uid="uid://7boxikbjeden" path="res://scripts/core/planet_params.gd" id="4_jyhfs"]
+[ext_resource type="PackedScene" uid="uid://m7jxxg83yibb" path="res://scenes/player.tscn" id="5_tbgi4"]
+[ext_resource type="Script" uid="uid://cnmiaw2pdp52j" path="res://scripts/core/main.gd" id="6_main"]
 
 [sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_ihy5a"]
 panorama = ExtResource("1_0wfyh")
@@ -16,13 +18,17 @@ background_mode = 2
 sky = SubResource("Sky_1j6d1")
 glow_enabled = true
 
-[sub_resource type="Resource" id="Resource_jyhfs"]
+[sub_resource type="Resource" id="Resource_tefeu"]
 resource_local_to_scene = true
 script = ExtResource("4_jyhfs")
-radius = 187.0
+radius = 500.0
 seaLevel = -0.5
 
-[node name="Main" type="Node" unique_id=502546147]
+[node name="Main" type="Node" unique_id=502546147 node_paths=PackedStringArray("camera", "player", "toggle")]
+script = ExtResource("6_main")
+camera = NodePath("Camera3D")
+player = NodePath("Planet/Player/CharacterBody3D")
+toggle = NodePath("CheckButton")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1411384491]
 environment = SubResource("Environment_r4dii")
@@ -32,10 +38,18 @@ transform = Transform3D(-0.8660254, -0.43301275, 0.24999997, 0.49665427, -0.6872
 shadow_enabled = true
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=1625772579]
-transform = Transform3D(0.99991435, 0.0023192565, 0.012884211, 0, 0.984182, -0.1771603, -0.013091289, 0.17714511, 0.98409766, 47.810547, -340.9749, 611.00494)
+transform = Transform3D(0.99991435, 0.0023192565, 0.012884211, 0, 0.984182, -0.1771603, -0.013091289, 0.17714511, 0.98409766, 47.810547, -340.9749, 722.6436)
 current = true
 script = ExtResource("3_cam")
 
 [node name="Planet" parent="." unique_id=1626788951 node_paths=PackedStringArray("camera") instance=ExtResource("2_sugp2")]
-params = SubResource("Resource_jyhfs")
+params = SubResource("Resource_tefeu")
 camera = NodePath("../Camera3D")
+
+[node name="Player" parent="Planet" unique_id=818653580 instance=ExtResource("5_tbgi4")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 602, 0)
+
+[node name="CheckButton" type="CheckButton" parent="." unique_id=1056460260]
+offset_right = 100.0
+offset_bottom = 28.0
+text = "跟随角色"
