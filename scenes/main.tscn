@@ -18,17 +18,47 @@ background_mode = 2
 sky = SubResource("Sky_1j6d1")
 glow_enabled = true
 
-[sub_resource type="Resource" id="Resource_tefeu"]
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_tefeu"]
+transparency = 1
+cull_mode = 2
+no_depth_test = true
+shading_mode = 0
+albedo_color = Color(0.2, 1, 0.35, 0.15)
+
+[sub_resource type="SphereMesh" id="SphereMesh_3xd07"]
+radius = 20.0
+height = 40.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_o6xl0"]
+transparency = 1
+cull_mode = 2
+no_depth_test = true
+shading_mode = 0
+albedo_color = Color(1, 0.6, 0.15, 0.1)
+
+[sub_resource type="SphereMesh" id="SphereMesh_jq8tk"]
+radius = 40.0
+height = 80.0
+
+[sub_resource type="Resource" id="Resource_tipki"]
 resource_local_to_scene = true
 script = ExtResource("4_jyhfs")
 radius = 500.0
-seaLevel = -0.5
+showInset = false
+showOcean = false
+showAtmosphere = false
+showClouds = false
+showGodrays = false
+walkSpeed = 5.0
 
-[node name="Main" type="Node" unique_id=502546147 node_paths=PackedStringArray("camera", "player", "toggle")]
+[node name="Main" type="Node" unique_id=502546147 node_paths=PackedStringArray("camera", "player", "toggle", "display_ball", "preload_ball", "planet")]
 script = ExtResource("6_main")
-camera = NodePath("Camera3D")
+camera = NodePath("Camera/Camera3D")
 player = NodePath("Planet/Player/CharacterBody3D")
-toggle = NodePath("CheckButton")
+toggle = NodePath("CheckButtonPlay")
+display_ball = NodePath("Camera/DisplayBall")
+preload_ball = NodePath("Camera/PreloadBall")
+planet = NodePath("Planet")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1411384491]
 environment = SubResource("Environment_r4dii")
@@ -37,19 +67,34 @@ environment = SubResource("Environment_r4dii")
 transform = Transform3D(-0.8660254, -0.43301275, 0.24999997, 0.49665427, -0.6872369, 0.5301304, -0.057743765, 0.58327, 0.8102243, 0, 0, 0)
 shadow_enabled = true
 
-[node name="Camera3D" type="Camera3D" parent="." unique_id=1625772579]
-transform = Transform3D(0.99991435, 0.0023192565, 0.012884211, 0, 0.984182, -0.1771603, -0.013091289, 0.17714511, 0.98409766, 47.810547, -340.9749, 722.6436)
+[node name="Camera" type="Node3D" parent="." unique_id=1997738350]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 513.4158)
+
+[node name="Camera3D" type="Camera3D" parent="Camera" unique_id=1625772579]
 current = true
 script = ExtResource("3_cam")
 
+[node name="DisplayBall" type="MeshInstance3D" parent="Camera" unique_id=717722535]
+transform = Transform3D(0.51340926, 0, 0, 0, 0.51340926, 0, 0, 0, 0.51340926, 0, 0, 0)
+visible = false
+material_override = SubResource("StandardMaterial3D_tefeu")
+mesh = SubResource("SphereMesh_3xd07")
+
+[node name="PreloadBall" type="MeshInstance3D" parent="Camera" unique_id=839969253]
+transform = Transform3D(0.35938647, 0, 0, 0, 0.35938647, 0, 0, 0, 0.35938647, 0, 0, 0)
+visible = false
+material_override = SubResource("StandardMaterial3D_o6xl0")
+mesh = SubResource("SphereMesh_jq8tk")
+
 [node name="Planet" parent="." unique_id=1626788951 node_paths=PackedStringArray("camera") instance=ExtResource("2_sugp2")]
-params = SubResource("Resource_tefeu")
-camera = NodePath("../Camera3D")
+params = SubResource("Resource_tipki")
+camera = NodePath("../Camera/Camera3D")
 
 [node name="Player" parent="Planet" unique_id=818653580 instance=ExtResource("5_tbgi4")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 602, 0)
 
-[node name="CheckButton" type="CheckButton" parent="." unique_id=1056460260]
-offset_right = 100.0
-offset_bottom = 28.0
+[node name="CheckButtonPlay" type="CheckButton" parent="." unique_id=1056460260]
+offset_top = 29.0
+offset_right = 112.0
+offset_bottom = 60.0
 text = "跟随角色"

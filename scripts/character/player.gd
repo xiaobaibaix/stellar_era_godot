@@ -20,6 +20,9 @@ extends CharacterBody3D
 @export var cam_distance: float = 6.0       # 相机离枢轴(角色)的距离
 @export var cam_pitch_min: float = -0.4
 @export var cam_pitch_max: float = 1.3
+@export var cam_distance_min: float = 3.0   # 滚轮拉近下限
+@export var cam_distance_max: float = 40.0  # 滚轮拉远上限
+@export var cam_zoom_step: float = 1.0      # 滚轮每格缩放距离
 
 var _yaw: float = 0.0           # 朝向角(绕径向 up 旋转)
 var _vel: Vector3 = Vector3.ZERO
@@ -156,6 +159,13 @@ func _unhandled_input(event: InputEvent) -> void:
 	if mouse_look and event is InputEventMouseMotion:
 		_yaw -= event.relative.x * mouse_sensitivity
 		_cam_pitch = clampf(_cam_pitch + event.relative.y * mouse_sensitivity, cam_pitch_min, cam_pitch_max)
+	elif mouse_look and event is InputEventMouseButton and event.is_pressed():
+		# 滚轮缩放相机距离(俯仰不变, 仅拉远/拉近)
+		match event.button_index:
+			MOUSE_BUTTON_WHEEL_UP:
+				cam_distance = maxf(cam_distance_min, cam_distance - cam_zoom_step)
+			MOUSE_BUTTON_WHEEL_DOWN:
+				cam_distance = minf(cam_distance_max, cam_distance + cam_zoom_step)
 
 
 # 第三人称相机挂点: 绕角色上方枢轴, 按俯仰角摆在角色后上方并 look_at 枢轴。

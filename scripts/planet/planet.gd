@@ -12,6 +12,9 @@ extends Node3D
 ## 显式指定驱动 LOD 的相机(场景里把 Camera3D 拖给 Planet)。
 ## @tool 下 get_viewport().get_camera_3d() 在编辑器不可靠, 用显式引用统一编辑器/运行时。
 @export var camera: Camera3D
+## LOD 距离判定的聚焦目标(用它的位置算细分距离); 留空则用 camera。
+## 跟随角色模式下设为 Player, 让细分围绕角色而非相机; 视锥剔除仍用渲染相机。
+@export var lod_target: Node3D
 var terrain: Terrain
 var roots: Array = []  # Array[QNode]
 var _V: Array = []  # 12 个单位顶点(Vector3)
@@ -31,6 +34,10 @@ var _body_mesh: Node3D  # 所有 Qnode 的容器节点(BodyMesh)
 var _qnode_scene: PackedScene  # qnode.tscn 预制体
 var _last_params_hash: int = 0  # 参数指纹(轮询检测变化触发 rebuild, 绕过 @tool 信号不可靠)
 var _param_tick: int = 0
+# 预取节流: 预取请求每帧上限 + 总 inflight 上限。超过则跳过预取 → 让位给"显示必需"的前景请求。
+const PREFETCH_PER_FRAME := 3
+const PREFETCH_INFLIGHT_CAP := 8
+var _prefetch_this_frame: int = 0
 
 
 # 作为预制体节点: 进树即自动构建; _process 自动取场景活动相机驱动 LOD。
@@ -279,11 +286,17 @@ func _gen_array_mesh(data: Dictionary) -> ArrayMesh:
 
 
 # ---- Worker 请求调度 ----
-func request_mesh(node: QNode, strides: Array, key: String) -> void:
+func request_mesh(node: QNode, strides: Array, key: String, is_prefetch: bool = false) -> void:
 	if node.pending:
 		return
 	if node.mesh_inst.mesh != null and node.built_key == key:
 		return
+	# 预取节流: 前景(显示必需)请求优先, 永不跳过; 预取请求只在每帧配额 + inflight 有余力时提交,
+	# 避免与显示争抢 worker 反而拖慢可见区域。
+	if is_prefetch:
+		if _prefetch_this_frame >= PREFETCH_PER_FRAME or _pending >= PREFETCH_INFLIGHT_CAP:
+			return
+		_prefetch_this_frame += 1
 	node.pending = true
 	node.cancelled = false
 	node.req_key = key
@@ -325,14 +338,19 @@ func count_node(node: QNode) -> void:
 
 
 func update(cam: Camera3D) -> void:
-	var cp: Vector3 = cam.global_position - global_position
+	# LOD 距离判定用 lod_target(如 Player); 视锥剔除仍用渲染相机 cam 的 frustum。
+	var focus: Node3D = lod_target if lod_target != null else cam
+	var cp: Vector3 = focus.global_position - global_position
 	_cam_moved = cp.distance_squared_to(_cam_pos) > 1e-6
 	_cam_pos = cp
 	var frustum: Array = cam.get_frustum()
+	# 统一时间戳传给 select_lod, 供 QNode 的合并宽限(merge cache)判断暂存是否到期
+	var now: float = Time.get_ticks_msec() / 1000.0
+	_prefetch_this_frame = 0  # 每帧重置预取配额
 	stats.patches = 0
 	stats.triangles = 0
 	for r in roots:
-		r.select_lod(cp, frustum, _cam_moved)
+		r.select_lod(cp, frustum, _cam_moved, now)
 	stats.inflight = _pending
 
 

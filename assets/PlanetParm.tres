@@ -1,0 +1,10 @@
+[gd_resource type="Resource" script_class="PlanetParams" format=3 uid="uid://dk4yn3ckv2yrd"]
+
+[ext_resource type="Script" uid="uid://7boxikbjeden" path="res://scripts/core/planet_params.gd" id="1_0n3we"]
+
+[resource]
+resource_local_to_scene = true
+script = ExtResource("1_0n3we")
+radius = 500.0
+seaLevel = -0.5
+walkSpeed = 10.0

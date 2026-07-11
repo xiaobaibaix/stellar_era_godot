@@ -5,9 +5,15 @@
 ## 子 Qnode 可见性, 绕过 Godot 的 visible 继承陷阱。
 ## 生命周期: Planet 用 qnode.tscn.instantiate() 创建, setup() 配置几何, queue_free() 销毁;
 ## mesh 更新只换 mesh_inst.mesh 资源(复用节点)。
+##
+## 合并宽限(merge cache): 不再细分时不立即删子树, 而是隐藏后暂存 MERGE_HOLD_SEC 秒;
+## 期间若再次细分就原地复用(命中 → 跳过重新生成 patch), 避免在细分边界抖动时反复触发
+## worker 任务(行走卡顿的主要来源之一)。超时未复用才真正释放。
 @tool
 class_name QNode
 extends Node3D
+
+const MERGE_HOLD_SEC := 3.0   # 合并宽限期(秒)
 
 var planet  # Planet(弱类型避免循环声明顺序问题)
 var A: Vector3
@@ -16,6 +22,8 @@ var C: Vector3
 var level: int
 
 var children: Variant = null  # null=叶, Array[4]=已分裂
+var _retired: Variant = null  # null=无; 否则为暂存(隐藏未删)的子树 Array[4]
+var _retire_expire: float = 0.0  # 暂存子树的过期时刻(秒, Time.get_ticks_msec/1000)
 var mesh_inst: MeshInstance3D  # 本层 mesh(qnode.tscn 预设的子 MeshInstance3D)
 var pending: bool = false
 var cancelled: bool = false
@@ -84,8 +92,8 @@ func compute_strides() -> Array:
 	return out
 
 
-# cam_pos: 行星本地系相机位置; frustum: 世界系 Plane[]; cam_moved: 相机是否移动
-func select_lod(cam_pos: Vector3, frustum: Array, cam_moved: bool) -> void:
+# cam_pos: 行星本地系相机位置; frustum: 世界系 Plane[]; cam_moved: 相机是否移动; now: 当前秒
+func select_lod(cam_pos: Vector3, frustum: Array, cam_moved: bool, now: float) -> void:
 	var p: PlanetParams = planet.params
 	var d: float = cam_pos.distance_to(center_world)
 	if d >= p.nearRadius:
@@ -94,20 +102,33 @@ func select_lod(cam_pos: Vector3, frustum: Array, cam_moved: bool) -> void:
 			_hide_subtree()
 			return
 
-	var want_split: bool = level < p.maxLevel and d < edge_len * p.splitFactor
-	if want_split:
+	# 预取环(want_prefetch, 外圈): 进入即后台生成子 patch, 但父层继续显示;
+	# 显示环(want_show, 内圈): 子全就绪后才隐藏父、显示子。两环分离 → 子提前就绪, 消除 pop-in,
+	# 并把生成峰值摊到"靠近过程"。环带同时充当合并迟滞: 在环内不退缓存。
+	var want_prefetch: bool = level < p.maxLevel and d < edge_len * p.splitFactor * p.prefetchFactor
+	if want_prefetch:
+		_expire_retired(now)
 		if children == null:
-			_split()
+			if _retired != null:
+				# 命中合并缓存: 原地复用暂存子树, 跳过重新生成 patch
+				children = _retired
+				_retired = null
+			else:
+				_split()
+		var want_show: bool = d < edge_len * p.splitFactor
 		var all_ready: bool = children[0].mesh_inst.mesh != null and children[1].mesh_inst.mesh != null and children[2].mesh_inst.mesh != null and children[3].mesh_inst.mesh != null
-		if all_ready:
+		if want_show and all_ready:
 			mesh_inst.visible = false  # 隐藏本层 mesh(子 Qnode 是兄弟, 不受影响)
 			for c in children:
-				c.select_lod(cam_pos, frustum, cam_moved)
+				c.select_lod(cam_pos, frustum, cam_moved, now)
 		else:
+			# 预热(在预取环内, 或显示环但子未就绪): 提交缺失子 patch, 父保持显示、子隐藏。
+			# 显示环内未就绪 → 前台请求(不节流, 显示必需); 仅预取环 → 预取请求(节流)。
+			var req_is_prefetch: bool = not want_show
 			for c in children:
 				if c.mesh_inst.mesh == null and not c.pending:
 					var ds: Array = c.compute_strides()
-					planet.request_mesh(c, ds, _key(ds))
+					planet.request_mesh(c, ds, _key(ds), req_is_prefetch)
 			for c in children:
 				c._hide_subtree()
 			if mesh_inst.mesh == null and not pending:
@@ -116,8 +137,10 @@ func select_lod(cam_pos: Vector3, frustum: Array, cam_moved: bool) -> void:
 				mesh_inst.visible = true
 				planet.count_node(self)
 	else:
+		# 远离: 子树退入合并缓存(隐藏暂存, 不立即删), 到期未复用才释放
 		if children != null:
-			_merge()
+			_retire_children(now)
+		_expire_retired(now)
 		if mesh_inst.mesh == null:
 			if not pending:
 				var ds := compute_strides()
@@ -148,11 +171,22 @@ func _split() -> void:
 		children.append(child)
 
 
-func _merge() -> void:
+# 合并宽限: 隐藏子树并暂存(不释放、不取消 pending), 记过期时刻。
+func _retire_children(now: float) -> void:
 	for c in children:
-		c.dispose()
-		c.queue_free()
+		c._hide_subtree()
+	_retired = children
+	_retire_expire = now + MERGE_HOLD_SEC
 	children = null
+
+
+# 暂存子树到期且仍未再细分 → 真正释放(子树仍在场景树下, queue_free 连同其后代一并回收)。
+func _expire_retired(now: float) -> void:
+	if _retired != null and now >= _retire_expire:
+		for c in _retired:
+			c.dispose()
+			c.queue_free()
+		_retired = null
 
 
 func _hide_subtree() -> void:
@@ -161,9 +195,12 @@ func _hide_subtree() -> void:
 	if children != null:
 		for c in children:
 			c._hide_subtree()
+	if _retired != null:
+		for c in _retired:
+			c._hide_subtree()
 
 
-# 销毁前清理: 立即隐藏 + 取消 pending + 递归子树。节点本身由调用方 queue_free。
+# 销毁前清理: 立即隐藏 + 取消 pending + 递归子树(含暂存)。节点本身由调用方 queue_free。
 func dispose() -> void:
 	_hide_subtree()
 	if pending:
@@ -173,6 +210,10 @@ func dispose() -> void:
 		for c in children:
 			c.dispose()
 		children = null
+	if _retired != null:
+		for c in _retired:
+			c.dispose()
+		_retired = null
 
 
 static func _key(ds: Array) -> String:

@@ -6,7 +6,7 @@
 ## 1) 边顶点用递归中点细分生成, 相邻不同层级 patch 的边顶点严格嵌套;
 ## 2) strides[edge] 表示该边相对粗邻居的抽稀倍率, 把非保留顶点吸附到保留顶点之间
 ##    的直线上 → 两侧边完全重合, 缝消失。
-## 法线用有限差分(反映真实斜率, 同一位置结果一致 → 无着色接缝)。
+## 法线用解析有限差分(采样同一高度场): 所有 patch 在共享边上法线完全一致 → 无着色接缝。
 class_name PatchBuilder
 extends RefCounted
 
@@ -76,7 +76,9 @@ static func build_patch_arrays(A: Vector3, B: Vector3, C: Vector3, N: int, R: fl
 	var col := PackedFloat32Array()
 	col.resize(main_count * 3)
 
-	var EPS: float = 1e-3
+	# 每顶点算位置/颜色/法线。法线用解析有限差分(采样同一高度场) → 所有 patch 在共享边
+	# 法线完全一致, 无着色接缝(几何法线会在 patch 边界产生可见棱, 尤其在轮廓/掠射处)。
+	var EPS := 1e-3
 	for i in range(N + 1):
 		for j in range(N + 1 - i):
 			var d: Vector3
@@ -104,25 +106,25 @@ static func build_patch_arrays(A: Vector3, B: Vector3, C: Vector3, N: int, R: fl
 			col[k3 + 1] = cc.g
 			col[k3 + 2] = cc.b
 
-			# 有限差分法线
-			var up: Vector3 = Vector3(1.0, 0.0, 0.0) if absf(d.x) <= 0.9 else Vector3(0.0, 1.0, 0.0)
-			var t1: Vector3 = d.cross(up).normalized()
-			var t2: Vector3 = d.cross(t1).normalized()
-			var d1: Vector3 = (d + t1 * EPS).normalized()
+			# 解析有限差分法线: 取两个切向偏移采样高度场, 叉乘得法线。
+			var up_n := Vector3(1.0, 0.0, 0.0) if absf(d.x) <= 0.9 else Vector3(0.0, 1.0, 0.0)
+			var t1 := d.cross(up_n).normalized()
+			var t2 := d.cross(t1).normalized()
+			var d1 := (d + t1 * EPS).normalized()
 			var rr1: float = R + terrain.height_at(d1.x, d1.y, d1.z) * max_h
-			var d2: Vector3 = (d + t2 * EPS).normalized()
+			var d2 := (d + t2 * EPS).normalized()
 			var rr2: float = R + terrain.height_at(d2.x, d2.y, d2.z) * max_h
-			var ax: float = d1.x * rr1 - pos[k3]
-			var ay: float = d1.y * rr1 - pos[k3 + 1]
-			var az: float = d1.z * rr1 - pos[k3 + 2]
-			var bx: float = d2.x * rr2 - pos[k3]
-			var by: float = d2.y * rr2 - pos[k3 + 1]
-			var bz: float = d2.z * rr2 - pos[k3 + 2]
-			var nx: float = ay * bz - az * by
-			var ny: float = az * bx - ax * bz
-			var nz: float = ax * by - ay * bx
-			var len_sq: float = nx * nx + ny * ny + nz * nz
-			var nl: float = 1.0 / sqrt(len_sq) if len_sq > 1e-24 else 1.0
+			var ax := d1.x * rr1 - pos[k3]
+			var ay := d1.y * rr1 - pos[k3 + 1]
+			var az := d1.z * rr1 - pos[k3 + 2]
+			var bx := d2.x * rr2 - pos[k3]
+			var by := d2.y * rr2 - pos[k3 + 1]
+			var bz := d2.z * rr2 - pos[k3 + 2]
+			var nx := ay * bz - az * by
+			var ny := az * bx - ax * bz
+			var nz := ax * by - ay * bx
+			var len_sq := nx * nx + ny * ny + nz * nz
+			var nl := 1.0 / sqrt(len_sq) if len_sq > 1e-24 else 1.0
 			nx *= nl
 			ny *= nl
 			nz *= nl
@@ -145,7 +147,7 @@ static func build_patch_arrays(A: Vector3, B: Vector3, C: Vector3, N: int, R: fl
 	for p in range(N + 1):
 		gi_bc.append(_row_index(N - p, p, N))  # B->C
 
-	# 缝合
+	# 缝合: 吸附边顶点位置/颜色, 并对非保留边顶点的(解析)法线插值 → 消除不同 LOD 间的裂缝与接缝
 	snap_edge(gi_ab, s_ab, pos, nor, col, N)
 	snap_edge(gi_ac, s_ac, pos, nor, col, N)
 	snap_edge(gi_bc, s_bc, pos, nor, col, N)
@@ -167,10 +169,6 @@ static func build_patch_arrays(A: Vector3, B: Vector3, C: Vector3, N: int, R: fl
 				indices.append(c0)
 				indices.append(d0)
 
-	# 纯主网格: snap_edge 缝合已消除稳态裂缝; 异步加载过渡由 QNode.select_lod 的
-	# "父级兜底"保证(子 patch 未全部就绪前父 patch 始终 visible, 永不露洞) → 无需 skirt。
-	# (旧 skirt 沿径向向内深陷最深 R*0.4, 双面渲染下在球内互相穿插成"凸起薄片",
-	#  且其法线沿用球面顶点法线而非墙面法线 → 球体内部凹凸不平。Web 端同源故同样缺陷。)
 	return {
 		"positions": pos,
 		"normals": nor,
