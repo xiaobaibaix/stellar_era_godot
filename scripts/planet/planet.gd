@@ -69,12 +69,17 @@ func _ready() -> void:
 
 
 func _process(_delta: float) -> void:
-	# 优先用 @export 指定的相机(场景里拖给 Planet, 编辑器/运行时统一);
-	# 未指定则回退到视口活动相机。
-	var cam: Camera3D = camera
-	if cam == null:
-		var vp := get_viewport()
-		cam = vp.get_camera_3d() if vp != null else null
+	# 编辑器里用 3D 视口相机驱动 LOD(用户实际观察的就是它, 所见即所得);
+	# 运行时优先用 @export 指定的游戏相机, 未指定则回退视口活动相机。
+	var cam: Camera3D = null
+	if Engine.is_editor_hint():
+		var ev := get_viewport()
+		cam = ev.get_camera_3d() if ev != null else null
+	else:
+		cam = camera
+		if cam == null:
+			var rv := get_viewport()
+			cam = rv.get_camera_3d() if rv != null else null
 	if cam != null:
 		update(cam)
 

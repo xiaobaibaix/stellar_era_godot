@@ -25,6 +25,11 @@ func _ready() -> void:
 	_cur_yaw = yaw
 	_cur_pitch = pitch
 	_cur_dist = distance
+	# far 必须覆盖最远缩放距离 + 行星尺寸。far 通过两条路径影响球:
+	# (a) 运行时本相机是渲染相机, 球比 far 远就直接被裁;
+	# (b) Planet 的 LOD 用 get_frustum()(含 far 平面)做视锥剔除, far 太小 → 视锥截短 → 整球被判视锥外被剔除。
+	near = 0.5
+	far = max_distance * 4.0
 
 
 func set_orbit(p_target: Vector3, p_dist: float) -> void:
