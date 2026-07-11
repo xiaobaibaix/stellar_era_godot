@@ -1,0 +1,8 @@
+[gd_scene format=3 uid="uid://cllgdf1hoe8c0"]
+
+[ext_resource type="Script" uid="uid://6cpf8owifn3j" path="res://scripts/planet/qnode.gd" id="1_qnode"]
+
+[node name="Qnode" type="Node3D" unique_id=2040917911]
+script = ExtResource("1_qnode")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=717483097]

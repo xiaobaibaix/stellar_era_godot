@@ -1,0 +1,33 @@
+[gd_scene format=3 uid="uid://b5hivomrse3s2"]
+
+[ext_resource type="Texture2D" uid="uid://1dvcnsbflecp" path="res://assets/picture/GalaxyBackground.hdr" id="1_0wfyh"]
+[ext_resource type="PackedScene" uid="uid://nuulebu1sk8m" path="res://scenes/planet.tscn" id="2_sugp2"]
+[ext_resource type="Script" uid="uid://cjg2w1cypjy4u" path="res://scripts/core/orbit_camera.gd" id="3_cam"]
+
+[sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_ihy5a"]
+panorama = ExtResource("1_0wfyh")
+
+[sub_resource type="Sky" id="Sky_1j6d1"]
+sky_material = SubResource("PanoramaSkyMaterial_ihy5a")
+
+[sub_resource type="Environment" id="Environment_r4dii"]
+background_mode = 2
+sky = SubResource("Sky_1j6d1")
+glow_enabled = true
+
+[node name="Main" type="Node" unique_id=502546147]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1411384491]
+environment = SubResource("Environment_r4dii")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1825422017]
+transform = Transform3D(-0.8660254, -0.43301275, 0.24999997, 0.49665427, -0.6872369, 0.5301304, -0.057743765, 0.58327, 0.8102243, 0, 0, 0)
+shadow_enabled = true
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1625772579]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 620.5573)
+current = true
+script = ExtResource("3_cam")
+
+[node name="Planet" parent="." unique_id=1626788951 node_paths=PackedStringArray("camera") instance=ExtResource("2_sugp2")]
+camera = NodePath("../Camera3D")
