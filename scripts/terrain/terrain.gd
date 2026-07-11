@@ -17,11 +17,13 @@ var alt_range: float = 1.0
 var mtn_strength: float = 0.6
 var mo_freq: float = 1.2
 
-# 噪声(大陆/山脉/域扭曲/湿度)
+# 噪声(大陆/山脉/域扭曲/湿度/板块)
 var noise_c: FastNoiseLite
 var noise_m: FastNoiseLite
 var noise_w: FastNoiseLite
 var noise_h: FastNoiseLite
+# 板块边界带: FastNoiseLite cellular(F2-F1, C++ 实现替代自写 Worley —— 后者是 height_at 头号 GDScript 热点)
+var noise_plate: FastNoiseLite
 
 # 调色板(对应 terrain.js 默认值)
 const COL_OCEAN_SHALLOW := Color(0.20, 0.45, 0.62)
@@ -55,6 +57,17 @@ static func _mk_simplex(seedv: int, freq: float) -> FastNoiseLite:
 	return n
 
 
+static func _mk_cellular(seedv: int, freq: float) -> FastNoiseLite:
+	var n := FastNoiseLite.new()
+	n.noise_type = FastNoiseLite.TYPE_CELLULAR
+	n.seed = seedv
+	n.frequency = freq
+	# cellular_distance 用默认(EUCLIDEAN); return_type=4 即 DISTANCE2_SUB → F2-F1(细胞边界处→0 起脊)。
+	# 用整数值而非枚举常量名, 避免不同 Godot 版本枚举名差异导致脚本解析失败(曾因此让整个 Terrain 类编译不过)。
+	n.cellular_return_type = 4
+	return n
+
+
 ## 从 PlanetParams 构造(主线程用)
 static func from_params(p: PlanetParams) -> Terrain:
 	var t := Terrain.new()
@@ -72,6 +85,7 @@ static func from_params(p: PlanetParams) -> Terrain:
 	t.noise_m = _mk_noise(p.mountainSeed, p.mountainFreq, p.mountainOctaves, 0.5, 2.0, FastNoiseLite.FRACTAL_RIDGED)
 	t.noise_w = _mk_simplex(p.warpSeed, p.warpFreq)
 	t.noise_h = _mk_simplex(p.moistureSeed, p.moistureFreq)
+	t.noise_plate = _mk_cellular(p.plateSeed, p.plateFreq)
 	return t
 
 
@@ -92,6 +106,7 @@ static func from_dict(d: Dictionary) -> Terrain:
 	t.noise_m = _mk_noise(d.mountainSeed, d.mountainFreq, d.mountainOctaves, 0.5, 2.0, FastNoiseLite.FRACTAL_RIDGED)
 	t.noise_w = _mk_simplex(d.warpSeed, d.warpFreq)
 	t.noise_h = _mk_simplex(d.moistureSeed, d.moistureFreq)
+	t.noise_plate = _mk_cellular(d.plateSeed, d.plateFreq)
 	return t
 
 
@@ -113,11 +128,11 @@ func height_at(x: float, y: float, z: float) -> float:
 	# 山脉(ridged): ridged 噪声映射到 [0,1]
 	var mr: float = noise_m.get_noise_3d(wx, wy, wz)
 	var mtn: float = clampf(1.0 - abs(mr), 0.0, 1.0)
-	# Worley 板块边界带
+	# 板块边界带: cellular F2-F1(边界处→0, 内部→大); 1-(F2-F1) 在边界→1 起脊
 	var belt: float = 0.0
 	if plate > 0.0:
-		var wv := NoiseWorley.worley(wx, wy, wz, pf, plate_seed)
-		belt = pow(1.0 - clampf(wv.y - wv.x, 0.0, 1.0), 6.0)
+		var f2_f1: float = noise_plate.get_noise_3d(wx, wy, wz)
+		belt = pow(1.0 - clampf(f2_f1, 0.0, 1.0), 6.0)
 	var mountains: float = (mtn + belt * plate) * land
 	return cont + mountains * mtn_strength
 

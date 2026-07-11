@@ -4,6 +4,7 @@
 [ext_resource type="Script" uid="uid://7boxikbjeden" path="res://scripts/core/planet_params.gd" id="2_params"]
 
 [sub_resource type="Resource" id="PlanetParams_1"]
+resource_local_to_scene = true
 script = ExtResource("2_params")
 radius = 326.0
 

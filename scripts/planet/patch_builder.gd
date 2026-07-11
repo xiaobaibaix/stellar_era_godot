@@ -11,6 +11,7 @@ class_name PatchBuilder
 extends RefCounted
 
 
+@warning_ignore("integer_division")
 static func _row_index(i: int, j: int, N: int) -> int:
 	return i * (N + 1) - (i * (i - 1)) / 2 + j
 
@@ -35,6 +36,7 @@ static func snap_edge(gi: PackedInt32Array, stride: int, pos: PackedFloat32Array
 	for k in range(1, N):
 		if k % stride == 0:
 			continue
+		@warning_ignore("integer_division")
 		var lo: int = (k / stride) * stride
 		var hi: int = lo + stride
 		var t: float = float(k - lo) / float(stride)

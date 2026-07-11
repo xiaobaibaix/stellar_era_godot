@@ -29,6 +29,8 @@ var _cam_moved: bool = true
 var _wire: bool = false
 var _body_mesh: Node3D  # 所有 Qnode 的容器节点(BodyMesh)
 var _qnode_scene: PackedScene  # qnode.tscn 预制体
+var _last_params_hash: int = 0  # 参数指纹(轮询检测变化触发 rebuild, 绕过 @tool 信号不可靠)
+var _param_tick: int = 0
 
 
 # 作为预制体节点: 进树即自动构建; _process 自动取场景活动相机驱动 LOD。
@@ -65,12 +67,24 @@ func _ready() -> void:
 	if roots.is_empty():
 		_build_noise()
 		_build_roots()
+	_last_params_hash = _compute_params_hash()
 	_log_ready()
 
 
 func _process(_delta: float) -> void:
-	# 编辑器里用 3D 视口相机驱动 LOD(用户实际观察的就是它, 所见即所得);
-	# 运行时优先用 @export 指定的游戏相机, 未指定则回退视口活动相机。
+	# 信号连接保险(运行时用)
+	if params != null and params.has_signal("param_changed") and not params.is_connected("param_changed", _on_param_changed):
+		params.connect("param_changed", _on_param_changed)
+	# 参数指纹轮询(编辑器+运行时统一): 每 15 帧检测参数变化 → rebuild。
+	# @tool 下 local_to_scene 副本的 param_changed 信号不可靠, 改用轮询(参照 planet_node.gd)。
+	_param_tick += 1
+	if _param_tick % 15 == 0:
+		var h: int = _compute_params_hash()
+		if h != _last_params_hash:
+			_last_params_hash = h
+			rebuild()
+			return
+	# 编辑器用 3D 视口相机驱动 LOD; 运行时优先 @export 相机, 回退视口活动相机。
 	var cam: Camera3D = null
 	if Engine.is_editor_hint():
 		var ev := get_viewport()
@@ -82,6 +96,37 @@ func _process(_delta: float) -> void:
 			cam = rv.get_camera_3d() if rv != null else null
 	if cam != null:
 		update(cam)
+
+
+# 参数指纹: 任一关键参数变化 → 哈希变 → _process 轮询到就 rebuild。绕过信号不可靠。
+func _compute_params_hash() -> int:
+	var p: PlanetParams = params
+	if p == null:
+		return 0
+	var h: int = hash(p.radius)
+	h = (h * 31 + hash(p.maxHeight)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.seaLevel)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.patchResolution)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.continentSeed)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.continentFreq)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.continentOctaves)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.continentGain)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.continentLacunarity)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.mountainSeed)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.mountainFreq)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.mountainOctaves)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.mountainStrength)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.warpSeed)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.warpStrength)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.warpFreq)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.plateSeed)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.plateFreq)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.plateStrength)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.moistureSeed)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.moistureFreq)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.useClimate)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.climateAltRange)) & 0x7FFFFFFF
+	return h
 
 
 func _diag_start() -> void:
@@ -148,7 +193,7 @@ func _build_roots() -> void:
 		var data := PatchBuilder.build_patch_arrays(
 			r.A, r.B, r.C, params.patchResolution, params.radius,
 			params.maxHeight, terrain, [1, 1, 1])
-		r.set_mesh(_gen_array_mesh(data), int(data.indices.size() / 3))
+		r.set_mesh(_gen_array_mesh(data), int(data.indices.size() / 3.0))
 		r.mesh_inst.visible = true  # 根 patch 默认可见(基础球壳); select_lod 运行后接管细分/剔除
 		r.built_key = "1,1,1"
 		roots.append(r)
@@ -268,7 +313,7 @@ func _on_mesh_job(job_id: int, data: Dictionary) -> void:
 	node.pending = false
 	if not node.cancelled and int(data.gen) == _gen:
 		var was_visible := node.mesh_inst.visible
-		node.set_mesh(_gen_array_mesh(data), int(data.indices.size() / 3))
+		node.set_mesh(_gen_array_mesh(data), int(data.indices.size() / 3.0))
 		node.mesh_inst.visible = was_visible
 		node.built_key = node.req_key
 
