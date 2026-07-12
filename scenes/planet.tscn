@@ -17,3 +17,5 @@ params = SubResource("PlanetParams_1")
 [node name="Atmosphere" type="Node3D" parent="." unique_id=1317759853]
 
 [node name="Ocean" type="Node3D" parent="." unique_id=1424612937]
+
+[node name="Cloud" type="Node3D" parent="." unique_id=1465415366]

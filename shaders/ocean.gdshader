@@ -1,7 +1,8 @@
 shader_type spatial;
 // 海洋(移植 effects.js createOcean)。海平面球: 菲涅尔 + Lambert + Blinn-Phong(仅向阳侧)。
-// 不写深度(depth_draw_never) → 大气壳用解析地面球(uRground)终止积分(与 web 一致)。
-render_mode blend_mix, depth_draw_never, cull_back;
+// 不透明(写颜色+深度): 必须进 opaque 缓冲 → 大气壳的 screen_texture/depth_texture 才能读到海洋,
+// 云才能正确合成在海洋之上(透明海洋不在 screen_texture 里, 会被大气壳的 ALPHA=1.0 替换或盖在云上)。
+render_mode cull_back;
 
 uniform vec3 u_sun_dir = vec3(0.739, 0.443, 0.515);   // normalize(1, 0.6, 0.8)
 uniform vec3 u_deep = vec3(0.039, 0.118, 0.247);      // 0x0a1e3f
@@ -27,7 +28,5 @@ void fragment() {
 	float spec = pow(max(dot(N, H), 0.0), 120.0) * step(0.0001, diff);  // 仅向阳侧高光
 	vec3 col = mix(u_deep, u_shallow, fres);
 	col = col * (u_ambient + (1.0 - u_ambient) * diff) + vec3(1.0, 0.96, 0.85) * spec * 0.9;
-	float alpha = clamp(mix(0.72, 0.96, fres), 0.0, 1.0);
 	ALBEDO = col;
-	ALPHA = alpha;
 }

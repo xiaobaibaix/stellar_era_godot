@@ -209,6 +209,20 @@ func _compute_visual_hash() -> int:
 	h = (h * 31 + hash(p.sunAzimuth)) & 0x7FFFFFFF
 	h = (h * 31 + hash(int(p.showOcean))) & 0x7FFFFFFF
 	h = (h * 31 + hash(int(p.showAtmosphere))) & 0x7FFFFFFF
+	h = (h * 31 + hash(int(p.showClouds))) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.cloudBottom)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.cloudTop)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.cloudCoverage)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.cloudDensity)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.cloudFreq)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.cloudWarp)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.cloudWindSpeed)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.cloudSteps)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.cloudLightSteps)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.cloudAbsorb)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.cloudSilver)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.cloudPowder)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.cloudShadow)) & 0x7FFFFFFF
 	return h
 
 
@@ -260,9 +274,9 @@ func _on_param_changed(key: String) -> void:
 		"atmoScale":
 			_resize_effects()
 		_:
-			# 其余 atmo* 散射参数 → 推到大气 shader uniform
-			if key.begins_with("atmo"):
-				_apply_atmo_uniforms()
+			# atmo*/cloud* 散射参数 + showClouds → 推大气 shader uniform(运行时信号路径; 编辑器靠视觉指纹轮询)
+			if key.begins_with("atmo") or key.begins_with("cloud") or key == "showClouds":
+				_apply_visual_changes()
 	if params.requires_rebuild(key):
 		rebuild()
 
@@ -613,6 +627,7 @@ func _apply_atmo_uniforms() -> void:
 	if _atmo_mat == null or params == null:
 		return
 	var p := params
+	var R: float = p.radius
 	var ray_ratio := Vector3(0.1066, 0.3245, 0.6830)
 	var ozo_ratio := Vector3(0.35, 1.0, 0.045)
 	_atmo_mat.set_shader_parameter("u_scatter_r", ray_ratio * p.atmoRayleigh)
@@ -628,6 +643,22 @@ func _apply_atmo_uniforms() -> void:
 	_atmo_mat.set_shader_parameter("u_shadow_softness", p.atmoShadowSoftness)
 	_atmo_mat.set_shader_parameter("u_twilight", p.atmoTwilight)
 	_atmo_mat.set_shader_parameter("u_dither", p.atmoDither)
+	# 体积云(与大气同一 raymarch 积分): 云底/顶=radius×cloudBottom/Top; showClouds 开关 u_clouds_on。
+	# u_time 用 shader 内置 TIME; u_cwind/u_suncolor/u_ambient 用 shader 默认值(非 PlanetParams 项)。
+	_atmo_mat.set_shader_parameter("u_clouds_on", 1.0 if p.showClouds else 0.0)
+	_atmo_mat.set_shader_parameter("u_cloud_steps", p.cloudSteps)
+	_atmo_mat.set_shader_parameter("u_cbottom", R * p.cloudBottom)
+	_atmo_mat.set_shader_parameter("u_ctop", R * p.cloudTop)
+	_atmo_mat.set_shader_parameter("u_coverage", p.cloudCoverage)
+	_atmo_mat.set_shader_parameter("u_cdensity", p.cloudDensity)
+	_atmo_mat.set_shader_parameter("u_cfreq", p.cloudFreq)
+	_atmo_mat.set_shader_parameter("u_cwarp", p.cloudWarp)
+	_atmo_mat.set_shader_parameter("u_cwind_speed", p.cloudWindSpeed)
+	_atmo_mat.set_shader_parameter("u_clight_steps", p.cloudLightSteps)
+	_atmo_mat.set_shader_parameter("u_cabsorb", p.cloudAbsorb)
+	_atmo_mat.set_shader_parameter("u_silver", p.cloudSilver)
+	_atmo_mat.set_shader_parameter("u_powder", p.cloudPowder)
+	_atmo_mat.set_shader_parameter("u_cshadow", p.cloudShadow)
 	_atmo_mat.set_shader_parameter("u_sun_dir", _sun_dir)
 	_atmo_mat.set_shader_parameter("u_planet_center", global_position)
 
