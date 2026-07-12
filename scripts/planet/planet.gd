@@ -223,6 +223,11 @@ func _compute_visual_hash() -> int:
 	h = (h * 31 + hash(p.cloudSilver)) & 0x7FFFFFFF
 	h = (h * 31 + hash(p.cloudPowder)) & 0x7FFFFFFF
 	h = (h * 31 + hash(p.cloudShadow)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.oceanDeep)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.oceanShallow)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.oceanAmbient)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.oceanSpecPower)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.oceanSpecStrength)) & 0x7FFFFFFF
 	return h
 
 
@@ -232,6 +237,7 @@ func _apply_visual_changes() -> void:
 		return
 	_resize_effects()        # atmoScale/seaLevel/radius → 壳与海平面缩放 + u_rground/u_ratmo
 	_apply_atmo_uniforms()   # atmo* 散射参数 → 大气 shader uniform
+	_apply_ocean_uniforms()  # ocean* 海洋参数 → 海洋 shader uniform
 	_update_sun()            # sunElevation/sunAzimuth → u_sun_dir + sun_light 朝向
 	if _ocean_mesh != null:
 		_ocean_mesh.visible = params.showOcean
@@ -274,8 +280,8 @@ func _on_param_changed(key: String) -> void:
 		"atmoScale":
 			_resize_effects()
 		_:
-			# atmo*/cloud* 散射参数 + showClouds → 推大气 shader uniform(运行时信号路径; 编辑器靠视觉指纹轮询)
-			if key.begins_with("atmo") or key.begins_with("cloud") or key == "showClouds":
+			# atmo*/cloud*/ocean* 散射参数 + showClouds → 推 shader uniform(运行时信号路径; 编辑器靠视觉指纹轮询)
+			if key.begins_with("atmo") or key.begins_with("cloud") or key.begins_with("ocean") or key == "showClouds":
 				_apply_visual_changes()
 	if params.requires_rebuild(key):
 		rebuild()
@@ -543,6 +549,7 @@ func rebuild() -> void:
 	_build_roots()
 	_resize_effects()      # 海平面/壳半径随 radius 重算
 	_apply_atmo_uniforms() # 重新推大气 uniform
+	_apply_ocean_uniforms() # 重新推海洋 uniform
 	if _wire:
 		set_wireframe(true)
 
@@ -561,6 +568,7 @@ func _build_effects() -> void:
 	_atmo_mat = _ensure_shader_mat(_atmo_mesh, _atmo_shader)
 	_resize_effects()
 	_apply_atmo_uniforms()
+	_apply_ocean_uniforms()
 	if _ocean_mesh != null:
 		_ocean_mesh.visible = params.showOcean
 	if _atmo_mesh != null:
@@ -661,6 +669,18 @@ func _apply_atmo_uniforms() -> void:
 	_atmo_mat.set_shader_parameter("u_cshadow", p.cloudShadow)
 	_atmo_mat.set_shader_parameter("u_sun_dir", _sun_dir)
 	_atmo_mat.set_shader_parameter("u_planet_center", global_position)
+
+
+# ocean* 海洋参数 → 海洋 shader uniform(深/浅水色 + 夜侧亮度 + 高光锐度/强度)。
+func _apply_ocean_uniforms() -> void:
+	if _ocean_mat == null or params == null:
+		return
+	var p := params
+	_ocean_mat.set_shader_parameter("u_deep", Vector3(p.oceanDeep.r, p.oceanDeep.g, p.oceanDeep.b))
+	_ocean_mat.set_shader_parameter("u_shallow", Vector3(p.oceanShallow.r, p.oceanShallow.g, p.oceanShallow.b))
+	_ocean_mat.set_shader_parameter("u_ambient", p.oceanAmbient)
+	_ocean_mat.set_shader_parameter("u_spec_power", p.oceanSpecPower)
+	_ocean_mat.set_shader_parameter("u_spec_strength", p.oceanSpecStrength)
 
 
 # 由 sunElevation/sunAzimuth 算 planet-local sun_dir; push 到两 shader + 旋转 sun_light(-Z 对齐)。

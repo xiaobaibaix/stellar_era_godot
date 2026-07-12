@@ -17,9 +17,6 @@ signal bulk_changed
 ## 地形隆起的最大高度(相对半径的比例, 实际位移 = height_at × maxHeight)。越大山脉越夸张。
 @export_range(0.0, 50.0, 0.1) var maxHeight: float = 8.0:
 	set(v): maxHeight = v; param_changed.emit("maxHeight")
-## 海平面高度阈值: height_at < seaLevel 视为海洋(配色 + 后续海面 mesh)。
-@export_range(-0.5, 0.5, 0.01) var seaLevel: float = 0.0:
-	set(v): seaLevel = v; param_changed.emit("seaLevel")
 
 # ---- 外观 ----
 @export_group("外观")
@@ -174,6 +171,28 @@ signal bulk_changed
 ## 云在地表的投影强度。
 @export_range(0.0, 1.0, 0.01) var cloudShadow: float = 0.7:
 	set(v): cloudShadow = v; param_changed.emit("cloudShadow")
+
+# ---- 海洋 ----
+@export_group("海洋")
+## 海平面高度阈值: height_at < seaLevel 视为海洋(陆地/海洋配色); 海洋球壳半径 = radius + seaLevel×maxHeight。
+## 改它会重建地形网格(陆地/海洋分布变)。
+@export_range(-0.5, 0.5, 0.01) var seaLevel: float = 0.0:
+	set(v): seaLevel = v; param_changed.emit("seaLevel")
+## 深水色(海平面看向深处的主色)。
+@export var oceanDeep: Color = Color(0.039, 0.118, 0.247):
+	set(v): oceanDeep = v; param_changed.emit("oceanDeep")
+## 浅水色(菲涅尔边缘/浅滩亮色)。
+@export var oceanShallow: Color = Color(0.180, 0.471, 0.659):
+	set(v): oceanShallow = v; param_changed.emit("oceanShallow")
+## 夜侧基础亮度(0=全黑, 1=日夜同亮)。
+@export_range(0.0, 1.0, 0.01) var oceanAmbient: float = 0.2:
+	set(v): oceanAmbient = v; param_changed.emit("oceanAmbient")
+## 高光锐度(Blinn-Phong power, 越大高光越集中越亮)。
+@export_range(1.0, 512.0, 1.0) var oceanSpecPower: float = 120.0:
+	set(v): oceanSpecPower = v; param_changed.emit("oceanSpecPower")
+## 高光强度。
+@export_range(0.0, 4.0, 0.01) var oceanSpecStrength: float = 0.9:
+	set(v): oceanSpecStrength = v; param_changed.emit("oceanSpecStrength")
 
 # ---- 体积光 ----
 @export_group("体积光")

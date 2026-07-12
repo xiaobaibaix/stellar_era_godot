@@ -8,6 +8,8 @@ uniform vec3 u_sun_dir = vec3(0.739, 0.443, 0.515);   // normalize(1, 0.6, 0.8)
 uniform vec3 u_deep = vec3(0.039, 0.118, 0.247);      // 0x0a1e3f
 uniform vec3 u_shallow = vec3(0.180, 0.471, 0.659);   // 0x2e78a8
 uniform float u_ambient = 0.2;                        // 夜侧基础亮度(0=全黑)
+uniform float u_spec_power = 120.0;                   // 高光锐度(Blinn-Phong power)
+uniform float u_spec_strength = 0.9;                  // 高光强度
 
 varying vec3 v_world_normal;
 varying vec3 v_world_pos;
@@ -25,8 +27,8 @@ void fragment() {
 	float fres = pow(1.0 - max(dot(N, V), 0.0), 3.0);
 	float diff = max(dot(N, L), 0.0);
 	vec3 H = normalize(L + V);
-	float spec = pow(max(dot(N, H), 0.0), 120.0) * step(0.0001, diff);  // 仅向阳侧高光
+	float spec = pow(max(dot(N, H), 0.0), u_spec_power) * step(0.0001, diff);  // 仅向阳侧高光
 	vec3 col = mix(u_deep, u_shallow, fres);
-	col = col * (u_ambient + (1.0 - u_ambient) * diff) + vec3(1.0, 0.96, 0.85) * spec * 0.9;
+	col = col * (u_ambient + (1.0 - u_ambient) * diff) + vec3(1.0, 0.96, 0.85) * spec * u_spec_strength;
 	ALBEDO = col;
 }
