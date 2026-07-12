@@ -1,0 +1,54 @@
+[gd_scene format=3 uid="uid://dvvumqb10vtc8"]
+
+[ext_resource type="Script" path="res://scripts/solar/solar_app.gd" id="1_228jm"]
+[ext_resource type="PackedScene" uid="uid://hnhf64wwapfq" path="res://scenes/star.tscn" id="2_teypr"]
+[ext_resource type="PackedScene" uid="uid://nuulebu1sk8m" path="res://scenes/planet.tscn" id="2_tjb5t"]
+[ext_resource type="Script" uid="uid://7boxikbjeden" path="res://scripts/core/planet_params.gd" id="3_teypr"]
+[ext_resource type="PackedScene" uid="uid://b1fykx0pub5mk" path="res://scenes/satellite.tscn" id="5_sjaf3"]
+
+[sub_resource type="Resource" id="Resource_teypr"]
+resource_local_to_scene = true
+script = ExtResource("3_teypr")
+radius = 326.0
+
+[sub_resource type="Resource" id="Resource_sjaf3"]
+resource_local_to_scene = true
+script = ExtResource("3_teypr")
+radius = 326.0
+
+[sub_resource type="Resource" id="Resource_2yas3"]
+resource_local_to_scene = true
+script = ExtResource("3_teypr")
+radius = 326.0
+
+[sub_resource type="Resource" id="Resource_86ma8"]
+resource_local_to_scene = true
+script = ExtResource("3_teypr")
+radius = 326.0
+
+[node name="SolarSystem" type="Node" unique_id=1820891001]
+script = ExtResource("1_228jm")
+
+[node name="OmniLight3D" type="OmniLight3D" parent="." unique_id=887496388]
+
+[node name="Sun" parent="." unique_id=164217704 instance=ExtResource("2_teypr")]
+
+[node name="Planets" type="Node3D" parent="." unique_id=812873366]
+
+[node name="Planet1" parent="Planets" unique_id=1923769825 instance=ExtResource("2_tjb5t")]
+params = SubResource("Resource_teypr")
+
+[node name="Planet2" parent="Planets" unique_id=1799809476 instance=ExtResource("2_tjb5t")]
+params = SubResource("Resource_sjaf3")
+
+[node name="Satellite1" parent="Planets/Planet2" unique_id=1431174679 instance=ExtResource("5_sjaf3")]
+
+[node name="Planet3" parent="Planets" unique_id=251485853 instance=ExtResource("2_tjb5t")]
+params = SubResource("Resource_2yas3")
+
+[node name="Satellite1" parent="Planets/Planet3" unique_id=385585928 instance=ExtResource("5_sjaf3")]
+
+[node name="Satellite2" parent="Planets/Planet3" unique_id=1136430003 instance=ExtResource("5_sjaf3")]
+
+[node name="Planet4" parent="Planets" unique_id=384528256 instance=ExtResource("2_tjb5t")]
+params = SubResource("Resource_86ma8")
