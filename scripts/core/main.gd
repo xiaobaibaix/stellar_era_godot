@@ -17,6 +17,7 @@ extends Node
 @export var player_display_ball: MeshInstance3D   # 跟随角色模式: 显示环球(跟随角色)
 @export var player_preload_ball: MeshInstance3D   # 跟随角色模式: 预取环球(跟随角色)
 @export var planet: Planet                 # 用来按真实 LOD 阈值缩放调试球(读 params + target_level_at)
+@export var fps_label: Label                # 右上角 FPS 显示(运行时每 0.25s 刷新)
 
 ## 显示 LOD 调试球。编辑器 Inspector 勾选 或 运行时 F2/「显示ball」; setter 统一改可见性。
 @export var show_balls: bool = false:
@@ -27,6 +28,7 @@ var _orbit_parent: Node
 var _orbit_transform: Transform3D
 var _in_player_mode: bool = false
 var _wireframe: bool = false
+var _fps_acc: float = 0.0   # FPS 文本刷新累加器
 
 
 func _ready() -> void:
@@ -60,6 +62,7 @@ func _setup_ball(b: MeshInstance3D, c: Color) -> void:
 
 
 func _process(delta: float) -> void:
+	_update_fps(delta)
 	# 当前模式用哪对球: 跟随角色模式用 player 球(跟随角色), 否则用 Camera 球(跟随相机)
 	var use_player := _in_player_mode
 	var ad: MeshInstance3D = player_display_ball if use_player else display_ball
@@ -101,6 +104,15 @@ func _process(delta: float) -> void:
 		ap.visible = true
 	# 球径缩放到真实 LOD 阈值(跟 splitFactor/prefetchFactor/当前层级 联动)
 	_size_balls_to_lod(fp, delta, ad, ap)
+
+
+func _update_fps(delta: float) -> void:
+	if fps_label == null:
+		return
+	_fps_acc += delta
+	if _fps_acc >= 0.25:
+		_fps_acc = 0.0
+		fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
 
 
 func _unhandled_input(event: InputEvent) -> void:

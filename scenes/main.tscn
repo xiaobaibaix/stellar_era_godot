@@ -65,7 +65,7 @@ no_depth_test = true
 shading_mode = 0
 albedo_color = Color(1, 0.6, 0.15, 0.1)
 
-[node name="Main" type="Node" unique_id=502546147 node_paths=PackedStringArray("camera", "player", "toggle", "wire_toggle", "ball_toggle", "display_ball", "preload_ball", "player_display_ball", "player_preload_ball", "planet")]
+[node name="Main" type="Node" unique_id=502546147 node_paths=PackedStringArray("camera", "player", "toggle", "wire_toggle", "ball_toggle", "display_ball", "preload_ball", "player_display_ball", "player_preload_ball", "planet", "fps_label")]
 script = ExtResource("6_main")
 camera = NodePath("Camera/Camera3D")
 player = NodePath("Planet/Player/CharacterBody3D")
@@ -77,6 +77,7 @@ preload_ball = NodePath("Camera/PreloadBall")
 player_display_ball = NodePath("Planet/DisplayBall")
 player_preload_ball = NodePath("Planet/PreloadBall")
 planet = NodePath("Planet")
+fps_label = NodePath("FpsLabel")
 show_balls = true
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1411384491]
@@ -138,3 +139,10 @@ text = "显示Ball"
 offset_right = 112.0
 offset_bottom = 31.0
 text = "跟随角色"
+
+[node name="FpsLabel" type="Label" parent="." unique_id=1044356931]
+offset_left = 1036.0
+offset_right = 1136.0
+offset_bottom = 26.0
+text = "FPS: 131"
+horizontal_alignment = 2
