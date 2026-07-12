@@ -112,7 +112,14 @@ func _update_fps(delta: float) -> void:
 	_fps_acc += delta
 	if _fps_acc >= 0.25:
 		_fps_acc = 0.0
-		fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
+		var line := "FPS:%d" % Engine.get_frames_per_second()
+		if planet != null:
+			# 用 get() 容错: planet.gd 偶处 @tool 重编译瞬态, 直接读 stats 会刷错。
+			var st = planet.get("stats")
+			if st is Dictionary:
+				var tri_k := float(st.get("triangles", 0)) * 0.001
+				line += "  patch:%d  tri:%.1fk  job:%d" % [st.get("patches", 0), tri_k, st.get("inflight", 0)]
+		fps_label.text = line
 
 
 func _unhandled_input(event: InputEvent) -> void:

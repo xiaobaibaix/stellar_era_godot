@@ -23,6 +23,8 @@ var material: StandardMaterial3D
 var _wire_fill_mat: StandardMaterial3D  # 线框模式实心遮挡面材质(surface 0)
 var _wire_line_mat: StandardMaterial3D  # 线框模式亮线段材质(surface 1)
 var stats: Dictionary = {"patches": 0, "triangles": 0, "inflight": 0}
+var _tla_cache: Dictionary = {}       # target_level_at 缓存: 量化方向(Vector3i) -> level
+var _tla_cache_gen: int = -1          # 缓存所属 generation; _gen 变(rebuild)时清空
 
 var _gen: int = 0
 var _pool: PatchWorkerPool
@@ -37,9 +39,14 @@ var _qnode_scene: PackedScene  # qnode.tscn 预制体
 var _last_params_hash: int = 0  # 参数指纹(轮询检测变化触发 rebuild, 绕过 @tool 信号不可靠)
 var _param_tick: int = 0
 # 预取节流: 预取请求每帧上限 + 总 inflight 上限。超过则跳过预取 → 让位给"显示必需"的前景请求。
-const PREFETCH_PER_FRAME := 3
-const PREFETCH_INFLIGHT_CAP := 8
+const PREFETCH_PER_FRAME := 8
+const PREFETCH_INFLIGHT_CAP := 16
+const FOREGROUND_INFLIGHT_CAP := 24  # 前景(显示必需)job 总上限; 防靠近/高细分时一次堆上百 job
+const LOD_TICK_EVERY := 3   # select_lod 每 N 帧跑一次(遍历整棵四叉树是主线程热点); ≈20Hz 够 LOD 用
+const STRIDE_BUDGET := 24   # 每 LOD pass 最多 compute_strides 次数(每次=3 target_level_at); 封顶 → 与移动速度解耦
 var _prefetch_this_frame: int = 0
+var _lod_tick: int = 0
+var _stride_used: int = 0
 
 
 # 作为预制体节点: 进树即自动构建; _process 自动取场景活动相机驱动 LOD。
@@ -219,7 +226,7 @@ func _build_roots() -> void:
 			r.A, r.B, r.C, params.patchResolution, params.radius,
 			params.maxHeight, terrain, [1, 1, 1])
 		r._patch_data = data
-		r.set_mesh(_gen_array_mesh(data), int(data.indices.size() / 3.0))
+		r.set_mesh(_gen_array_mesh(data), int(data.tris))
 		_apply_node_materials(r)
 		r.mesh_inst.visible = true  # 根 patch 默认可见(基础球壳); select_lod 运行后接管细分/剔除
 		r.built_key = "1,1,1"
@@ -240,6 +247,18 @@ func _root_containing(p: Vector3) -> Array:
 
 # 邻居目标层级查询(纯几何, 与四叉树分裂规则一致)
 func target_level_at(p: Vector3) -> int:
+	# 缓存: target_level_at 是纯几何(给定 p, 结果依赖当前 _cam_pos)。按量化方向做 key 跨帧复用 ——
+	# 相机缓慢移动时, 稳定可见 patch 的边采样点几乎不变 → 高命中; level 随相机位置分段常数,
+	# 1 帧 staleness 只在跨阈值瞬间差 1 层(自纠正)。rebuild(_gen 变)时清缓存。
+	if _tla_cache == null:
+		_tla_cache = {}   # @tool 重载后已存在的实例不会重跑默认初始化器 → 懒初始化
+	if _tla_cache_gen != _gen:
+		_tla_cache.clear()
+		_tla_cache_gen = _gen
+	var key := Vector3i(int(p.x * 10000.0), int(p.y * 10000.0), int(p.z * 10000.0))
+	var cached: Variant = _tla_cache.get(key, null)
+	if cached != null:
+		return int(cached)
 	var R: float = params.radius
 	var sf: float = params.splitFactor
 	var max_l: int = params.maxLevel
@@ -270,6 +289,7 @@ func target_level_at(p: Vector3) -> int:
 			level += 1
 		else:
 			break
+	_tla_cache[key] = level
 	return level
 
 
@@ -278,23 +298,20 @@ func target_level_at(p: Vector3) -> int:
 # Godot 的 ArrayMesh 需要 PackedVector3Array / PackedColorArray, 主线程转换
 # (patch 顶点 ~160, 开销可忽略)。只生成 ArrayMesh 资源, 由 QNode.set_mesh 填进去。
 func _gen_array_mesh(data: Dictionary) -> ArrayMesh:
-	var positions: PackedFloat32Array = data.positions
+	# worker 输出索引网格: 唯一顶点 PackedVector3Array/PackedColorArray + indices(PackedInt32Array)。
+	# flat→Vector3 转换已在 worker 线程做掉; 主线程只需把数组连同 ARRAY_INDEX 交给 ArrayMesh。
+	var verts: PackedVector3Array = data.verts
+	var norms: PackedVector3Array = data.norms
+	var cols: PackedColorArray = data.cols
 	var indices: PackedInt32Array = data.indices
-	@warning_ignore("integer_division")
-	var vcount: int = positions.size() / 3
-	var verts := PackedVector3Array()
-	verts.resize(vcount)
-	for i in range(vcount):
-		var j: int = i * 3
-		verts[i] = Vector3(positions[j], positions[j + 1], positions[j + 2])
+	var tris: int = data.tris
 	var am := ArrayMesh.new()
 	if _wire:
-		# 线框用双 surface: surface0 实心面(深色、CULL_BACK、写深度)挡背面; surface1 线段(亮、不写深度)只测深度。
-		# → 只看到朝向相机的可见线, 背面/远侧线被 surface0 的深度剔除。material.wireframe 在本渲染器不生效。
-		# 遮挡面顶点略向内缩(×0.99998), 保证线段深度严格在遮挡面之前, 避免同深度 z-fight。
+		# 线框双 surface: surface0 实心遮挡面(索引三角, 深色 CULL_BACK 写深度, 略内缩避免 z-fight);
+		# surface1 线段(亮、只测深度)。线段索引由三角索引 (a,b,c)→(a,b,b,c,c,a) 展开。
 		var verts_fill := PackedVector3Array()
-		verts_fill.resize(vcount)
-		for i in range(vcount):
+		verts_fill.resize(verts.size())
+		for i in range(verts.size()):
 			verts_fill[i] = verts[i] * 0.99998
 		var surf_f := []
 		surf_f.resize(Mesh.ARRAY_MAX)
@@ -303,9 +320,7 @@ func _gen_array_mesh(data: Dictionary) -> ArrayMesh:
 		am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, surf_f)
 
 		var line_idx := PackedInt32Array()
-		@warning_ignore("integer_division")
-		var ntris: int = indices.size() / 3
-		for t in range(ntris):
+		for t in range(tris):
 			var a: int = indices[t * 3]
 			var b: int = indices[t * 3 + 1]
 			var c: int = indices[t * 3 + 2]
@@ -321,16 +336,7 @@ func _gen_array_mesh(data: Dictionary) -> ArrayMesh:
 		surf_l[Mesh.ARRAY_INDEX] = line_idx
 		am.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, surf_l)
 	else:
-		var normals: PackedFloat32Array = data.normals
-		var colors: PackedFloat32Array = data.colors
-		var norms := PackedVector3Array()
-		norms.resize(vcount)
-		var cols := PackedColorArray()
-		cols.resize(vcount)
-		for i in range(vcount):
-			var j: int = i * 3
-			norms[i] = Vector3(normals[j], normals[j + 1], normals[j + 2])
-			cols[i] = Color(colors[j], colors[j + 1], colors[j + 2])
+		# 索引三角面: ARRAY_INDEX 复用共享顶点(顶点数约为非索引的 1/5)
 		var surf := []
 		surf.resize(Mesh.ARRAY_MAX)
 		surf[Mesh.ARRAY_VERTEX] = verts
@@ -347,10 +353,13 @@ func request_mesh(node: QNode, strides: Array, key: String, is_prefetch: bool = 
 		return
 	if node.mesh_inst.mesh != null and node.built_key == key:
 		return
-	# 预取节流: 前景(显示必需)请求优先, 永不跳过; 预取请求只在每帧配额 + inflight 有余力时提交,
-	# 避免与显示争抢 worker 反而拖慢可见区域。
+	# inflight 上限: 防止靠近/高细分时一次堆上百个 job → 完成回调挤爆主线程造成卡顿。
+	# 前景(显示必需)上限高(24)、优先; 预取上限低(8)。超限就让位, 下个 select_lod 再补。
+	var cap: int = FOREGROUND_INFLIGHT_CAP if not is_prefetch else PREFETCH_INFLIGHT_CAP
+	if _pending >= cap:
+		return
 	if is_prefetch:
-		if _prefetch_this_frame >= PREFETCH_PER_FRAME or _pending >= PREFETCH_INFLIGHT_CAP:
+		if _prefetch_this_frame >= PREFETCH_PER_FRAME:
 			return
 		_prefetch_this_frame += 1
 	node.pending = true
@@ -383,10 +392,19 @@ func _on_mesh_job(job_id: int, data: Dictionary) -> void:
 	if not node.cancelled and int(data.gen) == _gen:
 		var was_visible := node.mesh_inst.visible
 		node._patch_data = data
-		node.set_mesh(_gen_array_mesh(data), int(data.indices.size() / 3.0))
+		node.set_mesh(_gen_array_mesh(data), int(data.tris))
 		_apply_node_materials(node)
 		node.mesh_inst.visible = was_visible
 		node.built_key = node.req_key
+
+
+# 每 LOD pass 的 compute_strides 配额: 超过 STRIDE_BUDGET 次返回 false → 调用方跳过(等下个 pass)。
+# 把"新 patch 首次缝合"的主线程成本封顶, 与相机移动速度解耦。满了的 patch 父层暂显(merge 兜底)。
+func stride_budget_ok() -> bool:
+	if _stride_used < STRIDE_BUDGET:
+		_stride_used += 1
+		return true
+	return false
 
 
 func count_node(node: QNode) -> void:
@@ -405,8 +423,15 @@ func update(cam: Camera3D) -> void:
 	# 统一时间戳传给 select_lod, 供 QNode 的合并宽限(merge cache)判断暂存是否到期
 	var now: float = Time.get_ticks_msec() / 1000.0
 	_prefetch_this_frame = 0  # 每帧重置预取配额
+	# 节流: select_lod 每帧遍历整棵四叉树 + compute_strides(纯 GDScript)是主线程热点。
+	# 每 LOD_TICK_EVERY 帧才完整跑一次(≈20Hz); 跳过的帧沿用上一帧可见性, 不影响渲染正确性,
+	# 只是 LOD/视锥剔除更新降到 ~20Hz。_cam_pos 在节流之前已更新 → target_level_at 用到当前位置。
+	_lod_tick += 1
+	if _lod_tick % LOD_TICK_EVERY != 0:
+		return
 	stats.patches = 0
 	stats.triangles = 0
+	_stride_used = 0
 	for r in roots:
 		r.select_lod(cp, frustum, _cam_moved, now)
 	stats.inflight = _pending

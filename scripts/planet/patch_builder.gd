@@ -170,9 +170,26 @@ static func build_patch_arrays(A: Vector3, B: Vector3, C: Vector3, N: int, R: fl
 				indices.append(c0)
 				indices.append(d0)
 
+	# 索引网格输出(worker 线程做 flat→Vector3 转换): 唯一顶点 main_count 个 + 索引数组。
+	# 相比旧的"非索引展开(每三角形 3 顶点)", 顶点数从 ~5N² 降到 (N+1)(N+2)/2 ——
+	# N=16 时 768→153(约 5x)。主线程 _gen_array_mesh 直接把 verts/norms/cols + indices 交给
+	# ArrayMesh(带 ARRAY_INDEX); GPU 显存/上传量、shadow pass 提交量随之降约 5 倍。
+	var verts := PackedVector3Array()
+	verts.resize(main_count)
+	var vnorms := PackedVector3Array()
+	vnorms.resize(main_count)
+	var vcols := PackedColorArray()
+	vcols.resize(main_count)
+	for v in range(main_count):
+		var s: int = v * 3
+		verts[v] = Vector3(pos[s], pos[s + 1], pos[s + 2])
+		vnorms[v] = Vector3(nor[s], nor[s + 1], nor[s + 2])
+		vcols[v] = Color(col[s], col[s + 1], col[s + 2])
+	@warning_ignore("integer_division")
 	return {
-		"positions": pos,
-		"normals": nor,
-		"colors": col,
+		"verts": verts,
+		"norms": vnorms,
+		"cols": vcols,
 		"indices": indices,
+		"tris": indices.size() / 3,
 	}

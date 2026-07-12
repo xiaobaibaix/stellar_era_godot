@@ -13,7 +13,9 @@
 class_name QNode
 extends Node3D
 
-const MERGE_HOLD_SEC := 3.0   # 合并宽限期(秒)
+const MERGE_HOLD_SEC := 1.0   # 合并宽限期(秒): 只需覆盖细分边界的亚秒级抖动。
+# 过长(如 3s)会让持续移动时暂存(_retired)子树大量堆积, 每 LOD tick 的 _hide_subtree 递归
+# 遍历这些暂存节点 → 遍历节点数膨胀、拖慢主线程。1s 既保留抗抖动, 又快速回收行走途中的暂存。
 
 var planet  # Planet(弱类型避免循环声明顺序问题)
 var A: Vector3
@@ -127,9 +129,22 @@ func select_lod(cam_pos: Vector3, frustum: Array, cam_moved: bool, now: float) -
 			# 显示环内未就绪 → 前台请求(不节流, 显示必需); 仅预取环 → 预取请求(节流)。
 			var req_is_prefetch: bool = not want_show
 			for c in children:
-				if c.mesh_inst.mesh == null and not c.pending:
+				# 前景子(want_show 内, 显示必需)永不限流; 仅预取子(req_is_prefetch)走预算, 不抢前景。
+				if c.mesh_inst.mesh == null and not c.pending and (not req_is_prefetch or planet.stride_budget_ok()):
 					var ds: Array = c.compute_strides()
 					planet.request_mesh(c, ds, _key(ds), req_is_prefetch)
+			# level+2 预取(仅预取环): 对已就绪的子预生成它的子(孙辈), 全隐藏。
+			# 相机进入子的 show 环时孙已就绪 → 不再按需生成 → 消除移动卡顿(= 你的"预取球提前算最高细分"思路)。
+			# 仍受 stride 预算约束, 不会抢前景; 满了等下个 pass。
+			if req_is_prefetch:
+				for c in children:
+					if c.mesh_inst.mesh != null and c.children == null and c.level < p.maxLevel:
+						c._split()
+					if c.children != null:
+						for gc in c.children:
+							if gc.mesh_inst.mesh == null and not gc.pending and planet.stride_budget_ok():
+								var gds: Array = gc.compute_strides()
+								planet.request_mesh(gc, gds, _key(gds), true)
 			for c in children:
 				c._hide_subtree()
 			if mesh_inst.mesh == null and not pending:
