@@ -16,6 +16,7 @@ sky_material = SubResource("PanoramaSkyMaterial_ihy5a")
 [sub_resource type="Environment" id="Environment_r4dii"]
 background_mode = 2
 sky = SubResource("Sky_1j6d1")
+tonemap_mode = 4
 glow_enabled = true
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_tefeu"]
@@ -45,11 +46,15 @@ resource_local_to_scene = true
 script = ExtResource("4_jyhfs")
 radius = 500.0
 showInset = false
-showOcean = false
-showAtmosphere = false
 showClouds = false
 showGodrays = false
 walkSpeed = 10.0
+atmoScale = 1.191
+atmoRayleigh = 0.045
+atmoMie = 0.06
+atmoMieG = 0.6
+atmoDensityFalloff = 9.9
+atmoMieFalloff = 15.0
 splitFactor = 3.0
 prefetchFactor = 2.0
 
@@ -58,14 +63,31 @@ transparency = 1
 cull_mode = 2
 no_depth_test = true
 shading_mode = 0
-albedo_color = Color(0.2, 1, 0.35, 0.15)
+albedo_color = Color(1, 0.6, 0.15, 0.1)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_choun"]
 transparency = 1
 cull_mode = 2
 no_depth_test = true
 shading_mode = 0
-albedo_color = Color(1, 0.6, 0.15, 0.1)
+albedo_color = Color(0.2, 1, 0.35, 0.15)
+
+[sub_resource type="Resource" id="Resource_ya4ey"]
+resource_local_to_scene = true
+script = ExtResource("4_jyhfs")
+radius = 500.0
+showInset = false
+showClouds = false
+showGodrays = false
+walkSpeed = 10.0
+atmoScale = 1.191
+atmoRayleigh = 0.045
+atmoMie = 0.06
+atmoMieG = 0.6
+atmoDensityFalloff = 9.9
+atmoMieFalloff = 15.0
+splitFactor = 3.0
+prefetchFactor = 2.0
 
 [node name="Main" type="Node" unique_id=502546147 node_paths=PackedStringArray("camera", "player", "toggle", "wire_toggle", "ball_toggle", "display_ball", "preload_ball", "player_display_ball", "player_preload_ball", "planet", "fps_label")]
 script = ExtResource("6_main")
@@ -76,8 +98,8 @@ wire_toggle = NodePath("CheckButtonWire")
 ball_toggle = NodePath("CheckButtonBall")
 display_ball = NodePath("Camera/DisplayBall")
 preload_ball = NodePath("Camera/PreloadBall")
-player_display_ball = NodePath("Planet/DisplayBall")
-player_preload_ball = NodePath("Planet/PreloadBall")
+player_display_ball = NodePath("Planet/Player/DisplayBall")
+player_preload_ball = NodePath("Planet/Player/PreloadBall")
 planet = NodePath("Planet")
 fps_label = NodePath("FpsLabel")
 
@@ -85,7 +107,7 @@ fps_label = NodePath("FpsLabel")
 environment = SubResource("Environment_r4dii")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1825422017]
-transform = Transform3D(-0.8660254, -0.43301275, 0.24999997, 0.49665427, -0.6872369, 0.5301304, -0.057743765, 0.58327, 0.8102243, 0, 0, 0)
+transform = Transform3D(0.6427876, -0.43938473, 0.6275074, 0, 0.81915146, 0.5735769, -0.7660443, -0.36868757, 0.52654123, 0, 0, 0)
 shadow_enabled = true
 directional_shadow_max_distance = 200.0
 
@@ -108,24 +130,31 @@ visible = false
 material_override = SubResource("StandardMaterial3D_o6xl0")
 mesh = SubResource("SphereMesh_jq8tk")
 
-[node name="Planet" parent="." unique_id=1626788951 node_paths=PackedStringArray("camera") instance=ExtResource("2_sugp2")]
+[node name="Planet" parent="." unique_id=1626788951 node_paths=PackedStringArray("camera", "sun_light") instance=ExtResource("2_sugp2")]
 params = SubResource("Resource_tipki")
 camera = NodePath("../Camera/Camera3D")
+sun_light = NodePath("../DirectionalLight3D")
 
-[node name="Player" parent="Planet" unique_id=818653580 instance=ExtResource("5_tbgi4")]
+[node name="Player" parent="Planet" unique_id=459257913 instance=ExtResource("5_tbgi4")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 602, 0)
 
-[node name="DisplayBall" type="MeshInstance3D" parent="Planet" unique_id=811932217]
-transform = Transform3D(0.51340926, 0, 0, 0, 0.51340926, 0, 0, 0, 0.51340926, 0, 0, 0)
+[node name="PreloadBall" type="MeshInstance3D" parent="Planet/Player" unique_id=292467668]
+transform = Transform3D(0.35938647, 0, 0, 0, 0.35938647, 0, 0, 0, 0.35938647, 0, -602, 0)
 visible = false
 material_override = SubResource("StandardMaterial3D_85g3d")
-mesh = SubResource("SphereMesh_3xd07")
+mesh = SubResource("SphereMesh_jq8tk")
 
-[node name="PreloadBall" type="MeshInstance3D" parent="Planet" unique_id=292467668]
-transform = Transform3D(0.35938647, 0, 0, 0, 0.35938647, 0, 0, 0, 0.35938647, 0, 0, 0)
+[node name="DisplayBall" type="MeshInstance3D" parent="Planet/Player" unique_id=811932217]
+transform = Transform3D(0.51340926, 0, 0, 0, 0.51340926, 0, 0, 0, 0.51340926, 0, -602, 0)
 visible = false
 material_override = SubResource("StandardMaterial3D_choun")
-mesh = SubResource("SphereMesh_jq8tk")
+mesh = SubResource("SphereMesh_3xd07")
+
+[node name="Planet2" parent="." unique_id=1923769825 node_paths=PackedStringArray("camera", "sun_light") instance=ExtResource("2_sugp2")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 719.36646, -2027.2063)
+params = SubResource("Resource_ya4ey")
+camera = NodePath("../Camera/Camera3D")
+sun_light = NodePath("../DirectionalLight3D")
 
 [node name="CheckButtonWire" type="CheckButton" parent="." unique_id=204736276]
 offset_top = 31.0
@@ -148,5 +177,5 @@ text = "跟随角色"
 offset_left = 860.0
 offset_right = 1136.0
 offset_bottom = 26.0
-text = "FPS:115  patch:140  tri:35.8k  job:0"
+text = "FPS:95  patch:140  tri:35.8k  job:0"
 horizontal_alignment = 2

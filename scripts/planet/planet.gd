@@ -15,6 +15,8 @@ extends Node3D
 ## LOD 距离判定的聚焦目标(用它的位置算细分距离); 留空则用 camera。
 ## 跟随角色模式下设为 Player, 让细分围绕角色而非相机; 视锥剔除仍用渲染相机。
 @export var lod_target: Node3D
+## 太阳光(可选): _update_sun 会把它的 -Z 对齐 sun_dir, 让地形光照方向与大气/海洋一致。
+@export var sun_light: DirectionalLight3D
 var terrain: Terrain
 var roots: Array = []  # Array[QNode]
 var _V: Array = []  # 12 个单位顶点(Vector3)
@@ -25,6 +27,14 @@ var _wire_line_mat: StandardMaterial3D  # 线框模式亮线段材质(surface 1)
 var stats: Dictionary = {"patches": 0, "triangles": 0, "inflight": 0}
 var _tla_cache: Dictionary = {}       # target_level_at 缓存: 量化方向(Vector3i) -> level
 var _tla_cache_gen: int = -1          # 缓存所属 generation; _gen 变(rebuild)时清空
+# Phase 2 大气壳 + 海洋(球壳 spatial shader)。建为 Planet 子节点(BodyMesh 兄弟)。
+var _ocean_mesh: MeshInstance3D
+var _atmo_mesh: MeshInstance3D
+var _ocean_mat: ShaderMaterial
+var _atmo_mat: ShaderMaterial
+var _ocean_shader: Shader
+var _atmo_shader: Shader
+var _sun_dir: Vector3 = Vector3(0.739, 0.443, 0.515)   # normalize(1,0.6,0.8) 默认
 
 var _gen: int = 0
 var _pool: PatchWorkerPool
@@ -37,6 +47,7 @@ var _wire: bool = false
 var _body_mesh: Node3D  # 所有 Qnode 的容器节点(BodyMesh)
 var _qnode_scene: PackedScene  # qnode.tscn 预制体
 var _last_params_hash: int = 0  # 参数指纹(轮询检测变化触发 rebuild, 绕过 @tool 信号不可靠)
+var _last_visual_hash: int = 0  # 视觉指纹(atmo*/sun*/show*): 变化只推 shader uniform, 不重建地形
 var _param_tick: int = 0
 # 预取节流: 预取请求每帧上限 + 总 inflight 上限。超过则跳过预取 → 让位给"显示必需"的前景请求。
 const PREFETCH_PER_FRAME := 8
@@ -96,6 +107,7 @@ func _ready() -> void:
 		_wire_line_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		_wire_line_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 		_wire_line_mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+	_build_effects()  # 大气壳 + 海洋 mesh + shader(Phase 2)
 	if roots.is_empty():
 		_build_noise()
 		_build_roots()
@@ -116,6 +128,18 @@ func _process(_delta: float) -> void:
 			_last_params_hash = h
 			rebuild()
 			return
+		# 视觉参数(atmo*/sun*/show*)变化 → 只推 shader uniform + 缩放 + 可见性, 不重建地形。
+		var vh: int = _compute_visual_hash()
+		if vh != _last_visual_hash:
+			_last_visual_hash = vh
+			_apply_visual_changes()
+	# 行星球心随节点变换实时同步(编辑器拖动 Planet 时大气跟着走): 壳虽挂在 Planet 下随变换移动,
+	# 但大气 shader 的 u_planet_center 是 uniform, 需每帧推 global_position, 否则散射中心滞后于壳几何。
+	if _atmo_mat != null:
+		_atmo_mat.set_shader_parameter("u_planet_center", global_position)
+	# autoSun: 按 sunSpeed 进方位角(改 params.sunAzimuth → 触发 _on_param_changed → _update_sun)
+	if params != null and params.autoSun:
+		params.sunAzimuth = fmod(params.sunAzimuth + params.sunSpeed * _delta, 360.0)
 	# 编辑器用 3D 视口相机驱动 LOD; 运行时优先 @export 相机, 回退视口活动相机。
 	var cam: Camera3D = null
 	if Engine.is_editor_hint():
@@ -161,6 +185,46 @@ func _compute_params_hash() -> int:
 	return h
 
 
+# 视觉参数指纹(只含 atmo*/sun*/show*): 任一变化 → 哈希变 → _process 轮询到就 _apply_visual_changes。
+# 与 _compute_params_hash 分离: 这些参数改了只推 shader uniform, 不触发地形 rebuild。
+func _compute_visual_hash() -> int:
+	var p: PlanetParams = params
+	if p == null:
+		return 0
+	var h: int = hash(p.atmoScale)
+	h = (h * 31 + hash(p.atmoRayleigh)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.atmoMie)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.atmoMieG)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.atmoDensityFalloff)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.atmoMieFalloff)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.atmoSunIntensity)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.atmoExposure)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.atmoSteps)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.atmoLightSteps)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.atmoShadowSoftness)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.atmoTwilight)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.atmoDither)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.atmoOzone)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.sunElevation)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.sunAzimuth)) & 0x7FFFFFFF
+	h = (h * 31 + hash(int(p.showOcean))) & 0x7FFFFFFF
+	h = (h * 31 + hash(int(p.showAtmosphere))) & 0x7FFFFFFF
+	return h
+
+
+# 视觉参数变化的轻量应用(不重建地形): 缩放/壳半径 + 大气散射 uniform + 太阳方向 + 壳可见性。
+func _apply_visual_changes() -> void:
+	if params == null:
+		return
+	_resize_effects()        # atmoScale/seaLevel/radius → 壳与海平面缩放 + u_rground/u_ratmo
+	_apply_atmo_uniforms()   # atmo* 散射参数 → 大气 shader uniform
+	_update_sun()            # sunElevation/sunAzimuth → u_sun_dir + sun_light 朝向
+	if _ocean_mesh != null:
+		_ocean_mesh.visible = params.showOcean
+	if _atmo_mesh != null:
+		_atmo_mesh.visible = params.showAtmosphere
+
+
 func _diag_start() -> void:
 	var f := FileAccess.open("user://planet_ready.txt", FileAccess.WRITE)
 	if f:
@@ -185,6 +249,20 @@ func _on_param_changed(key: String) -> void:
 	match key:
 		"wireframe":
 			set_wireframe(params.wireframe)
+		"showOcean":
+			if _ocean_mesh != null:
+				_ocean_mesh.visible = params.showOcean
+		"showAtmosphere":
+			if _atmo_mesh != null:
+				_atmo_mesh.visible = params.showAtmosphere
+		"sunElevation", "sunAzimuth":
+			_update_sun()
+		"atmoScale":
+			_resize_effects()
+		_:
+			# 其余 atmo* 散射参数 → 推到大气 shader uniform
+			if key.begins_with("atmo"):
+				_apply_atmo_uniforms()
 	if params.requires_rebuild(key):
 		rebuild()
 
@@ -449,8 +527,125 @@ func rebuild() -> void:
 	_cam_pos = Vector3(1e9, 1e9, 1e9)
 	_build_noise()
 	_build_roots()
+	_resize_effects()      # 海平面/壳半径随 radius 重算
+	_apply_atmo_uniforms() # 重新推大气 uniform
 	if _wire:
 		set_wireframe(true)
+
+
+# ---- Phase 2: 大气壳 + 海洋 + 太阳 ----
+# 建两个单位球 mesh(挂 Planet 下、BodyMesh 兄弟), 各配 ShaderMaterial; 缩放/参数后续按 params 推。
+func _build_effects() -> void:
+	if _ocean_shader == null:
+		_ocean_shader = load("res://shaders/ocean.gdshader")
+	if _atmo_shader == null:
+		_atmo_shader = load("res://shaders/atmosphere.gdshader")
+	# 球壳挂场景手建容器(Ocean/Atmosphere, 对齐 BodyMesh 组织方式)下; 无容器则 internal 建。
+	_ocean_mesh = _ensure_effect_shell("Ocean", "OceanShell")
+	_atmo_mesh = _ensure_effect_shell("Atmosphere", "AtmosphereShell")
+	_ocean_mat = _ensure_shader_mat(_ocean_mesh, _ocean_shader)
+	_atmo_mat = _ensure_shader_mat(_atmo_mesh, _atmo_shader)
+	_resize_effects()
+	_apply_atmo_uniforms()
+	if _ocean_mesh != null:
+		_ocean_mesh.visible = params.showOcean
+	if _atmo_mesh != null:
+		_atmo_mesh.visible = params.showAtmosphere
+	_update_sun()
+
+
+func _make_effect_sphere(n: String) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.name = n
+	var sm := SphereMesh.new()
+	sm.radius = 1.0
+	sm.height = 2.0
+	mi.mesh = sm
+	return mi
+
+
+# 取/建容器(container_name: 场景手建的 Node3D, 对齐 BodyMesh 模式); 其下复用或新建单位球壳。
+# 容器不存在 → internal 建一个(向后兼容)。shell 用 INTERNAL_MODE_BACK 挂载 → 不写回 .tscn。
+func _ensure_effect_shell(container_name: String, shell_name: String) -> MeshInstance3D:
+	var cont: Node3D = get_node_or_null(container_name)
+	if cont == null:
+		cont = Node3D.new()
+		cont.name = container_name
+		add_child(cont, false, Node.INTERNAL_MODE_BACK)
+	var existing: MeshInstance3D = cont.get_node_or_null(shell_name)
+	if existing != null:
+		return existing
+	var mi := _make_effect_sphere(shell_name)
+	cont.add_child(mi, false, Node.INTERNAL_MODE_BACK)
+	return mi
+
+
+# 复用现有 ShaderMaterial(场景里手建的)或新建一个; 返回该材质供后续 set_shader_parameter。
+func _ensure_shader_mat(mi: MeshInstance3D, sh: Shader) -> ShaderMaterial:
+	if mi == null:
+		return null
+	var mat: ShaderMaterial = mi.material_override
+	if mat == null and sh != null:
+		mat = ShaderMaterial.new()
+		mat.shader = sh
+		mi.material_override = mat
+	return mat
+
+
+# 海平面半径 = radius + seaLevel*maxHeight; 大气壳 = radius*atmoScale。
+func _resize_effects() -> void:
+	if params == null:
+		return
+	var R: float = params.radius
+	var ground_r: float = R + params.seaLevel * params.maxHeight
+	if _ocean_mesh != null:
+		_ocean_mesh.scale = Vector3.ONE * ground_r
+	if _atmo_mesh != null:
+		_atmo_mesh.scale = Vector3.ONE * (R * params.atmoScale)
+	if _atmo_mat != null:
+		_atmo_mat.set_shader_parameter("u_rground", ground_r)
+		_atmo_mat.set_shader_parameter("u_ratmo", R * params.atmoScale)
+		_atmo_mat.set_shader_parameter("u_planet_center", global_position)
+
+
+# 把 atmo* 散射参数推到大气 shader uniform(scatter_r/ozone 用 web 的 RATIO 乘 atmoRayleigh/atmoOzone)。
+func _apply_atmo_uniforms() -> void:
+	if _atmo_mat == null or params == null:
+		return
+	var p := params
+	var ray_ratio := Vector3(0.1066, 0.3245, 0.6830)
+	var ozo_ratio := Vector3(0.35, 1.0, 0.045)
+	_atmo_mat.set_shader_parameter("u_scatter_r", ray_ratio * p.atmoRayleigh)
+	_atmo_mat.set_shader_parameter("u_scatter_m", p.atmoMie)
+	_atmo_mat.set_shader_parameter("u_mie_g", p.atmoMieG)
+	_atmo_mat.set_shader_parameter("u_ozone", ozo_ratio * p.atmoOzone)
+	_atmo_mat.set_shader_parameter("u_density_falloff", p.atmoDensityFalloff)
+	_atmo_mat.set_shader_parameter("u_mie_falloff", p.atmoMieFalloff)
+	_atmo_mat.set_shader_parameter("u_sun_intensity", p.atmoSunIntensity)
+	_atmo_mat.set_shader_parameter("u_exposure", p.atmoExposure)
+	_atmo_mat.set_shader_parameter("u_steps", p.atmoSteps)
+	_atmo_mat.set_shader_parameter("u_light_steps", p.atmoLightSteps)
+	_atmo_mat.set_shader_parameter("u_shadow_softness", p.atmoShadowSoftness)
+	_atmo_mat.set_shader_parameter("u_twilight", p.atmoTwilight)
+	_atmo_mat.set_shader_parameter("u_dither", p.atmoDither)
+	_atmo_mat.set_shader_parameter("u_sun_dir", _sun_dir)
+	_atmo_mat.set_shader_parameter("u_planet_center", global_position)
+
+
+# 由 sunElevation/sunAzimuth 算 planet-local sun_dir; push 到两 shader + 旋转 sun_light(-Z 对齐)。
+func _update_sun() -> void:
+	if params == null:
+		return
+	var el: float = deg_to_rad(params.sunElevation)
+	var az: float = deg_to_rad(params.sunAzimuth)
+	_sun_dir = Vector3(cos(el) * cos(az), sin(el), cos(el) * sin(az)).normalized()
+	if _atmo_mat != null:
+		_atmo_mat.set_shader_parameter("u_sun_dir", _sun_dir)
+	if _ocean_mat != null:
+		_ocean_mat.set_shader_parameter("u_sun_dir", _sun_dir)
+	if sun_light != null:
+		# 光沿 -Z 传播; -Z = -sun_dir → 光从太阳方向射向行星, dot(N,sun_dir)>0 的面被照亮
+		sun_light.look_at(sun_light.global_position - _sun_dir, Vector3.UP)
 
 
 func set_wireframe(on: bool) -> void:

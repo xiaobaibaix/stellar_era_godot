@@ -81,16 +81,19 @@ signal bulk_changed
 # ---- 大气散射 ----
 @export_group("大气散射")
 ## 大气壳半径 = 行星半径 × atmoScale(壳要略大于行星)。
-@export_range(1.0, 1.5, 0.001) var atmoScale: float = 1.08:
+## 1.15: 壳越薄, 辉光被挤进越窄的环、外沿越像硬边; 加厚给辉光平滑衰减的空间。
+@export_range(1.0, 1.5, 0.001) var atmoScale: float = 1.15:
 	set(v): atmoScale = v; param_changed.emit("atmoScale")
 ## 瑞利散射强度(短波长, 主导天空蓝/日间色)。
 @export_range(0.0, 0.5, 0.001) var atmoRayleigh: float = 0.08:
 	set(v): atmoRayleigh = v; param_changed.emit("atmoRayleigh")
 ## 米氏散射强度(全波长, 主导雾霭/地平线光晕)。
-@export_range(0.0, 0.3, 0.001) var atmoMie: float = 0.03:
+## Mie 是无色(灰白)散射, 过强会在日照临边形成泛白银边; 0.008 让瑞利(蓝)主导, 只留淡淡银边。
+@export_range(0.0, 0.3, 0.001) var atmoMie: float = 0.008:
 	set(v): atmoMie = v; param_changed.emit("atmoMie")
 ## 米氏相位不对称量(-1..1): 越大越聚集向前(强银边/前向光晕)。
-@export_range(0.0, 0.99, 0.01) var atmoMieG: float = 0.76:
+## 0.5: 降低前向峰值(0.76 时峰值约 4.9 → 0.5 时约 1.0), 把白色前向光晕摊开、削弱。
+@export_range(0.0, 0.99, 0.01) var atmoMieG: float = 0.5:
 	set(v): atmoMieG = v; param_changed.emit("atmoMieG")
 ## 大气密度随高度衰减指数(越大越贴地表衰减越快)。
 @export_range(1.0, 16.0, 0.1) var atmoDensityFalloff: float = 6.0:
@@ -99,7 +102,8 @@ signal bulk_changed
 @export_range(1.0, 32.0, 0.1) var atmoMieFalloff: float = 16.0:
 	set(v): atmoMieFalloff = v; param_changed.emit("atmoMieFalloff")
 ## 太阳光照强度(亮度倍率)。
-@export_range(0.0, 80.0, 0.1) var atmoSunIntensity: float = 22.0:
+## 14: 过高会让临边内散射过曝, 经色调映射被推成灰白; 调低让临边保持蓝紫。
+@export_range(0.0, 80.0, 0.1) var atmoSunIntensity: float = 14.0:
 	set(v): atmoSunIntensity = v; param_changed.emit("atmoSunIntensity")
 ## 曝光(最终亮度倍率, 接近 HDR 输出后)。
 @export_range(0.0, 4.0, 0.01) var atmoExposure: float = 1.0:
