@@ -82,21 +82,21 @@ signal bulk_changed
 @export_range(1.0, 1.5, 0.001) var atmoScale: float = 1.15:
 	set(v): atmoScale = v; param_changed.emit("atmoScale")
 ## 瑞利散射强度(短波长, 主导天空蓝/日间色)。
-@export_range(0.0, 0.5, 0.001) var atmoRayleigh: float = 0.08:
+@export_range(0.0, 8.0, 0.01) var atmoRayleigh: float = 0.08:
 	set(v): atmoRayleigh = v; param_changed.emit("atmoRayleigh")
 ## 米氏散射强度(全波长, 主导雾霭/地平线光晕)。
 ## Mie 是无色(灰白)散射, 过强会在日照临边形成泛白银边; 0.008 让瑞利(蓝)主导, 只留淡淡银边。
-@export_range(0.0, 0.3, 0.001) var atmoMie: float = 0.008:
+@export_range(0.0, 4.0, 0.01) var atmoMie: float = 0.008:
 	set(v): atmoMie = v; param_changed.emit("atmoMie")
 ## 米氏相位不对称量(-1..1): 越大越聚集向前(强银边/前向光晕)。
 ## 0.5: 降低前向峰值(0.76 时峰值约 4.9 → 0.5 时约 1.0), 把白色前向光晕摊开、削弱。
 @export_range(0.0, 0.99, 0.01) var atmoMieG: float = 0.5:
 	set(v): atmoMieG = v; param_changed.emit("atmoMieG")
-## 大气密度随高度衰减指数(越大越贴地表衰减越快)。
-@export_range(1.0, 16.0, 0.1) var atmoDensityFalloff: float = 6.0:
+## 大气密度随高度衰减指数(越大越贴地表衰减越快; 调到≈0 则整层都稠 → 连高空晕都能浓雾挡住后方星球, 但本星球会变雾球)。
+@export_range(0.0, 16.0, 0.05) var atmoDensityFalloff: float = 6.0:
 	set(v): atmoDensityFalloff = v; param_changed.emit("atmoDensityFalloff")
-## 米氏衰减指数(通常比密度衰减大, 贴近地表的雾)。
-@export_range(1.0, 32.0, 0.1) var atmoMieFalloff: float = 16.0:
+## 米氏衰减指数(通常比密度衰减大, 贴近地表的雾; 调到≈0 同样让高空米氏变稠)。
+@export_range(0.0, 32.0, 0.05) var atmoMieFalloff: float = 16.0:
 	set(v): atmoMieFalloff = v; param_changed.emit("atmoMieFalloff")
 ## 太阳光照强度(亮度倍率)。
 ## 14: 过高会让临边内散射过曝, 经色调映射被推成灰白; 调低让临边保持蓝紫。
@@ -141,8 +141,8 @@ signal bulk_changed
 ## 云覆盖量(0 无云, 1 满天)。
 @export_range(0.0, 1.0, 0.01) var cloudCoverage: float = 0.5:
 	set(v): cloudCoverage = v; param_changed.emit("cloudCoverage")
-## 云密度(单点透明度)。
-@export_range(0.0, 4.0, 0.01) var cloudDensity: float = 1.2:
+## 云密度(单点消光, Beer-Lambert; 越大云越厚实越不透明)。
+@export_range(0.0, 30.0, 0.1) var cloudDensity: float = 1.2:
 	set(v): cloudDensity = v; param_changed.emit("cloudDensity")
 ## 云噪声细节频率(越大细节越密)。
 @export_range(0.0, 0.5, 0.001) var cloudFreq: float = 0.06:
@@ -159,8 +159,8 @@ signal bulk_changed
 ## 云光照(自阴影)积分步数。
 @export_range(2, 16, 1) var cloudLightSteps: int = 6:
 	set(v): cloudLightSteps = v; param_changed.emit("cloudLightSteps")
-## 云光吸收强度。
-@export_range(0.0, 4.0, 0.01) var cloudAbsorb: float = 1.0:
+## 云光吸收强度(自阴影, 越大云底越暗、越显厚实)。
+@export_range(0.0, 20.0, 0.1) var cloudAbsorb: float = 1.0:
 	set(v): cloudAbsorb = v; param_changed.emit("cloudAbsorb")
 ## 银边强度(前向散射, 云迎光边缘发亮)。
 @export_range(0.0, 4.0, 0.01) var cloudSilver: float = 1.0:
