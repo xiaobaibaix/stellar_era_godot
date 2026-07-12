@@ -11,13 +11,15 @@ shader_type spatial;
 // 反投影: ndc.z = depth*2-1 → INV_PROJECTION → INV_VIEW。地面球 uRground 兜底(深度读不准也安全)。
 //
 // render_mode 说明:
-// - cull_disabled + depth_test_disabled: 双面渲染且【不做深度测试】→ 壳绝不被地形/海洋遮挡, 总能覆盖整盘
-//   画大气+云。运行时全管线(阴影/深度 prepass)下, 靠"近侧壳面比地形近 → 通过深度测试盖盘"曾不稳定
-//   (盘心大气/云被地形盖住 = "云在球后面"); depth_test_disabled 根除该依赖。双面会让同一像素的近/远
-//   两面都积分并复合(大气叠加两次)→ 片元里按相机壳内外只保留一面(见 fragment 的 gl_FrontFacing 判定)。
+// - cull_disabled: 双面渲染。片元里按【相机壳内外 + FRONT_FACING】只保留离相机最近的一面(避免近/远两面
+//   都积分复合 = 大气叠加两次)。
+// - 深度测试【开】(默认, 不用 depth_test_disabled): 该最近面比【自身】地形更近 → 通过深度测试 → 覆盖
+//   自身圆盘画大气+云; 而当壳在【其他星球】之后(前方星球 mesh 更近)→ 壳片元深度测试失败被剔 → 不会把
+//   别的大气/云画到前方星球的 mesh 上。自身圆盘能画出来靠【选近面 + 解析地面球兜底 tFar】, 不依赖
+//   depth_test_disabled(那个会连前方星球的遮挡一起丢掉 → 别的星球大气盖到本星球上)。
 // - depth_draw_never: 壳不写深度, 避免壳互相/与地形乱写深度。积分终止靠解析地面球(场景深度仅辅助)。
 // - unshaded: 大气辐亮度已在片元里自行积分(含太阳散射/行星阴影 + 云自阴影), 不能再被引擎方向光二次照亮。
-render_mode cull_disabled, blend_mix, depth_draw_never, depth_test_disabled, unshaded;
+render_mode cull_disabled, blend_mix, depth_draw_never, unshaded;
 
 uniform sampler2D screen_texture : hint_screen_texture;
 uniform sampler2D depth_texture : hint_depth_texture;
@@ -265,17 +267,19 @@ void fragment() {
 		valid = tFar > tNear;
 	}
 
-	vec3 color = sceneColor;
+	vec3 T = vec3(1.0);      // 大气柱透射率(加性混合: 衰减身后背景)
+	vec3 L = vec3(0.0);      // 大气柱内散射光(加性混合: 叠加)
+	float cshadowFac = 1.0;  // 自身地面云影因子(仅白天侧命中自身地表); 乘到透射上压暗自身地形
 	if (valid) {
 		bool clouds = u_clouds_on > 0.5;
 
-		// 背景 = 场景色; 命中地表且云开 → 叠云影(仅白天侧)
-		vec3 background = sceneColor;
+		// 命中【自身】地表(命中点在本星球云层半径内)且云开 → 白天侧算云影, 作为透射系数压暗自身地形。
+		// 不再乘 background(加性混合对帧缓冲 dst, 不读 screen_texture 当背景)。
 		if (clouds && u_cshadow > 0.0 && hitGround && length(hitPos - u_planet_center) < u_ctop) {
 			float day = dayFactor(hitPos);
 			if (day > 0.01) {
 				float sh = cloudShadow(hitPos);
-				background *= mix(1.0, sh, u_cshadow * day);
+				cshadowFac = mix(1.0, sh, u_cshadow * day);
 			}
 		}
 
@@ -297,8 +301,6 @@ void fragment() {
 
 		// 统一 front-to-back 合成: T=剩余透射, L=累计内散射(大气 + 云, 同一积分)。
 		// 全程线性辐亮度, 末端不 tonemap → 交 WorldEnvironment 的 AgX 统一处理(与场景一致, 无色彩割裂)。
-		vec3 T = vec3(1.0);
-		vec3 L = vec3(0.0);
 		for (int i = 0; i < 512; i++) {
 			if (t >= tFar) break;
 			// 每步微抖动打散同心环(低幅, 不破坏能量守恒)
@@ -345,20 +347,22 @@ void fragment() {
 				L += T * integ;
 				T *= dT;
 			}
-			t += ds;
+		t += ds;
 		}
-
-		color = background * T + L;
-		color *= u_exposure;   // 线性曝光增益; 非线性 tonemap 交 AgX
 	}
 
-	// 大气外圈按 impact parameter(射线到行星中心垂距 b)平滑渐隐到天空:
-	// b 从 rground→ratmo 时, 整个大气效果(T 衰减 + L 散射 + 云)过渡到原始场景色。
-	// 临边(b≈rground)辉光保留, 外圈(b→ratmo)渐隐 → 消除亮环/硬边。
+	// 统一【加性混合】对帧缓冲 dst: result = L + dst·(cshadowFac·T)。
+	// 由 blend_mix(src·a + dst·(1-a)) = L + dst·(cshadowFac·T) → a = 1-<cshadowFac·T>, ALBEDO = L·exposure/a。
+	// 相机壳内外、是否与其他星球重叠都正确:
+	//  · 自身圆盘: 自身地形·(云影·T) + L(云影压暗自身地形);
+	//  · 临边/天空: dst·T + L(身后天空被大气衰减 + 散射);
+	//  · 与其他星球重叠: 后方星球(含其大气)·T + L —— T 小处(厚云/密大气)衰减多 = 云/大气也遮挡后方星球;
+	//    T 大处(晴空)后方透过来。不再用 opaque screen_texture 替换 → 不再抹掉后方星球大气形成硬边"带状"。
 	vec3 oc = ro - u_planet_center;
 	float b = length(cross(oc, rd));
 	float atmoEdge = 1.0 - smoothstep(u_rground, u_ratmo, b);
-	color = mix(sceneColor, color, atmoEdge);
-	ALBEDO = color;
-	ALPHA = 1.0;
+	float Ta = clamp(dot(T * cshadowFac, vec3(0.3333)), 0.0, 0.999);
+	float a = (1.0 - Ta) * atmoEdge;
+	ALBEDO = a > 1e-3 ? (L * u_exposure / a) : vec3(0.0);
+	ALPHA = a;
 }
