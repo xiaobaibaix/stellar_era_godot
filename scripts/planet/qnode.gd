@@ -29,6 +29,7 @@ var pending: bool = false
 var cancelled: bool = false
 var built_key: String = ""
 var req_key: String = ""
+var _patch_data: Dictionary = {}  # 缓存 patch 几何数据, 供 wireframe 切换时主线程在线/面间重建 ArrayMesh
 
 var center_dir: Vector3
 var center_world: Vector3

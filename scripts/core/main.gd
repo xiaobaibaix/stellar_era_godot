@@ -83,8 +83,13 @@ func _process(delta: float) -> void:
 		var vp := get_viewport()
 		cam = vp.get_camera_3d() if vp != null else null
 	var focus: Node3D = cam
-	if planet != null and planet.lod_target != null:
-		focus = planet.lod_target
+	# @tool 下 planet.gd 偶处"重编译/解析失败"瞬态(脚本缓存未刷新), 节点退化为 Node3D,
+	# 直接读 lod_target 会每帧刷 "property not found"。用 get() 容错: 取不到就回退相机, 不刷屏。
+	# planet.gd 正常时 get("lod_target") 返回真实聚焦目标(角色)。
+	if planet != null:
+		var lt = planet.get("lod_target")
+		if lt is Node3D:
+			focus = lt
 	if focus == null:
 		return
 	var fp: Vector3 = focus.global_position

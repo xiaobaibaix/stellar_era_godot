@@ -20,6 +20,8 @@ var roots: Array = []  # Array[QNode]
 var _V: Array = []  # 12 个单位顶点(Vector3)
 var _faces: Array = []  # 20 个 [i,j,k]
 var material: StandardMaterial3D
+var _wire_fill_mat: StandardMaterial3D  # 线框模式实心遮挡面材质(surface 0)
+var _wire_line_mat: StandardMaterial3D  # 线框模式亮线段材质(surface 1)
 var stats: Dictionary = {"patches": 0, "triangles": 0, "inflight": 0}
 
 var _gen: int = 0
@@ -71,6 +73,22 @@ func _ready() -> void:
 		material.albedo_color = Color.WHITE
 		material.roughness = 0.9
 		material.cull_mode = BaseMaterial3D.CULL_BACK  # 封闭球壳剔除背面(对齐 web three.js FrontSide)。勿用 CULL_DISABLED: 双面渲染下 Godot 对 back-facing 三角形翻转法线做光照, 绕序被判背面时外侧亮区会反转。
+	if _wire_fill_mat == null:
+		# 线框模式的"实心遮挡面": 深色 + CULL_BACK + 写深度。背面三角形被剔除不写深度,
+		# 但前方三角形写了深度 → 背面/远侧的线段在深度测试时被挡掉(只看得见朝向相机的线)。
+		_wire_fill_mat = StandardMaterial3D.new()
+		_wire_fill_mat.albedo_color = Color(0.04, 0.07, 0.12)
+		_wire_fill_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_wire_fill_mat.cull_mode = BaseMaterial3D.CULL_BACK
+	if _wire_line_mat == null:
+		# 线框模式的"亮线段": 只测深度、不写深度(DEPTH_DRAW_DISABLED; no_depth_test 默认 false 仍测深度)。
+		# 线段本身不受 cull_mode 影响, 但会被 surface0 的实心深度剔除: 前面线段比遮挡面略近
+		# (verts 不缩放, 遮挡面 ×0.99998)→ 画出; 背面线段在远处 → 深度测试失败 → 隐藏。
+		_wire_line_mat = StandardMaterial3D.new()
+		_wire_line_mat.albedo_color = Color(0.55, 0.85, 1.0)
+		_wire_line_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_wire_line_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		_wire_line_mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
 	if roots.is_empty():
 		_build_noise()
 		_build_roots()
@@ -200,7 +218,9 @@ func _build_roots() -> void:
 		var data := PatchBuilder.build_patch_arrays(
 			r.A, r.B, r.C, params.patchResolution, params.radius,
 			params.maxHeight, terrain, [1, 1, 1])
+		r._patch_data = data
 		r.set_mesh(_gen_array_mesh(data), int(data.indices.size() / 3.0))
+		_apply_node_materials(r)
 		r.mesh_inst.visible = true  # 根 patch 默认可见(基础球壳); select_lod 运行后接管细分/剔除
 		r.built_key = "1,1,1"
 		roots.append(r)
@@ -259,30 +279,65 @@ func target_level_at(p: Vector3) -> int:
 # (patch 顶点 ~160, 开销可忽略)。只生成 ArrayMesh 资源, 由 QNode.set_mesh 填进去。
 func _gen_array_mesh(data: Dictionary) -> ArrayMesh:
 	var positions: PackedFloat32Array = data.positions
-	var normals: PackedFloat32Array = data.normals
-	var colors: PackedFloat32Array = data.colors
 	var indices: PackedInt32Array = data.indices
 	@warning_ignore("integer_division")
 	var vcount: int = positions.size() / 3
 	var verts := PackedVector3Array()
 	verts.resize(vcount)
-	var norms := PackedVector3Array()
-	norms.resize(vcount)
-	var cols := PackedColorArray()
-	cols.resize(vcount)
 	for i in range(vcount):
 		var j: int = i * 3
 		verts[i] = Vector3(positions[j], positions[j + 1], positions[j + 2])
-		norms[i] = Vector3(normals[j], normals[j + 1], normals[j + 2])
-		cols[i] = Color(colors[j], colors[j + 1], colors[j + 2])
 	var am := ArrayMesh.new()
-	var surf := []
-	surf.resize(Mesh.ARRAY_MAX)
-	surf[Mesh.ARRAY_VERTEX] = verts
-	surf[Mesh.ARRAY_NORMAL] = norms
-	surf[Mesh.ARRAY_COLOR] = cols
-	surf[Mesh.ARRAY_INDEX] = indices
-	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, surf)
+	if _wire:
+		# 线框用双 surface: surface0 实心面(深色、CULL_BACK、写深度)挡背面; surface1 线段(亮、不写深度)只测深度。
+		# → 只看到朝向相机的可见线, 背面/远侧线被 surface0 的深度剔除。material.wireframe 在本渲染器不生效。
+		# 遮挡面顶点略向内缩(×0.99998), 保证线段深度严格在遮挡面之前, 避免同深度 z-fight。
+		var verts_fill := PackedVector3Array()
+		verts_fill.resize(vcount)
+		for i in range(vcount):
+			verts_fill[i] = verts[i] * 0.99998
+		var surf_f := []
+		surf_f.resize(Mesh.ARRAY_MAX)
+		surf_f[Mesh.ARRAY_VERTEX] = verts_fill
+		surf_f[Mesh.ARRAY_INDEX] = indices
+		am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, surf_f)
+
+		var line_idx := PackedInt32Array()
+		@warning_ignore("integer_division")
+		var ntris: int = indices.size() / 3
+		for t in range(ntris):
+			var a: int = indices[t * 3]
+			var b: int = indices[t * 3 + 1]
+			var c: int = indices[t * 3 + 2]
+			line_idx.append(a)
+			line_idx.append(b)
+			line_idx.append(b)
+			line_idx.append(c)
+			line_idx.append(c)
+			line_idx.append(a)
+		var surf_l := []
+		surf_l.resize(Mesh.ARRAY_MAX)
+		surf_l[Mesh.ARRAY_VERTEX] = verts
+		surf_l[Mesh.ARRAY_INDEX] = line_idx
+		am.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, surf_l)
+	else:
+		var normals: PackedFloat32Array = data.normals
+		var colors: PackedFloat32Array = data.colors
+		var norms := PackedVector3Array()
+		norms.resize(vcount)
+		var cols := PackedColorArray()
+		cols.resize(vcount)
+		for i in range(vcount):
+			var j: int = i * 3
+			norms[i] = Vector3(normals[j], normals[j + 1], normals[j + 2])
+			cols[i] = Color(colors[j], colors[j + 1], colors[j + 2])
+		var surf := []
+		surf.resize(Mesh.ARRAY_MAX)
+		surf[Mesh.ARRAY_VERTEX] = verts
+		surf[Mesh.ARRAY_NORMAL] = norms
+		surf[Mesh.ARRAY_COLOR] = cols
+		surf[Mesh.ARRAY_INDEX] = indices
+		am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, surf)
 	return am
 
 
@@ -327,7 +382,9 @@ func _on_mesh_job(job_id: int, data: Dictionary) -> void:
 	node.pending = false
 	if not node.cancelled and int(data.gen) == _gen:
 		var was_visible := node.mesh_inst.visible
+		node._patch_data = data
 		node.set_mesh(_gen_array_mesh(data), int(data.indices.size() / 3.0))
+		_apply_node_materials(node)
 		node.mesh_inst.visible = was_visible
 		node.built_key = node.req_key
 
@@ -373,9 +430,45 @@ func rebuild() -> void:
 
 func set_wireframe(on: bool) -> void:
 	_wire = on
-	material.wireframe = on
-	# 线框模式关掉背面剔除 → 前后三角边都画出来 = 纯透视 wireframe(只显示线, 非叠在实心面上)
-	material.cull_mode = BaseMaterial3D.CULL_DISABLED if on else BaseMaterial3D.CULL_BACK
+	# 线框模式: 每个 patch 用"深色实心面(写深度, 挡背面)+ 亮线段(只测深度)"双 surface(见 _gen_array_mesh)。
+	# → 背面/远侧线被前方实心面的深度剔除, 只看到朝向相机的可见线。
+	# 不再依赖失效的 material.wireframe, 也不再改共享 material(实心面/线段各有独立材质)。
+	# _refresh_subtree 重建 mesh 后会顺带调 _apply_node_materials 配材质。
+	_refresh_all_meshes()
+
+
+# 按 _wire 给节点配材质: 线框=surface0 实心遮挡面 + surface1 亮线段; 非线框=单 material_override(顶点色着色)。
+func _apply_node_materials(node: QNode) -> void:
+	if node.mesh_inst == null or node.mesh_inst.mesh == null:
+		return
+	if _wire:
+		node.mesh_inst.material_override = null
+		node.mesh_inst.set_surface_override_material(0, _wire_fill_mat)
+		if node.mesh_inst.mesh.get_surface_count() > 1:
+			node.mesh_inst.set_surface_override_material(1, _wire_line_mat)
+	else:
+		node.mesh_inst.material_override = material
+		for i in range(node.mesh_inst.mesh.get_surface_count()):
+			node.mesh_inst.set_surface_override_material(i, null)
+
+
+# 切换 wireframe 时, 遍历所有 patch(含已分裂子树 + 合并缓存), 用缓存的 _patch_data 重建 ArrayMesh
+func _refresh_all_meshes() -> void:
+	for r in roots:
+		_refresh_subtree(r)
+
+
+func _refresh_subtree(node: QNode) -> void:
+	if node.mesh_inst != null and node.mesh_inst.mesh != null and not node._patch_data.is_empty():
+		var tri: int = int(node.mesh_inst.get_meta("triangles", 0))
+		node.set_mesh(_gen_array_mesh(node._patch_data), tri)
+		_apply_node_materials(node)
+	if node.children != null:
+		for c in node.children:
+			_refresh_subtree(c)
+	if node._retired != null:
+		for c in node._retired:
+			_refresh_subtree(c)
 
 
 # 地形参数快照(传给 worker 线程, 避免跨线程读 PlanetParams)

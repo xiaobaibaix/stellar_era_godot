@@ -62,8 +62,11 @@ static func _mk_cellular(seedv: int, freq: float) -> FastNoiseLite:
 	n.noise_type = FastNoiseLite.TYPE_CELLULAR
 	n.seed = seedv
 	n.frequency = freq
-	# cellular_distance 用默认(EUCLIDEAN); DISTANCE2_SUB = F2-F1(细胞边界处→0 起脊)。
-	n.cellular_return_type = FastNoiseLite.CELLULAR_RETURN_DISTANCE2_SUB
+	# cellular_distance 用默认(EUCLIDEAN); return_type=4 ≈ F2-F1(细胞边界处→0 起脊, 起板块脊)。
+	# 本版 FastNoiseLite 枚举无 DISTANCE2_SUB 成员名, 直接用整数值; 双注解压掉 int-as-enum 警告。
+	@warning_ignore("int_as_enum_without_match")
+	@warning_ignore("int_as_enum_without_cast")
+	n.cellular_return_type = 4
 	return n
 
 
