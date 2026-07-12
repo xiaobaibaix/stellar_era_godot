@@ -11,12 +11,13 @@ shader_type spatial;
 // 反投影: ndc.z = depth*2-1 → INV_PROJECTION → INV_VIEW。地面球 uRground 兜底(深度读不准也安全)。
 //
 // render_mode 说明:
-// - cull_disabled: 双面渲染。圆盘上的【近侧壳面】比地形更靠近相机 → 通过深度测试, 覆盖整盘画大气+云;
-//   远侧壳面在地形之后 → 被地形深度(early-Z)廉价剔除。相机进壳内(角色模式)时头顶壳面是最近几何 →
-//   同样通过深度测试画出大气。不依赖 depth_test_disabled(该标志运行期不可靠 → 曾导致运行时云被地形盖住)。
-// - depth_draw_never: 壳不写深度(只测), 避免壳互相/与地形乱写深度。积分终止靠场景深度纹理 + 解析地面球。
+// - cull_disabled + depth_test_disabled: 双面渲染且【不做深度测试】→ 壳绝不被地形/海洋遮挡, 总能覆盖整盘
+//   画大气+云。运行时全管线(阴影/深度 prepass)下, 靠"近侧壳面比地形近 → 通过深度测试盖盘"曾不稳定
+//   (盘心大气/云被地形盖住 = "云在球后面"); depth_test_disabled 根除该依赖。双面会让同一像素的近/远
+//   两面都积分并复合(大气叠加两次)→ 片元里按相机壳内外只保留一面(见 fragment 的 gl_FrontFacing 判定)。
+// - depth_draw_never: 壳不写深度, 避免壳互相/与地形乱写深度。积分终止靠解析地面球(场景深度仅辅助)。
 // - unshaded: 大气辐亮度已在片元里自行积分(含太阳散射/行星阴影 + 云自阴影), 不能再被引擎方向光二次照亮。
-render_mode cull_disabled, blend_mix, depth_draw_never, unshaded;
+render_mode cull_disabled, blend_mix, depth_draw_never, depth_test_disabled, unshaded;
 
 uniform sampler2D screen_texture : hint_screen_texture;
 uniform sampler2D depth_texture : hint_depth_texture;
@@ -222,6 +223,15 @@ void fragment() {
 	vec3 ro = INV_VIEW_MATRIX[3].xyz;              // 相机世界位
 	vec3 rd = normalize(v_world_pos - ro);         // 视线方向(片元决定)
 
+	// 单面化: cull_disabled + depth_test_disabled 下, 同一像素的近/远两面都会执行积分并复合 → 大气被叠加两次。
+	// 按相机在壳内外只保留【离相机最近】的那一面: 外部观察画前向面(近侧壳), 内部(地表行走)画背向内表面。
+	bool camOutside = length(ro - u_planet_center) > u_ratmo;
+	if (camOutside) {
+		if (!FRONT_FACING) discard;
+	} else {
+		if (FRONT_FACING) discard;
+	}
+
 	// 场景深度 → 场景距离 + 命中点(reverse-Z: depth≈0 = 天空/远平面)
 	float depth = texture(depth_texture, SCREEN_UV).r;
 	float sceneDist = 1e20;
@@ -244,9 +254,14 @@ void fragment() {
 	float tFar = atmo.y;
 	bool valid = tFar > tNear;
 	if (valid) {
-		tFar = min(tFar, sceneDist);                    // 在真实地表面停
+		// 积分终止: 解析地面球(稳定)为主; 场景深度仅当落在【tNear..ground】合理区间才采纳(地形峰高于海平面
+		// 时让积分在真实地表停)。运行时 depth 读受 far=2e5 精度/捕获时序影响可能偏小 → 直接 min 会让 tFar<tNear
+		// → valid=false → 盘心整段大气+云消失(只剩临边环)= "云在球后面"。区间外忽略, 回退解析地面球保稳定。
 		vec2 gnd = raySphere(ro, rd, u_planet_center, u_rground);
-		if (gnd.x > 0.0 && gnd.y > gnd.x) tFar = min(tFar, gnd.x);   // 解析地面球兜底
+		float tGround = (gnd.x > 0.0 && gnd.y > gnd.x) ? gnd.x : tFar;
+		float tStop = tGround;
+		if (hitGround && sceneDist > tNear && sceneDist < tGround) tStop = sceneDist;
+		tFar = min(tFar, tStop);
 		valid = tFar > tNear;
 	}
 
