@@ -58,6 +58,9 @@ const STRIDE_BUDGET := 24   # 每 LOD pass 最多 compute_strides 次数(每次=
 var _prefetch_this_frame: int = 0
 var _lod_tick: int = 0
 var _stride_used: int = 0
+var _remaining_splits: int = 0  # 本 LOD pass 剩余分裂预算(移植 web splitBudget)
+var _lod_dirty: int = 3         # >0 需跑 select_lod; 移动/相机变换/有在途 job 时置 3, 空闲逐拍递减到 0 后短路
+var _last_cam_xform: Transform3D = Transform3D()  # 上次渲染相机变换(检测原地转视角 → 更新视锥剔除)
 
 
 # 作为预制体节点: 进树即自动构建; _process 自动取场景活动相机驱动 LOD。
@@ -537,6 +540,15 @@ func stride_budget_ok() -> bool:
 	return false
 
 
+# 每帧分裂预算(移植 web splitBudget): 单个 LOD pass 最多新分裂 params.splitBudget 个 chunk。
+# 限制靠近时 worker 队列瞬时暴涨, 把生成峰值摊到多帧; 预算用完的 chunk 本帧退化为叶。
+func split_budget_ok() -> bool:
+	if _remaining_splits > 0:
+		_remaining_splits -= 1
+		return true
+	return false
+
+
 func count_node(node: QNode) -> void:
 	stats.patches += 1
 	if node.mesh_inst.mesh != null:
@@ -547,21 +559,33 @@ func update(cam: Camera3D) -> void:
 	# LOD 距离判定用 lod_target(如 Player); 视锥剔除仍用渲染相机 cam 的 frustum。
 	var focus: Node3D = lod_target if lod_target != null else cam
 	var cp: Vector3 = focus.global_position - global_position
-	_cam_moved = cp.distance_squared_to(_cam_pos) > 1e-6
-	_cam_pos = cp
-	var frustum: Array = cam.get_frustum()
-	# 统一时间戳传给 select_lod, 供 QNode 的合并宽限(merge cache)判断暂存是否到期
-	var now: float = Time.get_ticks_msec() / 1000.0
-	_prefetch_this_frame = 0  # 每帧重置预取配额
-	# 节流: select_lod 每帧遍历整棵四叉树 + compute_strides(纯 GDScript)是主线程热点。
-	# 每 LOD_TICK_EVERY 帧才完整跑一次(≈20Hz); 跳过的帧沿用上一帧可见性, 不影响渲染正确性,
-	# 只是 LOD/视锥剔除更新降到 ~20Hz。_cam_pos 在节流之前已更新 → target_level_at 用到当前位置。
+	# moved: 相对【上次真正跑 select_lod 时】的位置是否移动(_cam_pos 仅在真正跑时更新)。
+	var moved: bool = cp.distance_squared_to(_cam_pos) > 1e-6
+	# 相机变换变化: 角色模式下 lod_target=玩家, 原地转视角时 focus 不动但视锥变 → 需重跑更新视锥剔除。
+	var cam_xform: Transform3D = cam.global_transform
+	var cam_changed: bool = not cam_xform.is_equal_approx(_last_cam_xform)
+	# 静止短路(移植 web 版 !camMoved && inflight==0, 并加入相机变换检测): 移动/转视角/有在途 job →
+	# 标记需再跑几拍; 空闲后逐拍递减到 0 才短路(多跑几拍保证最后完成的 mesh 被 select_lod 显示出来)。
+	if moved or cam_changed or _pending > 0:
+		_lod_dirty = 3
+	if _lod_dirty <= 0:
+		stats.inflight = _pending
+		return
+	# 节流: select_lod 遍历整棵四叉树是主线程热点。每 LOD_TICK_EVERY 帧才完整跑一次(≈20Hz)。
 	_lod_tick += 1
 	if _lod_tick % LOD_TICK_EVERY != 0:
 		return
+	_lod_dirty -= 1
+	_cam_moved = moved
+	_cam_pos = cp
+	_last_cam_xform = cam_xform
+	var frustum: Array = cam.get_frustum()
+	var now: float = Time.get_ticks_msec() / 1000.0
+	_prefetch_this_frame = 0
 	stats.patches = 0
 	stats.triangles = 0
 	_stride_used = 0
+	_remaining_splits = params.splitBudget  # 每 LOD pass 重置分裂预算(移植 web splitBudget)
 	for r in roots:
 		r.select_lod(cp, frustum, _cam_moved, now)
 	stats.inflight = _pending
@@ -771,9 +795,6 @@ func _refresh_subtree(node: QNode) -> void:
 		_apply_node_materials(node)
 	if node.children != null:
 		for c in node.children:
-			_refresh_subtree(c)
-	if node._retired != null:
-		for c in node._retired:
 			_refresh_subtree(c)
 
 

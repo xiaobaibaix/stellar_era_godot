@@ -230,6 +230,18 @@ signal bulk_changed
 ## 近距半径: 相机距 patch < 此值时强制按距离细分、不参与视锥剔除(避免环视时背后补细分)。
 @export_range(1.0, 500.0, 1.0) var nearRadius: float = 50.0:
 	set(v): nearRadius = v; param_changed.emit("nearRadius")
+## 地平线剔除(移植 web 版): 剔掉被行星本体挡在背面的 chunk。站在地表/贴近时约一半 chunk 在背面 →
+## 直接跳过遍历与渲染, 大幅降 patch/三角数(角色模式性能主要来源)。远距观察全球时天然无剔除。
+@export var horizonCulling: bool = true:
+	set(v): horizonCulling = v; param_changed.emit("horizonCulling")
+## 合并滞回(移植 web 版): 分裂阈 d < edge×splitFactor; 合并阈 d > edge×splitFactor×mergeHysteresis。
+## 两阈之间留死区 → 消除细分边界来回抖动(churn), 取代旧的 retired 合并缓存。
+@export_range(1.0, 2.0, 0.01) var mergeHysteresis: float = 1.15:
+	set(v): mergeHysteresis = v; param_changed.emit("mergeHysteresis")
+## 每帧分裂预算(移植 web 版): 单个 LOD pass 最多新分裂多少个 chunk。限制靠近时 worker 队列瞬时暴涨,
+## 把生成峰值摊到多帧。预算用完的 chunk 本帧退化为叶(父层暂显), 下帧继续。
+@export_range(1, 64, 1) var splitBudget: int = 16:
+	set(v): splitBudget = v; param_changed.emit("splitBudget")
 
 # ---- 大陆噪声 fBm ----
 @export_group("大陆噪声")

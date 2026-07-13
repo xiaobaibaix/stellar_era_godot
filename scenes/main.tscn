@@ -45,18 +45,11 @@ height = 80.0
 resource_local_to_scene = true
 script = ExtResource("4_jyhfs")
 radius = 500.0
+showInset = false
+showOcean = false
 showClouds = false
 showGodrays = false
 walkSpeed = 10.0
-atmoScale = 1.096
-atmoRayleigh = 0.132
-atmoMie = 0.031
-atmoMieG = 0.45
-atmoDensityFalloff = 16.0
-atmoSteps = 64
-atmoLightSteps = 32
-atmoShadowSoftness = 0.0
-atmoDither = 0.76
 cloudBottom = 1.025
 cloudTop = 1.08
 cloudCoverage = 0.51
@@ -83,28 +76,6 @@ no_depth_test = true
 shading_mode = 0
 albedo_color = Color(0.2, 1, 0.35, 0.15)
 
-[sub_resource type="Resource" id="Resource_ya4ey"]
-resource_local_to_scene = true
-script = ExtResource("4_jyhfs")
-radius = 500.0
-showAtmosphere = false
-showClouds = false
-walkSpeed = 10.0
-atmoScale = 1.191
-atmoRayleigh = 0.045
-atmoMie = 0.06
-atmoMieG = 0.6
-atmoDensityFalloff = 9.9
-atmoMieFalloff = 15.0
-cloudBottom = 1.0
-cloudTop = 1.103
-cloudDensity = 30.0
-cloudFreq = 0.158
-cloudWarp = 0.0
-cloudWindSpeed = 0.1
-splitFactor = 3.0
-prefetchFactor = 2.0
-
 [node name="Main" type="Node" unique_id=502546147 node_paths=PackedStringArray("camera", "player", "toggle", "wire_toggle", "ball_toggle", "display_ball", "preload_ball", "player_display_ball", "player_preload_ball", "planet", "fps_label")]
 script = ExtResource("6_main")
 camera = NodePath("Camera/Camera3D")
@@ -128,7 +99,7 @@ shadow_enabled = true
 directional_shadow_max_distance = 200.0
 
 [node name="Camera" type="Node3D" parent="." unique_id=1997738350]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1034.3752)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 838.48474)
 
 [node name="Camera3D" type="Camera3D" parent="Camera" unique_id=1625772579]
 current = true
@@ -166,12 +137,6 @@ visible = false
 material_override = SubResource("StandardMaterial3D_choun")
 mesh = SubResource("SphereMesh_3xd07")
 
-[node name="Planet2" parent="." unique_id=1923769825 node_paths=PackedStringArray("camera", "sun_light") instance=ExtResource("2_sugp2")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1452, 0, 0)
-params = SubResource("Resource_ya4ey")
-camera = NodePath("../Camera/Camera3D")
-sun_light = NodePath("../DirectionalLight3D")
-
 [node name="CheckButtonWire" type="CheckButton" parent="." unique_id=204736276]
 offset_top = 31.0
 offset_right = 112.0
@@ -193,5 +158,5 @@ text = "跟随角色"
 offset_left = 860.0
 offset_right = 1136.0
 offset_bottom = 26.0
-text = "FPS:64  patch:140  tri:49.3k  job:0"
+text = "FPS:140  patch:182  tri:64.1k  job:0"
 horizontal_alignment = 2
