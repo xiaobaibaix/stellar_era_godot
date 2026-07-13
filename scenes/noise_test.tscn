@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://cpyvjf3u02skr"]
+
+[ext_resource type="Script" uid="uid://bxujwc88u31tg" path="res://scripts/terrain/noise_selftest.gd" id="1_selftest"]
+
+[node name="NoiseTest" type="Node" unique_id=1325076331]
+script = ExtResource("1_selftest")

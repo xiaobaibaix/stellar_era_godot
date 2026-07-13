@@ -1,31 +1,42 @@
-## 地形高度场 + 生物群系配色(移植 src/terrain.js)。
-## 单值径向高度场 → 碰撞/缝合/无限细节全部保持。
-## Simplex 用 Godot 内置 FastNoiseLite(C++ 实现), Worley 用 NoiseWorley。
-## 一个"代"内参数快照为局部常量, 保证主线程与 worker 结果一致。
+## 地形高度场 + 生物群系配色(Phase 1+ : GPU/CPU 共享整数哈希噪声版)。
+##
+## height_at / color_for 与 shaders/terrain.gdshader 的 terrain_height / terrain_color
+## 【逐位一致】(同 NoiseShared 噪声 + 同种子偏移式) —— GPU 视觉位移与 CPU 碰撞(planet_walker 贴地)
+## 共用同一高度场, 不一致就会穿地/悬空。NoiseShared 已通过 Step1 自检(误差 ≤ 8bit 量化)。
+##
+## 单值径向高度场 → 碰撞/无限细节全部保持。接口不变, planet.gd / patch_builder / planet_walker 无感。
 class_name Terrain
 extends RefCounted
 
-# 参数快照
+# 种子偏移式: 每个噪声 = vec3(seed)·(1,2,3); 与 shader uniform u_off_* 同式(planet.gd 推给 shader)。
+static func off(seedv: int) -> Vector3:
+	return Vector3(float(seedv), float(seedv) * 2.0, float(seedv) * 3.0)
+
+# 参数快照(与 PlanetParams 对应)
 var sea: float = 0.0
-var warp: float = 0.0
+var warp: float = 0.2
 var wf: float = 1.0
-var plate: float = 0.0
+var cont_freq: float = 1.2
+var cont_oct: int = 5
+var cont_gain: float = 0.5
+var cont_lac: float = 2.0
+var mtn_freq: float = 3.0
+var mtn_oct: int = 5
+var mtn_strength: float = 0.6
+var plate: float = 0.5
 var pf: float = 1.6
-var plate_seed: int = 555
+var mo_freq: float = 1.2
 var use_climate: bool = true
 var alt_range: float = 1.0
-var mtn_strength: float = 0.6
-var mo_freq: float = 1.2
 
-# 噪声(大陆/山脉/域扭曲/湿度/板块)
-var noise_c: FastNoiseLite
-var noise_m: FastNoiseLite
-var noise_w: FastNoiseLite
-var noise_h: FastNoiseLite
-# 板块边界带: FastNoiseLite cellular(F2-F1, C++ 实现替代自写 Worley —— 后者是 height_at 头号 GDScript 热点)
-var noise_plate: FastNoiseLite
+# 种子偏移(由 *Seed 算出)
+var off_warp: Vector3
+var off_cont: Vector3
+var off_mtn: Vector3
+var off_plate: Vector3
+var off_moist: Vector3
 
-# 调色板(对应 terrain.js 默认值)
+# 调色板(与 shader u_col_* 一致; 旧 FastNoiseLite 版的 COL_* 默认值)
 const COL_OCEAN_SHALLOW := Color(0.20, 0.45, 0.62)
 const COL_OCEAN_DEEP := Color(0.03, 0.12, 0.30)
 const COL_BEACH := Color(0.82, 0.78, 0.55)
@@ -37,113 +48,86 @@ const COL_ROCK := Color(0.50, 0.50, 0.52)
 const COL_SNOW := Color(0.97, 0.97, 1.0)
 
 
-static func _mk_noise(seedv: int, freq: float, octaves: int, gain: float, lac: float, fractal: FastNoiseLite.FractalType) -> FastNoiseLite:
-	var n := FastNoiseLite.new()
-	n.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	n.seed = seedv
-	n.frequency = freq
-	n.fractal_type = fractal
-	n.fractal_octaves = octaves
-	n.fractal_gain = gain
-	n.fractal_lacunarity = lac
-	return n
-
-
-static func _mk_simplex(seedv: int, freq: float) -> FastNoiseLite:
-	var n := FastNoiseLite.new()
-	n.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	n.seed = seedv
-	n.frequency = freq
-	return n
-
-
-static func _mk_cellular(seedv: int, freq: float) -> FastNoiseLite:
-	var n := FastNoiseLite.new()
-	n.noise_type = FastNoiseLite.TYPE_CELLULAR
-	n.seed = seedv
-	n.frequency = freq
-	# cellular_distance 用默认(EUCLIDEAN); return_type=4 ≈ F2-F1(细胞边界处→0 起脊, 起板块脊)。
-	# 本版 FastNoiseLite 枚举无 DISTANCE2_SUB 成员名, 直接用整数值; 双注解压掉 int-as-enum 警告。
-	@warning_ignore("int_as_enum_without_match")
-	@warning_ignore("int_as_enum_without_cast")
-	n.cellular_return_type = 4
-	return n
-
-
-## 从 PlanetParams 构造(主线程用)
 static func from_params(p: PlanetParams) -> Terrain:
 	var t := Terrain.new()
 	t.sea = p.seaLevel
 	t.warp = p.warpStrength
 	t.wf = p.warpFreq
+	t.cont_freq = p.continentFreq
+	t.cont_oct = p.continentOctaves
+	t.cont_gain = p.continentGain
+	t.cont_lac = p.continentLacunarity
+	t.mtn_freq = p.mountainFreq
+	t.mtn_oct = p.mountainOctaves
+	t.mtn_strength = p.mountainStrength
 	t.plate = p.plateStrength
 	t.pf = p.plateFreq
-	t.plate_seed = p.plateSeed
+	t.mo_freq = p.moistureFreq
 	t.use_climate = p.useClimate
 	t.alt_range = p.climateAltRange
-	t.mtn_strength = p.mountainStrength
-	t.mo_freq = p.moistureFreq
-	t.noise_c = _mk_noise(p.continentSeed, p.continentFreq, p.continentOctaves, p.continentGain, p.continentLacunarity, FastNoiseLite.FRACTAL_FBM)
-	t.noise_m = _mk_noise(p.mountainSeed, p.mountainFreq, p.mountainOctaves, 0.5, 2.0, FastNoiseLite.FRACTAL_RIDGED)
-	t.noise_w = _mk_simplex(p.warpSeed, p.warpFreq)
-	t.noise_h = _mk_simplex(p.moistureSeed, p.moistureFreq)
-	t.noise_plate = _mk_cellular(p.plateSeed, p.plateFreq)
+	t.off_warp = off(p.warpSeed)
+	t.off_cont = off(p.continentSeed)
+	t.off_mtn = off(p.mountainSeed)
+	t.off_plate = off(p.plateSeed)
+	t.off_moist = off(p.moistureSeed)
 	return t
 
 
-## 从参数快照字典构造(worker 线程用, 避免跨线程读 Resource)
 static func from_dict(d: Dictionary) -> Terrain:
 	var t := Terrain.new()
 	t.sea = d.seaLevel
 	t.warp = d.warpStrength
 	t.wf = d.warpFreq
+	t.cont_freq = d.continentFreq
+	t.cont_oct = d.continentOctaves
+	t.cont_gain = d.continentGain
+	t.cont_lac = d.continentLacunarity
+	t.mtn_freq = d.mountainFreq
+	t.mtn_oct = d.mountainOctaves
+	t.mtn_strength = d.mountainStrength
 	t.plate = d.plateStrength
 	t.pf = d.plateFreq
-	t.plate_seed = d.plateSeed
+	t.mo_freq = d.moistureFreq
 	t.use_climate = d.useClimate
 	t.alt_range = d.climateAltRange
-	t.mtn_strength = d.mountainStrength
-	t.mo_freq = d.moistureFreq
-	t.noise_c = _mk_noise(d.continentSeed, d.continentFreq, d.continentOctaves, d.continentGain, d.continentLacunarity, FastNoiseLite.FRACTAL_FBM)
-	t.noise_m = _mk_noise(d.mountainSeed, d.mountainFreq, d.mountainOctaves, 0.5, 2.0, FastNoiseLite.FRACTAL_RIDGED)
-	t.noise_w = _mk_simplex(d.warpSeed, d.warpFreq)
-	t.noise_h = _mk_simplex(d.moistureSeed, d.moistureFreq)
-	t.noise_plate = _mk_cellular(d.plateSeed, d.plateFreq)
+	t.off_warp = off(int(d.warpSeed))
+	t.off_cont = off(int(d.continentSeed))
+	t.off_mtn = off(int(d.mountainSeed))
+	t.off_plate = off(int(d.plateSeed))
+	t.off_moist = off(int(d.moistureSeed))
 	return t
 
 
+# 高度场(与 shaders/terrain.gdshader::terrain_height 逐位一致)。x,y,z = 单位方向 d。
 func height_at(x: float, y: float, z: float) -> float:
-	# 域扭曲: 一层噪声扰动采样坐标
-	var wx: float = x
-	var wy: float = y
-	var wz: float = z
+	var d := Vector3(x, y, z)
+	var pw := d
 	if warp > 0.0:
-		var q0: float = noise_w.get_noise_3d(x * wf, y * wf, z * wf)
-		var q1: float = noise_w.get_noise_3d(x * wf + 31.4, y * wf + 12.7, z * wf + 5.2)
-		var q2: float = noise_w.get_noise_3d(x * wf + 7.7, y * wf + 41.3, z * wf + 19.1)
-		wx = x + warp * q0
-		wy = y + warp * q1
-		wz = z + warp * q2
-	# 大陆(低频 fBm) → 掩膜(海里不叠山)
-	var cont: float = noise_c.get_noise_3d(wx, wy, wz)
+		var wp := d * wf + off_warp
+		var q0: float = NoiseShared.noise3(wp.x, wp.y, wp.z)
+		var q1: float = NoiseShared.noise3(wp.x + 31.4, wp.y + 12.7, wp.z + 5.2)
+		var q2: float = NoiseShared.noise3(wp.x + 7.7, wp.y + 41.3, wp.z + 19.1)
+		pw = d + Vector3(q0, q1, q2) * warp
+	var cp := pw * cont_freq + off_cont
+	var cont: float = NoiseShared.fbm(cp.x, cp.y, cp.z, cont_oct, cont_gain, cont_lac)
 	var land: float = smoothstep(-0.06, 0.10, cont)
-	# 山脉(ridged): ridged 噪声映射到 [0,1]
-	var mr: float = noise_m.get_noise_3d(wx, wy, wz)
-	var mtn: float = clampf(1.0 - abs(mr), 0.0, 1.0)
-	# 板块边界带: cellular F2-F1(边界处→0, 内部→大); 1-(F2-F1) 在边界→1 起脊
+	var mp := pw * mtn_freq + off_mtn
+	var mtn: float = clampf(NoiseShared.ridged(mp.x, mp.y, mp.z, mtn_oct, 0.5, 2.0), 0.0, 1.0)
 	var belt: float = 0.0
 	if plate > 0.0:
-		var f2_f1: float = noise_plate.get_noise_3d(wx, wy, wz)
+		var pp := pw * pf + off_plate
+		var f2_f1: float = NoiseShared.worley_f2f1(pp.x, pp.y, pp.z)
 		belt = pow(1.0 - clampf(f2_f1, 0.0, 1.0), 6.0)
 	var mountains: float = (mtn + belt * plate) * land
 	return cont + mountains * mtn_strength
 
 
+# 配色(与 shaders/terrain.gdshader::terrain_color 逐位一致)。h=高度, x,y,z=方向 d。
 func color_for(h: float, x: float, y: float, z: float) -> Color:
-	# 海洋: 深浅水渐变
+	var d := Vector3(x, y, z)
 	if h < sea:
-		var d: float = clampf((sea - h) / 0.3, 0.0, 1.0)
-		return COL_OCEAN_SHALLOW.lerp(COL_OCEAN_DEEP, d)
+		var depth: float = clampf((sea - h) / 0.3, 0.0, 1.0)
+		return COL_OCEAN_SHALLOW.lerp(COL_OCEAN_DEEP, depth)
 	if not use_climate:
 		var t: float = clampf(h, 0.0, 1.0)
 		if t < 0.05:
@@ -153,18 +137,16 @@ func color_for(h: float, x: float, y: float, z: float) -> Color:
 		if t < 0.7:
 			return COL_ROCK
 		return COL_SNOW
-	# 海岸沙滩
 	if h - sea < 0.02:
 		return COL_BEACH
-	# 气候: 温度(海拔+纬度) × 湿度 → 生物群系
 	var alt: float = clampf((h - sea) / alt_range, 0.0, 1.0)
-	var lat: float = abs(y)  # 纬度 0..1
+	var lat: float = absf(d.y)
 	var temp: float = clampf((1.0 - alt) * (1.0 - lat), 0.0, 1.0)
-	var moist: float = noise_h.get_noise_3d(x * mo_freq, y * mo_freq, z * mo_freq) * 0.5 + 0.5
+	var ms := d * mo_freq + off_moist
+	var moist: float = NoiseShared.noise3(ms.x, ms.y, ms.z) * 0.5 + 0.5
 	moist = clampf(moist * (1.0 - alt * 0.4), 0.0, 1.0)
-	# 高海拔 / 极寒 → 岩石到雪
 	if alt > 0.72 or temp < 0.12:
-		var s: float = clampf((max(alt, 1.0 - temp) - 0.6) / 0.4, 0.0, 1.0)
+		var s: float = clampf((maxf(alt, 1.0 - temp) - 0.6) / 0.4, 0.0, 1.0)
 		return COL_ROCK.lerp(COL_SNOW, s)
 	var cold := COL_COLD_DRY.lerp(COL_COLD_WET, moist)
 	var warm := COL_DRY.lerp(COL_WET, moist)

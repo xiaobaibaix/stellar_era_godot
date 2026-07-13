@@ -21,7 +21,7 @@ var terrain: Terrain
 var roots: Array = []  # Array[QNode]
 var _V: Array = []  # 12 个单位顶点(Vector3)
 var _faces: Array = []  # 20 个 [i,j,k]
-var material: StandardMaterial3D
+var material: ShaderMaterial
 var _wire_fill_mat: StandardMaterial3D  # 线框模式实心遮挡面材质(surface 0)
 var _wire_line_mat: StandardMaterial3D  # 线框模式亮线段材质(surface 1)
 var stats: Dictionary = {"patches": 0, "triangles": 0, "inflight": 0}
@@ -86,11 +86,11 @@ func _ready() -> void:
 			_body_mesh.name = "BodyMesh"
 			add_child(_body_mesh, false, Node.INTERNAL_MODE_BACK)
 	if material == null:
-		material = StandardMaterial3D.new()
-		material.vertex_color_use_as_albedo = true
-		material.albedo_color = Color.WHITE
-		material.roughness = 0.9
-		material.cull_mode = BaseMaterial3D.CULL_BACK  # 封闭球壳剔除背面(对齐 web three.js FrontSide)。勿用 CULL_DISABLED: 双面渲染下 Godot 对 back-facing 三角形翻转法线做光照, 绕序被判背面时外侧亮区会反转。
+		var tsh := load("res://shaders/terrain.gdshader")
+		material = ShaderMaterial.new()
+		material.shader = tsh
+		material.resource_local_to_scene = false   # 共享一份; uniform 推一次全 patch 生效
+		# render_mode cull_back 已在 shader 里声明(封闭球壳); 此处不再设 StandardMaterial3D 选项。
 	if _wire_fill_mat == null:
 		# 线框模式的"实心遮挡面": 深色 + CULL_BACK + 写深度。背面三角形被剔除不写深度,
 		# 但前方三角形写了深度 → 背面/远侧的线段在深度测试时被挡掉(只看得见朝向相机的线)。
@@ -111,6 +111,7 @@ func _ready() -> void:
 	if roots.is_empty():
 		_build_noise()
 		_build_roots()
+	_apply_terrain_uniforms()
 	_last_params_hash = _compute_params_hash()
 	_log_ready()
 
@@ -289,6 +290,37 @@ func _on_param_changed(key: String) -> void:
 
 func _build_noise() -> void:
 	terrain = Terrain.from_params(params)
+
+
+# 把地形参数/种子偏移推到 terrain.gdshader uniform(与 terrain.gd height_at 同源 → GPU 视觉=CPU 碰撞)。
+func _apply_terrain_uniforms() -> void:
+	if material == null or params == null:
+		return
+	var p := params
+	material.set_shader_parameter("u_radius", p.radius)
+	material.set_shader_parameter("u_max_height", p.maxHeight)
+	material.set_shader_parameter("u_skirt_depth", p.maxHeight * 2.5)   # 裙边径向内缩, 盖 LOD 裂缝
+	material.set_shader_parameter("u_sea", p.seaLevel)
+	material.set_shader_parameter("u_warp", p.warpStrength)
+	material.set_shader_parameter("u_warp_freq", p.warpFreq)
+	material.set_shader_parameter("u_cont_freq", p.continentFreq)
+	material.set_shader_parameter("u_cont_oct", p.continentOctaves)
+	material.set_shader_parameter("u_cont_gain", p.continentGain)
+	material.set_shader_parameter("u_cont_lac", p.continentLacunarity)
+	material.set_shader_parameter("u_mtn_freq", p.mountainFreq)
+	material.set_shader_parameter("u_mtn_oct", p.mountainOctaves)
+	material.set_shader_parameter("u_mtn_strength", p.mountainStrength)
+	material.set_shader_parameter("u_plate", p.plateStrength)
+	material.set_shader_parameter("u_plate_freq", p.plateFreq)
+	material.set_shader_parameter("u_moist_freq", p.moistureFreq)
+	material.set_shader_parameter("u_alt_range", p.climateAltRange)
+	material.set_shader_parameter("u_use_climate", 1 if p.useClimate else 0)
+	material.set_shader_parameter("u_off_warp", Terrain.off(p.warpSeed))
+	material.set_shader_parameter("u_off_cont", Terrain.off(p.continentSeed))
+	material.set_shader_parameter("u_off_mtn", Terrain.off(p.mountainSeed))
+	material.set_shader_parameter("u_off_plate", Terrain.off(p.plateSeed))
+	material.set_shader_parameter("u_off_moist", Terrain.off(p.moistureSeed))
+	material.set_shader_parameter("u_sun_dir", _sun_dir)
 
 
 func height_at(x: float, y: float, z: float) -> float:
@@ -547,6 +579,7 @@ func rebuild() -> void:
 	_cam_pos = Vector3(1e9, 1e9, 1e9)
 	_build_noise()
 	_build_roots()
+	_apply_terrain_uniforms()
 	_resize_effects()      # 海平面/壳半径随 radius 重算
 	_apply_atmo_uniforms() # 重新推大气 uniform
 	_apply_ocean_uniforms() # 重新推海洋 uniform
@@ -690,6 +723,8 @@ func _update_sun() -> void:
 	var el: float = deg_to_rad(params.sunElevation)
 	var az: float = deg_to_rad(params.sunAzimuth)
 	_sun_dir = Vector3(cos(el) * cos(az), sin(el), cos(el) * sin(az)).normalized()
+	if material != null:
+		material.set_shader_parameter("u_sun_dir", _sun_dir)
 	if _atmo_mat != null:
 		_atmo_mat.set_shader_parameter("u_sun_dir", _sun_dir)
 	if _ocean_mat != null:

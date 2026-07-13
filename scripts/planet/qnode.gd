@@ -73,26 +73,10 @@ func set_mesh(am: ArrayMesh, tri_count: int) -> void:
 	mesh_inst.set_meta("triangles", tri_count)
 
 
-# 三条边(AB, AC, BC)的缝合步长
+# 三条边(AB, AC, BC)的缝合步长。Phase 1+ : 地形位移进 shader + 裙边盖缝 → strides 恒 [1,1,1],
+# 不再需要 target_level_at(原主线程热点: 每 patch 3 次递归四叉树)。snap_edge 见 stride<=1 直接返回。
 func compute_strides() -> Array:
-	if level == 0:
-		return [1, 1, 1]
-	var center := center_dir
-	var N: int = planet.params.patchResolution
-	var edges := [[A, B], [A, C], [B, C]]
-	var out := [1, 1, 1]
-	for e in range(3):
-		var P: Vector3 = edges[e][0]
-		var Q: Vector3 = edges[e][1]
-		var mid := (P + Q).normalized()
-		var sample := (mid + (mid - center) * 0.35).normalized()
-		var nb: int = planet.target_level_at(sample)
-		if nb < level:
-			var s: int = 1 << (level - nb)
-			if s > N:
-				s = N
-			out[e] = s
-	return out
+	return [1, 1, 1]
 
 
 # cam_pos: 行星本地系相机位置; frustum: 世界系 Plane[]; cam_moved: 相机是否移动; now: 当前秒
