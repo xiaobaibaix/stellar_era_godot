@@ -34,6 +34,10 @@ var _ocean_mat: ShaderMaterial
 var _atmo_mat: ShaderMaterial
 var _ocean_shader: Shader
 var _atmo_shader: Shader
+# 大气球壳(罩住整个行星): 半径 = R*atmoScale 的球壳, 挂 Planet 下随节点移动, 【不】跟随相机。
+# 这样编辑器视口相机(不在场景 Camera3D 位置)也能看到大气。depth_test_disabled 下壳覆盖的像素都积分;
+# shader 用 depth_texture 处理遮挡 → 相机在壳外(太空)/壳内(地表)都正确(raySphere 算 tNear/tFar,
+# 相机在内 tNear=0)。物理大气顶 u_ratmo = R*atmoScale = 壳半径。
 var _sun_dir: Vector3 = Vector3(0.739, 0.443, 0.515)   # normalize(1,0.6,0.8) 默认
 
 var _gen: int = 0
@@ -48,6 +52,7 @@ var _body_mesh: Node3D  # 所有 Qnode 的容器节点(BodyMesh)
 var _qnode_scene: PackedScene  # qnode.tscn 预制体
 var _last_params_hash: int = 0  # 参数指纹(轮询检测变化触发 rebuild, 绕过 @tool 信号不可靠)
 var _last_visual_hash: int = 0  # 视觉指纹(atmo*/sun*/show*): 变化只推 shader uniform, 不重建地形
+var _last_lod_hash: int = 0     # LOD 细分指纹(split*/maxLevel/...): 变化重跑 select_lod, 不重建地形
 var _param_tick: int = 0
 # 预取节流: 预取请求每帧上限 + 总 inflight 上限。超过则跳过预取 → 让位给"显示必需"的前景请求。
 const PREFETCH_PER_FRAME := 8
@@ -55,6 +60,8 @@ const PREFETCH_INFLIGHT_CAP := 16
 const FOREGROUND_INFLIGHT_CAP := 24  # 前景(显示必需)job 总上限; 防靠近/高细分时一次堆上百 job
 const LOD_TICK_EVERY := 3   # select_lod 每 N 帧跑一次(遍历整棵四叉树是主线程热点); ≈20Hz 够 LOD 用
 const STRIDE_BUDGET := 24   # 每 LOD pass 最多 compute_strides 次数(每次=3 target_level_at); 封顶 → 与移动速度解耦
+# 影响 LOD 细分但不重建地形的参数: 改了只需重跑 select_lod(相机静止也立即刷新)。
+const LOD_DIRTY_KEYS := ["maxLevel", "splitFactor", "prefetchFactor", "frustumMargin", "nearRadius", "horizonCulling", "mergeHysteresis", "splitBudget"]
 var _prefetch_this_frame: int = 0
 var _lod_tick: int = 0
 var _stride_used: int = 0
@@ -116,6 +123,7 @@ func _ready() -> void:
 		_build_roots()
 	_apply_terrain_uniforms()
 	_last_params_hash = _compute_params_hash()
+	_last_lod_hash = _compute_lod_hash()
 	_log_ready()
 
 
@@ -137,6 +145,11 @@ func _process(_delta: float) -> void:
 		if vh != _last_visual_hash:
 			_last_visual_hash = vh
 			_apply_visual_changes()
+		# LOD 细分参数(splitFactor/maxLevel/...)变化 → 标记脏, 相机静止也重跑 select_lod(编辑器轮询路径)。
+		var lh: int = _compute_lod_hash()
+		if lh != _last_lod_hash:
+			_last_lod_hash = lh
+			_mark_lod_dirty()
 	# 行星球心随节点变换实时同步(编辑器拖动 Planet 时大气跟着走): 壳虽挂在 Planet 下随变换移动,
 	# 但大气 shader 的 u_planet_center 是 uniform, 需每帧推 global_position, 否则散射中心滞后于壳几何。
 	if _atmo_mat != null:
@@ -155,6 +168,7 @@ func _process(_delta: float) -> void:
 			var rv := get_viewport()
 			cam = rv.get_camera_3d() if rv != null else null
 	if cam != null:
+		# 大气壳挂 Planet 下(随节点移动), 不再跟随相机 → 编辑器视口相机也能看到(不依赖 snap)。
 		update(cam)
 
 
@@ -235,6 +249,30 @@ func _compute_visual_hash() -> int:
 	return h
 
 
+# LOD 细分参数指纹(splitFactor/maxLevel/nearRadius/...): 任一变化 → 细分阈值变 → 需重跑 select_lod。
+# 与 _compute_params_hash / _compute_visual_hash 分离: 这些参数既不重建地形, 也不进 shader uniform,
+# 只影响 select_lod 的距离判定 → 单独指纹供编辑器轮询(运行时由 _on_param_changed 直接标记脏)。
+func _compute_lod_hash() -> int:
+	var p: PlanetParams = params
+	if p == null:
+		return 0
+	var h: int = hash(p.maxLevel)
+	h = (h * 31 + hash(p.splitFactor)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.prefetchFactor)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.frustumMargin)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.nearRadius)) & 0x7FFFFFFF
+	h = (h * 31 + hash(int(p.horizonCulling))) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.mergeHysteresis)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.splitBudget)) & 0x7FFFFFFF
+	return h
+
+
+# 把 LOD 标记为脏: 置 _lod_dirty=3 → 接下来几拍 select_lod 必跑(即使相机静止)。
+# 用于参数变更(split*/maxLevel/...)时立即刷新细分, 取代"必须动一下相机才生效"。
+func _mark_lod_dirty() -> void:
+	_lod_dirty = 3
+
+
 # 视觉参数变化的轻量应用(不重建地形): 缩放/壳半径 + 大气散射 uniform + 太阳方向 + 壳可见性。
 func _apply_visual_changes() -> void:
 	if params == null:
@@ -289,6 +327,8 @@ func _on_param_changed(key: String) -> void:
 				_apply_visual_changes()
 	if params.requires_rebuild(key):
 		rebuild()
+	elif key in LOD_DIRTY_KEYS:
+		_mark_lod_dirty()
 
 
 func _build_noise() -> void:
@@ -601,6 +641,7 @@ func rebuild() -> void:
 	roots.clear()
 	_cam_moved = true
 	_cam_pos = Vector3(1e9, 1e9, 1e9)
+	_lod_dirty = 3   # 重建后强制下几拍 select_lod 必跑 → 立即按相机距离重新细分(取代旧的间接 moved 触发)
 	_build_noise()
 	_build_roots()
 	_apply_terrain_uniforms()
@@ -680,6 +721,7 @@ func _resize_effects() -> void:
 	if _ocean_mesh != null:
 		_ocean_mesh.scale = Vector3.ONE * ground_r
 	if _atmo_mesh != null:
+		# 大气壳 = 物理大气顶球壳(radius = R*atmoScale), 罩住整个行星, 不跟随相机(见顶部说明)。
 		_atmo_mesh.scale = Vector3.ONE * (R * params.atmoScale)
 	if _atmo_mat != null:
 		_atmo_mat.set_shader_parameter("u_rground", ground_r)

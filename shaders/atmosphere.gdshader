@@ -10,16 +10,19 @@ shader_type spatial;
 // 深度约定: Godot 4 用 reverse-Z(depth 1=near, 0=far=天空)。几何 depth>0, 天空 depth≈0。
 // 反投影: ndc.z = depth*2-1 → INV_PROJECTION → INV_VIEW。地面球 uRground 兜底(深度读不准也安全)。
 //
+// 【大球壳大气】(2026-07 改): 几何壳 = 物理大气顶球壳(radius = R*atmoScale, 罩住整个行星), 挂 Planet 下
+// 随节点移动, 【不】跟随相机。这样编辑器视口相机(不在场景 Camera3D 位置)也能看到大气 —— 不依赖把壳
+// snap 到某台相机。相机在外(太空看行星)/在内(地表行走)走同一条代码路径。
+//
 // render_mode 说明:
-// - cull_disabled: 双面渲染。片元里按【相机壳内外 + FRONT_FACING】只保留离相机最近的一面(避免近/远两面
-//   都积分复合 = 大气叠加两次)。
-// - 深度测试【开】(默认, 不用 depth_test_disabled): 该最近面比【自身】地形更近 → 通过深度测试 → 覆盖
-//   自身圆盘画大气+云; 而当壳在【其他星球】之后(前方星球 mesh 更近)→ 壳片元深度测试失败被剔 → 不会把
-//   别的大气/云画到前方星球的 mesh 上。自身圆盘能画出来靠【选近面 + 解析地面球兜底 tFar】, 不依赖
-//   depth_test_disabled(那个会连前方星球的遮挡一起丢掉 → 别的星球大气盖到本星球上)。
-// - depth_draw_never: 壳不写深度, 避免壳互相/与地形乱写深度。积分终止靠解析地面球(场景深度仅辅助)。
+// - cull_disabled + 片元 discard 单面化: 相机在壳外 → 只画近面(FRONT_FACING); 相机在壳内 → 只画远面内壁
+//   (BACK_FACING)。否则近/远两面都积分 = 大气叠加两次(见 fragment 首段按相机位置二选一)。
+// - depth_test_disabled: 关深度测试。遮挡改由【片元内读 depth_texture】处理 —— raymarch 终止于场景深度
+//   反推的 sceneDist(命中地形/前方星球即停), 合成 L + sceneColor*T。这样相机在壳内(地表)看向地形时壳不被
+//   地形深度剔除 → 地表视角也有空气透视(若开深度测试, 远侧壳被地形挡掉 → 地表无大气); 且不依赖渲染顺序。
+// - depth_draw_never: 壳不写深度, 避免与地形/其他壳乱写深度。
 // - unshaded: 大气辐亮度已在片元里自行积分(含太阳散射/行星阴影 + 云自阴影), 不能再被引擎方向光二次照亮。
-render_mode cull_disabled, blend_mix, depth_draw_never, unshaded;
+render_mode cull_disabled, blend_mix, depth_draw_never, depth_test_disabled, unshaded;
 
 uniform sampler2D screen_texture : hint_screen_texture;
 uniform sampler2D depth_texture : hint_depth_texture;
@@ -225,13 +228,13 @@ void fragment() {
 	vec3 ro = INV_VIEW_MATRIX[3].xyz;              // 相机世界位
 	vec3 rd = normalize(v_world_pos - ro);         // 视线方向(片元决定)
 
-	// 单面化: cull_disabled + depth_test_disabled 下, 同一像素的近/远两面都会执行积分并复合 → 大气被叠加两次。
-	// 按相机在壳内外只保留【离相机最近】的那一面: 外部观察画前向面(近侧壳), 内部(地表行走)画背向内表面。
-	bool camOutside = length(ro - u_planet_center) > u_ratmo;
-	if (camOutside) {
-		if (!FRONT_FACING) discard;
+	// 单面化(cull_disabled 下避免近/远两面都积分 = 大气叠加两次)。壳是大球壳(罩住行星, 不跟随相机):
+	// 相机在壳外(太空) → 保留近面 FRONT_FACING; 相机在壳内(地表) → 保留远面内壁 BACK_FACING。
+	float cam_r = length(ro - u_planet_center);
+	if (cam_r > u_ratmo) {
+		if (!FRONT_FACING) discard;   // 壳外: 只画近面
 	} else {
-		if (FRONT_FACING) discard;
+		if (FRONT_FACING) discard;    // 壳内: 只画远面内壁
 	}
 
 	// 场景深度 → 场景距离 + 命中点(reverse-Z: depth≈0 = 天空/远平面)
