@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://ddtusac1yqfsh"
+path="res://.godot/imported/atmosphere_compute.glsl-f73b762ba431a47b58f1e43a7ea0d27e.res"
+
+[deps]
+
+source_file="res://shaders/compute/atmosphere_compute.glsl"
+dest_files=["res://.godot/imported/atmosphere_compute.glsl-f73b762ba431a47b58f1e43a7ea0d27e.res"]
+
+[params]
+

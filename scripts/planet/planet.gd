@@ -29,11 +29,12 @@ var _tla_cache: Dictionary = {}       # target_level_at 缓存: 量化方向(Vec
 var _tla_cache_gen: int = -1          # 缓存所属 generation; _gen 变(rebuild)时清空
 # Phase 2 大气壳 + 海洋(球壳 spatial shader)。建为 Planet 子节点(BodyMesh 兄弟)。
 var _ocean_mesh: MeshInstance3D
-var _atmo_mesh: MeshInstance3D
 var _ocean_mat: ShaderMaterial
-var _atmo_mat: ShaderMaterial
 var _ocean_shader: Shader
-var _atmo_shader: Shader
+# CompositorEffect 全屏后处理大气(移植 web 多 pass)。挂到场景 WorldEnvironment.compositor。
+# M1: 占位染色 pass 证明管线; M2 起换成真大气/合成/godray compute。
+var _atmo_compositor: AtmosphereCompositor
+var _atmo_comp_res: Compositor
 # 大气球壳(罩住整个行星): 半径 = R*atmoScale 的球壳, 挂 Planet 下随节点移动, 【不】跟随相机。
 # 这样编辑器视口相机(不在场景 Camera3D 位置)也能看到大气。depth_test_disabled 下壳覆盖的像素都积分;
 # shader 用 depth_texture 处理遮挡 → 相机在壳外(太空)/壳内(地表)都正确(raySphere 算 tNear/tFar,
@@ -118,6 +119,7 @@ func _ready() -> void:
 		_wire_line_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 		_wire_line_mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
 	_build_effects()  # 大气壳 + 海洋 mesh + shader(Phase 2)
+	_build_compositor()  # CompositorEffect 全屏后处理大气(挂 WorldEnvironment)
 	if roots.is_empty():
 		_build_noise()
 		_build_roots()
@@ -150,10 +152,9 @@ func _process(_delta: float) -> void:
 		if lh != _last_lod_hash:
 			_last_lod_hash = lh
 			_mark_lod_dirty()
-	# 行星球心随节点变换实时同步(编辑器拖动 Planet 时大气跟着走): 壳虽挂在 Planet 下随变换移动,
-	# 但大气 shader 的 u_planet_center 是 uniform, 需每帧推 global_position, 否则散射中心滞后于壳几何。
-	if _atmo_mat != null:
-		_atmo_mat.set_shader_parameter("u_planet_center", global_position)
+	# 推本帧场景参数给大气 CompositorEffect(sun_dir/planet_center/散射/云...)。
+	# 相机矩阵由 Compositor 从 render_data 自己取。
+	_push_compositor_frame()
 	# autoSun: 按 sunSpeed 进方位角(改 params.sunAzimuth → 触发 _on_param_changed → _update_sun)
 	if params != null and params.autoSun:
 		params.sunAzimuth = fmod(params.sunAzimuth + params.sunSpeed * _delta, 360.0)
@@ -277,14 +278,12 @@ func _mark_lod_dirty() -> void:
 func _apply_visual_changes() -> void:
 	if params == null:
 		return
-	_resize_effects()        # atmoScale/seaLevel/radius → 壳与海平面缩放 + u_rground/u_ratmo
-	_apply_atmo_uniforms()   # atmo* 散射参数 → 大气 shader uniform
+	_resize_effects()        # seaLevel/radius → 海平面缩放
 	_apply_ocean_uniforms()  # ocean* 海洋参数 → 海洋 shader uniform
 	_update_sun()            # sunElevation/sunAzimuth → u_sun_dir + sun_light 朝向
 	if _ocean_mesh != null:
 		_ocean_mesh.visible = params.showOcean
-	if _atmo_mesh != null:
-		_atmo_mesh.visible = params.showAtmosphere
+	# atmo*/cloud* 散射参数由 _push_compositor_frame 每帧推给 Compositor(无需在此处理)。
 
 
 func _diag_start() -> void:
@@ -314,17 +313,12 @@ func _on_param_changed(key: String) -> void:
 		"showOcean":
 			if _ocean_mesh != null:
 				_ocean_mesh.visible = params.showOcean
-		"showAtmosphere":
-			if _atmo_mesh != null:
-				_atmo_mesh.visible = params.showAtmosphere
 		"sunElevation", "sunAzimuth":
 			_update_sun()
-		"atmoScale":
-			_resize_effects()
 		_:
-			# atmo*/cloud*/ocean* 散射参数 + showClouds → 推 shader uniform(运行时信号路径; 编辑器靠视觉指纹轮询)
-			if key.begins_with("atmo") or key.begins_with("cloud") or key.begins_with("ocean") or key == "showClouds":
-				_apply_visual_changes()
+			# ocean* → 推海洋 uniform; atmo*/cloud*/showAtmosphere/showClouds 由 _push_compositor_frame 每帧推。
+			if key.begins_with("ocean"):
+				_apply_ocean_uniforms()
 	if params.requires_rebuild(key):
 		rebuild()
 	elif key in LOD_DIRTY_KEYS:
@@ -645,8 +639,7 @@ func rebuild() -> void:
 	_build_noise()
 	_build_roots()
 	_apply_terrain_uniforms()
-	_resize_effects()      # 海平面/壳半径随 radius 重算
-	_apply_atmo_uniforms() # 重新推大气 uniform
+	_resize_effects()      # 海平面随 radius 重算
 	_apply_ocean_uniforms() # 重新推海洋 uniform
 	if _wire:
 		set_wireframe(true)
@@ -657,21 +650,29 @@ func rebuild() -> void:
 func _build_effects() -> void:
 	if _ocean_shader == null:
 		_ocean_shader = load("res://shaders/ocean.gdshader")
-	if _atmo_shader == null:
-		_atmo_shader = load("res://shaders/atmosphere.gdshader")
-	# 球壳挂场景手建容器(Ocean/Atmosphere, 对齐 BodyMesh 组织方式)下; 无容器则 internal 建。
+	# 海洋球壳(spatial, 渲进场景 color, 供 Compositor 后处理采样)。大气已移到 CompositorEffect 全屏后处理。
 	_ocean_mesh = _ensure_effect_shell("Ocean", "OceanShell")
-	_atmo_mesh = _ensure_effect_shell("Atmosphere", "AtmosphereShell")
 	_ocean_mat = _ensure_shader_mat(_ocean_mesh, _ocean_shader)
-	_atmo_mat = _ensure_shader_mat(_atmo_mesh, _atmo_shader)
 	_resize_effects()
-	_apply_atmo_uniforms()
 	_apply_ocean_uniforms()
 	if _ocean_mesh != null:
 		_ocean_mesh.visible = params.showOcean
-	if _atmo_mesh != null:
-		_atmo_mesh.visible = params.showAtmosphere
 	_update_sun()
+
+
+# 建 CompositorEffect 全屏后处理大气并挂到场景 WorldEnvironment 节点的 compositor 属性。
+# (compositor 在 WorldEnvironment 节点上, 不在 Environment 资源上。)
+# 场景里没有 WorldEnvironment(如单独编辑 planet.tscn)→ 跳过(大气只在主场景 main.tscn 里生效)。
+func _build_compositor() -> void:
+	if _atmo_compositor != null:
+		return
+	var we: WorldEnvironment = get_node_or_null("../WorldEnvironment")
+	if we == null:
+		return
+	_atmo_compositor = AtmosphereCompositor.new()
+	_atmo_comp_res = Compositor.new()
+	_atmo_comp_res.compositor_effects = [_atmo_compositor]
+	we.compositor = _atmo_comp_res
 
 
 func _make_effect_sphere(n: String) -> MeshInstance3D:
@@ -712,7 +713,7 @@ func _ensure_shader_mat(mi: MeshInstance3D, sh: Shader) -> ShaderMaterial:
 	return mat
 
 
-# 海平面半径 = radius + seaLevel*maxHeight; 大气壳 = radius*atmoScale。
+# 海平面半径 = radius + seaLevel*maxHeight。大气半径(ratmo/cbottom/ctop)由 _push_compositor_frame 每帧推。
 func _resize_effects() -> void:
 	if params == null:
 		return
@@ -720,54 +721,54 @@ func _resize_effects() -> void:
 	var ground_r: float = R + params.seaLevel * params.maxHeight
 	if _ocean_mesh != null:
 		_ocean_mesh.scale = Vector3.ONE * ground_r
-	if _atmo_mesh != null:
-		# 大气壳 = 物理大气顶球壳(radius = R*atmoScale), 罩住整个行星, 不跟随相机(见顶部说明)。
-		_atmo_mesh.scale = Vector3.ONE * (R * params.atmoScale)
-	if _atmo_mat != null:
-		_atmo_mat.set_shader_parameter("u_rground", ground_r)
-		_atmo_mat.set_shader_parameter("u_ratmo", R * params.atmoScale)
-		_atmo_mat.set_shader_parameter("u_planet_center", global_position)
 
 
-# 把 atmo* 散射参数推到大气 shader uniform(scatter_r/ozone 用 web 的 RATIO 乘 atmoRayleigh/atmoOzone)。
-func _apply_atmo_uniforms() -> void:
-	if _atmo_mat == null or params == null:
+# 每帧把场景参数推给大气 CompositorEffect(主线程 → 渲染线程经 Mutex)。相机矩阵(invViewProj/camPos)
+# 由 Compositor 自己从 render_data 取(编辑器/运行时相机都自动正确)。
+# 云频率 cfreq 按 radius 归一(对齐 web main.js: cloudFreq/radius*100)→ M4 在此完成。
+func _push_compositor_frame() -> void:
+	if _atmo_compositor == null or params == null:
 		return
 	var p := params
 	var R: float = p.radius
 	var ray_ratio := Vector3(0.1066, 0.3245, 0.6830)
 	var ozo_ratio := Vector3(0.35, 1.0, 0.045)
-	_atmo_mat.set_shader_parameter("u_scatter_r", ray_ratio * p.atmoRayleigh)
-	_atmo_mat.set_shader_parameter("u_scatter_m", p.atmoMie)
-	_atmo_mat.set_shader_parameter("u_mie_g", p.atmoMieG)
-	_atmo_mat.set_shader_parameter("u_ozone", ozo_ratio * p.atmoOzone)
-	_atmo_mat.set_shader_parameter("u_density_falloff", p.atmoDensityFalloff)
-	_atmo_mat.set_shader_parameter("u_mie_falloff", p.atmoMieFalloff)
-	_atmo_mat.set_shader_parameter("u_sun_intensity", p.atmoSunIntensity)
-	_atmo_mat.set_shader_parameter("u_exposure", p.atmoExposure)
-	_atmo_mat.set_shader_parameter("u_steps", p.atmoSteps)
-	_atmo_mat.set_shader_parameter("u_light_steps", p.atmoLightSteps)
-	_atmo_mat.set_shader_parameter("u_shadow_softness", p.atmoShadowSoftness)
-	_atmo_mat.set_shader_parameter("u_twilight", p.atmoTwilight)
-	_atmo_mat.set_shader_parameter("u_dither", p.atmoDither)
-	# 体积云(与大气同一 raymarch 积分): 云底/顶=radius×cloudBottom/Top; showClouds 开关 u_clouds_on。
-	# u_time 用 shader 内置 TIME; u_cwind/u_suncolor/u_ambient 用 shader 默认值(非 PlanetParams 项)。
-	_atmo_mat.set_shader_parameter("u_clouds_on", 1.0 if p.showClouds else 0.0)
-	_atmo_mat.set_shader_parameter("u_cloud_steps", p.cloudSteps)
-	_atmo_mat.set_shader_parameter("u_cbottom", R * p.cloudBottom)
-	_atmo_mat.set_shader_parameter("u_ctop", R * p.cloudTop)
-	_atmo_mat.set_shader_parameter("u_coverage", p.cloudCoverage)
-	_atmo_mat.set_shader_parameter("u_cdensity", p.cloudDensity)
-	_atmo_mat.set_shader_parameter("u_cfreq", p.cloudFreq)
-	_atmo_mat.set_shader_parameter("u_cwarp", p.cloudWarp)
-	_atmo_mat.set_shader_parameter("u_cwind_speed", p.cloudWindSpeed)
-	_atmo_mat.set_shader_parameter("u_clight_steps", p.cloudLightSteps)
-	_atmo_mat.set_shader_parameter("u_cabsorb", p.cloudAbsorb)
-	_atmo_mat.set_shader_parameter("u_silver", p.cloudSilver)
-	_atmo_mat.set_shader_parameter("u_powder", p.cloudPowder)
-	_atmo_mat.set_shader_parameter("u_cshadow", p.cloudShadow)
-	_atmo_mat.set_shader_parameter("u_sun_dir", _sun_dir)
-	_atmo_mat.set_shader_parameter("u_planet_center", global_position)
+	var ground_r: float = R + p.seaLevel * p.maxHeight
+	_atmo_compositor.enabled = p.showAtmosphere   # 关 = 跳过整条后处理(含云)
+	_atmo_compositor.set_frame_data({
+		"time": Time.get_ticks_msec() / 1000.0,
+		"sun_dir": _sun_dir,
+		"planet_center": global_position,
+		"rground": ground_r,
+		"ratmo": R * p.atmoScale,
+		"cbottom": R * p.cloudBottom,
+		"ctop": R * p.cloudTop,
+		"scatter_r": ray_ratio * p.atmoRayleigh,
+		"scatter_m": p.atmoMie,
+		"mie_g": p.atmoMieG,
+		"ozone": ozo_ratio * p.atmoOzone,
+		"density_falloff": p.atmoDensityFalloff,
+		"mie_falloff": p.atmoMieFalloff,
+		"sun_intensity": p.atmoSunIntensity,
+		"exposure": p.atmoExposure,
+		"steps": p.atmoSteps,
+		"cloud_steps": p.cloudSteps,
+		"light_steps": p.atmoLightSteps,
+		"cloud_light_steps": p.cloudLightSteps,
+		"dither": p.atmoDither,
+		"shadow_softness": p.atmoShadowSoftness,
+		"twilight": p.atmoTwilight,
+		"clouds_on": 1.0 if p.showClouds else 0.0,
+		"coverage": p.cloudCoverage,
+		"cdensity": p.cloudDensity,
+		"cfreq": p.cloudFreq / R * 100.0,   # 按半径归一(对齐 web; M4)
+		"cwarp": p.cloudWarp,
+		"cwindspeed": p.cloudWindSpeed,
+		"absorb": p.cloudAbsorb,
+		"silver": p.cloudSilver,
+		"powder": p.cloudPowder,
+		"cshadow": p.cloudShadow,
+	})
 
 
 # ocean* 海洋参数 → 海洋 shader uniform(深/浅水色 + 夜侧亮度 + 高光锐度/强度)。
@@ -791,8 +792,6 @@ func _update_sun() -> void:
 	_sun_dir = Vector3(cos(el) * cos(az), sin(el), cos(el) * sin(az)).normalized()
 	if material != null:
 		material.set_shader_parameter("u_sun_dir", _sun_dir)
-	if _atmo_mat != null:
-		_atmo_mat.set_shader_parameter("u_sun_dir", _sun_dir)
 	if _ocean_mat != null:
 		_ocean_mat.set_shader_parameter("u_sun_dir", _sun_dir)
 	if sun_light != null:
