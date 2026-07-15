@@ -181,7 +181,6 @@ func _compute_params_hash() -> int:
 		return 0
 	var h: int = hash(p.radius)
 	h = (h * 31 + hash(p.maxHeight)) & 0x7FFFFFFF
-	h = (h * 31 + hash(p.seaLevel)) & 0x7FFFFFFF
 	h = (h * 31 + hash(p.patchResolution)) & 0x7FFFFFFF
 	h = (h * 31 + hash(p.continentSeed)) & 0x7FFFFFFF
 	h = (h * 31 + hash(p.continentFreq)) & 0x7FFFFFFF
@@ -205,13 +204,15 @@ func _compute_params_hash() -> int:
 	return h
 
 
-# 视觉参数指纹(只含 atmo*/sun*/show*): 任一变化 → 哈希变 → _process 轮询到就 _apply_visual_changes。
-# 与 _compute_params_hash 分离: 这些参数改了只推 shader uniform, 不触发地形 rebuild。
+# 视觉参数指纹(含 atmo*/sun*/show*/seaLevel): 任一变化 → 哈希变 → _process 轮询到就 _apply_visual_changes。
+# 与 _compute_params_hash 分离: 这些参数改了只推 shader uniform/缩放, 不触发地形 rebuild。
+# seaLevel 在此: 改海平面只 resize 海洋球 + 推 terrain u_sea(水线/滩涂), 地形几何不动 → 不 rebuild。
 func _compute_visual_hash() -> int:
 	var p: PlanetParams = params
 	if p == null:
 		return 0
-	var h: int = hash(p.atmoScale)
+	var h: int = hash(p.seaLevel)
+	h = (h * 31 + hash(p.atmoScale)) & 0x7FFFFFFF
 	h = (h * 31 + hash(p.atmoRayleigh)) & 0x7FFFFFFF
 	h = (h * 31 + hash(p.atmoMie)) & 0x7FFFFFFF
 	h = (h * 31 + hash(p.atmoMieG)) & 0x7FFFFFFF
@@ -279,7 +280,10 @@ func _mark_lod_dirty() -> void:
 func _apply_visual_changes() -> void:
 	if params == null:
 		return
-	_resize_effects()        # seaLevel/radius → 海平面缩放
+	_resize_effects()        # seaLevel/radius → 海平面(海洋球)缩放
+	# seaLevel 是视觉参数(不重建地形): 推 terrain u_sea → 水线/滩涂着色随海平面更新。
+	if material != null:
+		material.set_shader_parameter("u_sea", params.seaLevel)
 	_apply_ocean_uniforms()  # ocean* 海洋参数 → 海洋 shader uniform
 	_update_sun()            # sunElevation/sunAzimuth → u_sun_dir + sun_light 朝向
 	if _ocean_mesh != null:

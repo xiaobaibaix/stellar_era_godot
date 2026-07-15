@@ -176,7 +176,7 @@ signal bulk_changed
 @export_group("海洋")
 ## 海平面高度阈值: height_at < seaLevel 视为海洋(陆地/海洋配色); 海洋球壳半径 = radius + seaLevel×maxHeight。
 ## 改它会重建地形网格(陆地/海洋分布变)。
-@export_range(-0.5, 0.5, 0.01) var seaLevel: float = 0.0:
+@export_range(-1.0, 1.0, 0.01) var seaLevel: float = 0.0:
 	set(v): seaLevel = v; param_changed.emit("seaLevel")
 ## 深水色(海平面看向深处的主色)。
 @export var oceanDeep: Color = Color(0.039, 0.118, 0.247):
@@ -322,7 +322,7 @@ func save_as_tres(path: String) -> Error:
 
 ## 这些 key 的变更需要重建地形网格(而非实时更新)
 const REBUILD_KEYS := [
-	"radius", "maxHeight", "seaLevel", "patchResolution",
+	"radius", "maxHeight", "patchResolution",
 	"continentSeed", "continentFreq", "continentOctaves", "continentGain", "continentLacunarity",
 	"mountainSeed", "mountainFreq", "mountainOctaves", "mountainStrength",
 	"warpSeed", "warpStrength", "warpFreq",

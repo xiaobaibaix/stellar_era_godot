@@ -215,7 +215,7 @@ vec3 terrain_color(float h, vec3 d) {
 		return u_col_snow;
 	}
 	if (h - u_sea < 0.02) return u_col_beach;
-	float alt = clamp((h - u_sea) / u_alt_range, 0.0, 1.0);
+	float alt = clamp(h / u_alt_range, 0.0, 1.0);   // 绝对高度: 雪线/岩线钉死, 不随海平面滑动(只有水线/滩涂跟海平面)
 	float lat = abs(d.y);
 	float temp = clamp((1.0 - alt) * (1.0 - lat), 0.0, 1.0);
 	float moist = noise3(d * u_moist_freq + u_off_moist) * 0.5 + 0.5;
