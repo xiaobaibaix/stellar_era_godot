@@ -81,16 +81,17 @@ func compute_strides() -> Array:
 
 
 # cam_pos: 行星本地系相机(或 lod_target)位置; frustum: 世界系 Plane[]; cam_moved: 是否移动; _now: 未用。
+# cull: 是否做剔除(地平线+视锥)。编辑器由 Planet.update 传 false → 只跑距离 LOD 细分, 不隐藏任何 chunk。
 # 移植 planet.js QNode.selectLOD: 地平线剔除 → 视锥剔除 → 分裂/合并滞回(带预算) → 渲染。
-func select_lod(cam_pos: Vector3, frustum: Array, cam_moved: bool, _now: float) -> void:
+func select_lod(cam_pos: Vector3, frustum: Array, cam_moved: bool, _now: float, cull: bool = true) -> void:
 	var p: PlanetParams = planet.params
 	# 1) 地平线剔除: 行星本体背面的 chunk 直接跳过(整棵子树隐藏)
-	if p.horizonCulling and _is_below_horizon(cam_pos):
+	if cull and p.horizonCulling and _is_below_horizon(cam_pos):
 		_hide_subtree()
 		return
 	var d: float = cam_pos.distance_to(center_world)
 	# 2) 视锥剔除(近处不剔, 避免环视时背后补细分)
-	if d >= p.nearRadius:
+	if cull and d >= p.nearRadius:
 		var r := bsphere_radius + d * p.frustumMargin
 		if not _sphere_in_frustum(frustum, center_world + planet.global_position, r):
 			_hide_subtree()
@@ -110,7 +111,7 @@ func select_lod(cam_pos: Vector3, frustum: Array, cam_moved: bool, _now: float) 
 	# 死区(既不分裂也不合并): 维持现状
 
 	if children != null:
-		_render_interior(cam_pos, frustum, cam_moved)
+		_render_interior(cam_pos, frustum, cam_moved, cull)
 	else:
 		_render_leaf()
 
@@ -126,7 +127,7 @@ func _render_leaf() -> void:
 
 
 # 渲染为内部节点: 4 子全就绪 → 隐藏自身、递归子; 否则请求缺失子 + 自身兜底显示(消除 pop-in)。
-func _render_interior(cam_pos: Vector3, frustum: Array, cam_moved: bool) -> void:
+func _render_interior(cam_pos: Vector3, frustum: Array, cam_moved: bool, cull: bool = true) -> void:
 	var all_ready: bool = (
 		children[0].mesh_inst.mesh != null
 		and children[1].mesh_inst.mesh != null
@@ -136,7 +137,7 @@ func _render_interior(cam_pos: Vector3, frustum: Array, cam_moved: bool) -> void
 	if all_ready:
 		mesh_inst.visible = false  # 隐藏本层 mesh(子 Qnode 是兄弟, 不受影响)
 		for c in children:
-			c.select_lod(cam_pos, frustum, cam_moved, 0.0)
+			c.select_lod(cam_pos, frustum, cam_moved, 0.0, cull)
 		return
 	# 子未就绪: 请求缺失子 patch, 隐藏子树, 自身兜底渲染
 	for c in children:

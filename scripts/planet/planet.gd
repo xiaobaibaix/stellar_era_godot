@@ -615,13 +615,16 @@ func update(cam: Camera3D) -> void:
 	_last_cam_xform = cam_xform
 	var frustum: Array = cam.get_frustum()
 	var now: float = Time.get_ticks_msec() / 1000.0
+	# 编辑器不做剔除(地平线+视锥): 只跑距离 LOD 细分, chunk 不因「相机看不到」而被隐藏;
+	# 运行时照常剔除。cull 经 select_lod/_render_interior 递归传到整棵四叉树。
+	var cull: bool = not Engine.is_editor_hint()
 	_prefetch_this_frame = 0
 	stats.patches = 0
 	stats.triangles = 0
 	_stride_used = 0
 	_remaining_splits = params.splitBudget  # 每 LOD pass 重置分裂预算(移植 web splitBudget)
 	for r in roots:
-		r.select_lod(cp, frustum, _cam_moved, now)
+		r.select_lod(cp, frustum, _cam_moved, now, cull)
 	stats.inflight = _pending
 
 
