@@ -130,7 +130,7 @@ vec4 cloud_c;           // cshadow, 0, 0, 0
 | **M4** 云尺度按半径归一 | ✅ 完成 | 已折进 M2 的 `_push_compositor_frame`：`cfreq = cloudFreq/radius*100`。 |
 | **M5** 体积光 godray | ✅ 完成 | `godray_copy.glsl`(color→lit 快照) + `godray_compute.glsl`(lit→color 径向累积) 两 pass 已接 `_render_callback`；太阳投屏幕 UV + `dot(camFwd,sunDir)` smoothstep 可见度；lit 快照解决单缓冲读写竞态。**待用户 F5 验观感/参数。** |
 | **M6** 清理 + 可选半分辨率 | ✅ 清理完成 | 已删 `shaders/atmosphere.gdshader`(spatial 版)+ `.uid`（M2 已清 planet.gd 球壳死代码，grep 复查无残留）。半分辨率拆分（`_lt_tex` + 全分辨率 composite）为**可选**性能优化；当前全分辨率融合 compute 工作良好，**暂缓**，需要时再做。 |
-| **M7**（可选）参数对齐 web | ⏳ 待做 | main.tscn 的 `Resource_tefeu` 与 web 默认差很多（见下表），架构完成后按需对齐。**不强制，属调参，用户决定。** |
+| **M7**（可选）参数对齐 web | ✅ 已对齐(试看) | main.tscn 已按 web `createAtmospherePass` 默认对齐：atmoMieG=0.76、atmoDensityFalloff=6、atmoMieFalloff=16、atmoSunIntensity=22、atmoShadowSoftness=0.6、atmoTwilight=0.3、atmoScale=1.2、cloud 全套 web 值（Density 1.2 / Freq 0.06 / Absorb 1 / Silver 1 / Powder 0.6 / Coverage 0.5 / Bottom 1.01 / Top 1.06 / Warp 0.5 / Wind 0.6）。保留 radius=500、atmoSteps/LightSteps=64/32（质量，LUT 后低成本）。**注意 `showClouds`/`showGodrays` 仍=false** → 翻开才看得到云/光束。不喜欢 `git checkout scenes/main.tscn` 还原。 |
 
 ### main.tscn 当前参数 vs planet_params 默认
 | 参数 | main.tscn | params 默认 | 备注 |

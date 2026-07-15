@@ -45,6 +45,7 @@ void main() {
 	for (int i = 0; i < 128; i++) {
 		if (i >= samples) break;
 		coord -= delta;
+		if (coord.x < 0.0 || coord.x > 1.0 || coord.y < 0.0 || coord.y > 1.0) break;  // 出屏即停, 不 clamp 到边缘 → 避免无尽涂抹/环形伪影
 		ivec2 sp = ivec2(clamp(coord * pc.raster_size, vec2(0.0), pc.raster_size - vec2(1.0)));
 		vec3 s = imageLoad(lit_image, sp).rgb;
 		float lum = dot(s, vec3(0.299, 0.587, 0.114));

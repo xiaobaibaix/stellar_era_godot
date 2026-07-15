@@ -4,9 +4,9 @@
 [ext_resource type="PackedScene" uid="uid://nuulebu1sk8m" path="res://scenes/planet.tscn" id="2_sugp2"]
 [ext_resource type="Script" uid="uid://cjg2w1cypjy4u" path="res://scripts/core/orbit_camera.gd" id="3_cam"]
 [ext_resource type="Script" uid="uid://c18n2n3tlwx8e" path="res://scripts/render/atmosphere_compositor.gd" id="3_o6xl0"]
-[ext_resource type="Script" uid="uid://7boxikbjeden" path="res://scripts/core/planet_params.gd" id="4_jyhfs"]
 [ext_resource type="PackedScene" uid="uid://m7jxxg83yibb" path="res://scenes/player.tscn" id="5_tbgi4"]
 [ext_resource type="Script" uid="uid://cnmiaw2pdp52j" path="res://scripts/core/main.gd" id="6_main"]
+[ext_resource type="Resource" uid="uid://dmfqh6jkjp8u3" path="res://assets/tres/planet_params.tres" id="6_o6xl0"]
 
 [sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_ihy5a"]
 panorama = ExtResource("1_0wfyh")
@@ -32,39 +32,6 @@ script = ExtResource("3_o6xl0")
 [sub_resource type="Compositor" id="Compositor_tipki"]
 compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_o6xl0")])
 
-[sub_resource type="Resource" id="Resource_85g3d"]
-resource_local_to_scene = true
-script = ExtResource("4_jyhfs")
-radius = 500.0
-showInset = false
-showOcean = false
-showClouds = false
-showGodrays = false
-walkSpeed = 10.0
-atmoMie = 0.03
-atmoDensityFalloff = 12.0
-atmoMieFalloff = 9.75
-atmoSunIntensity = 16.0
-atmoSteps = 64
-atmoLightSteps = 32
-atmoShadowSoftness = 0.24
-atmoTwilight = 0.35
-cloudBottom = 1.025
-cloudTop = 1.08
-cloudCoverage = 0.51
-cloudDensity = 6.6
-cloudFreq = 0.025
-cloudWarp = 0.4
-cloudWindSpeed = 0.1
-cloudAbsorb = 20.0
-cloudSilver = 3.35
-cloudPowder = 1.23
-continentSeed = 1345
-continentOctaves = 8
-mountainSeed = 9003
-warpStrength = 0.65
-warpFreq = 2.65
-
 [node name="Main" type="Node" unique_id=502546147 node_paths=PackedStringArray("camera", "player", "toggle", "wire_toggle", "planet", "fps_label")]
 script = ExtResource("6_main")
 camera = NodePath("Camera3D")
@@ -85,12 +52,12 @@ shadow_opacity = 0.5
 directional_shadow_max_distance = 200.0
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=1625772579]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1338.4277)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1328.9331)
 current = true
 script = ExtResource("3_cam")
 
 [node name="Planet" parent="." unique_id=1626788951 node_paths=PackedStringArray("camera", "sun_light") instance=ExtResource("2_sugp2")]
-params = SubResource("Resource_85g3d")
+params = ExtResource("6_o6xl0")
 camera = NodePath("../Camera3D")
 sun_light = NodePath("../DirectionalLight3D")
 

@@ -1,0 +1,25 @@
+[gd_resource type="Resource" script_class="PlanetParams" format=3 uid="uid://dmfqh6jkjp8u3"]
+
+[ext_resource type="Script" uid="uid://7boxikbjeden" path="res://scripts/core/planet_params.gd" id="1_jv6jj"]
+
+[resource]
+resource_local_to_scene = true
+script = ExtResource("1_jv6jj")
+radius = 1000.0
+maxHeight = 25.0
+showInset = false
+walkSpeed = 10.0
+atmoScale = 1.1
+atmoMie = 0.03
+atmoMieG = 0.76
+atmoSunIntensity = 22.0
+atmoExposure = 0.55
+atmoShadowSoftness = 0.44
+atmoOzone = 0.006
+atmoDither = 1.0
+splitBudget = 32
+continentSeed = 1345
+continentOctaves = 8
+mountainSeed = 9003
+warpStrength = 0.65
+warpFreq = 2.65

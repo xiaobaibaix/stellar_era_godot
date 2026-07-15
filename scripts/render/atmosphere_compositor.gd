@@ -426,6 +426,9 @@ func _dispatch_godray(f: Dictionary, rsd, cam_xform: Transform3D, cam_pos: Vecto
 	var sun_uv := Vector2(0.5, 0.5)
 	if absf(clip.w) > 1e-6:
 		sun_uv = Vector2(clip.x / clip.w * 0.5 + 0.5, clip.y / clip.w * 0.5 + 0.5)
+	# 太阳离屏过远 → 跳过 godray(径向采样跨度会过大, 在屏幕边缘产生"一环环无尽延伸"的涂抹伪影)
+	if sun_uv.x < -0.5 or sun_uv.x > 1.5 or sun_uv.y < -0.5 or sun_uv.y > 1.5:
+		return
 	# 太阳可见度: 相机朝向(-Z 世界)·太阳方向, smoothstep(0, 0.35)
 	var cam_fwd: Vector3 = -cam_xform.basis.z
 	var sv: float = clampf(cam_fwd.dot(sd) / 0.35, 0.0, 1.0)
