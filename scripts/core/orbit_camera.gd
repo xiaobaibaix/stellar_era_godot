@@ -22,6 +22,15 @@ var _cur_dist: float = 320.0
 
 
 func _ready() -> void:
+	# 用编辑器里摆好的相机位置反推 distance/yaw/pitch, 让运行起点 = 编辑器位置。
+	# 否则脚本默认 distance(800) < 行星半径(1000), 相机会落在星球内部, 每次运行都得手动拉出来。
+	# 仅当相机被实际摆放(离 target 较远)才覆盖; 用 .new() 建在原点的实例保持默认行为。
+	var origin := global_position
+	if origin.distance_squared_to(target) > 1.0:
+		var rel := origin - target
+		distance = rel.length()
+		pitch = asin(clampf(rel.y / distance, -1.0, 1.0))
+		yaw = atan2(rel.x, rel.z)
 	_cur_yaw = yaw
 	_cur_pitch = pitch
 	_cur_dist = distance

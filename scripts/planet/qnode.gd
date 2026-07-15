@@ -51,6 +51,10 @@ func setup(p, a: Vector3, b: Vector3, c: Vector3, lvl: int, qnode_scene: PackedS
 	mesh_inst.name = "Mesh"
 	mesh_inst.material_override = planet.material
 	mesh_inst.visible = false
+	# Godot 按 mesh AABB(顶点在未位移的 d*R 薄球壳)自动视锥剔除, 但地形位移(+maxHeight)/裙边(-skirt_depth)
+	# 都在顶点 shader 里做 → AABB 不含这部分 → 视锥边缘的 patch 被整片误剔成三角空洞(即 web 用 frustumCulled=false 规避的问题)。
+	# 加 cull margin 覆盖位移+裙边深度(u_skirt_depth=maxHeight*2.5), 让引擎不再误剔; 可见性交给 LOD(select_lod)+mesh_inst.visible。
+	mesh_inst.extra_cull_margin = planet.params.maxHeight * 3.5 + 1.0
 	var R: float = planet.params.radius
 	center_dir = (A + B + C).normalized()
 	center_world = center_dir * R
