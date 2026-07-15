@@ -17,6 +17,11 @@ class_name AtmosphereCompositor
 extends CompositorEffect
 
 const _SHADER_PATH := "res://shaders/compute/atmosphere_compute.glsl"
+const _GODRAY_COPY_PATH := "res://shaders/compute/godray_copy.glsl"
+const _GODRAY_PATH := "res://shaders/compute/godray_compute.glsl"
+const _LUT_PATH := "res://shaders/compute/transmittance_lut_compute.glsl"
+const _LUT_W := 256
+const _LUT_H := 64
 
 var _rd: RenderingDevice
 var _shader: RID
@@ -25,6 +30,29 @@ var _depth_sampler: RID
 var _mutex := Mutex.new()
 var _shader_dirty := true
 var _frame: Dictionary = {}
+
+# 体积光 God rays: copy(color→lit 快照) + godray(lit→color 径向累积)。lit = rgba16f 临时 storage 纹理。
+var _copy_shader: RID
+var _copy_pipeline: RID
+var _godray_shader: RID
+var _godray_pipeline: RID
+var _godray_tried := false
+var _godray_ready := false
+var _lit_tex: RID
+var _lit_size := Vector2i.ZERO
+
+# 透射率 LUT(M3): 256(mu)×64(r) rgba16f(rgb=向太阳光学深度)。大气参数变则重烘; 烘后下一帧起查表。
+var _lut_shader: RID
+var _lut_pipeline: RID
+var _lut_tried := false
+var _lut_tex: RID
+var _lut_sampler: RID
+var _lut_dirty := true
+var _lut_baking := false            # 本帧刚烘 → 本帧仍回退 march(避免同帧 storage→sampler 竞态), 下帧起查表
+var _lut_rground := NAN
+var _lut_ratmo := NAN
+var _lut_df := NAN
+var _lut_mf := NAN
 
 
 func _init() -> void:
@@ -43,6 +71,27 @@ func _notification(what: int) -> void:
 		if _depth_sampler.is_valid():
 			_rd.free_rid(_depth_sampler)
 			_depth_sampler = RID()
+		if _copy_shader.is_valid():
+			_rd.free_rid(_copy_shader)
+			_copy_shader = RID()
+			_copy_pipeline = RID()
+		if _godray_shader.is_valid():
+			_rd.free_rid(_godray_shader)
+			_godray_shader = RID()
+			_godray_pipeline = RID()
+		if _lit_tex.is_valid():
+			_rd.free_rid(_lit_tex)
+			_lit_tex = RID()
+		if _lut_shader.is_valid():
+			_rd.free_rid(_lut_shader)
+			_lut_shader = RID()
+			_lut_pipeline = RID()
+		if _lut_sampler.is_valid():
+			_rd.free_rid(_lut_sampler)
+			_lut_sampler = RID()
+		if _lut_tex.is_valid():
+			_rd.free_rid(_lut_tex)
+			_lut_tex = RID()
 
 
 # 主线程调用: 推入本帧场景参数快照(planet.gd 每帧调)。Mutex 保护跨线程读写。
@@ -97,6 +146,120 @@ func _ensure_depth_sampler() -> RID:
 	# depth 用 nearest(场景深度逐像素精确, 不做双线性模糊)
 	_depth_sampler = _rd.sampler_create(st)
 	return _depth_sampler
+
+
+# 编译一个 compute .glsl → [shader, pipeline]; 失败返回 [RID(), RID()] 并 push_error。
+func _compile_pipeline(path: String) -> Array:
+	var sf := load(path) as RDShaderFile
+	if sf == null:
+		push_error("[AtmosphereCompositor] load RDShaderFile 失败: " + path)
+		return [RID(), RID()]
+	var spirv: RDShaderSPIRV = sf.get_spirv()
+	if spirv == null or spirv.compile_error_compute != "":
+		push_error("[AtmosphereCompositor] compute 编译错误(" + path + "): " + (spirv.compile_error_compute if spirv != null else "null spirv"))
+		return [RID(), RID()]
+	var sh := _rd.shader_create_from_spirv(spirv)
+	if not sh.is_valid():
+		return [RID(), RID()]
+	return [sh, _rd.compute_pipeline_create(sh)]
+
+
+# 懒建 godray 的 copy + 径向两条 pipeline(只试一次); 都成功才返回 true。
+func _ensure_godray() -> bool:
+	if _godray_tried:
+		return _godray_ready
+	_godray_tried = true
+	var a := _compile_pipeline(_GODRAY_COPY_PATH)
+	_copy_shader = a[0]
+	_copy_pipeline = a[1]
+	var b := _compile_pipeline(_GODRAY_PATH)
+	_godray_shader = b[0]
+	_godray_pipeline = b[1]
+	_godray_ready = _copy_pipeline.is_valid() and _godray_pipeline.is_valid()
+	return _godray_ready
+
+
+# 取/建 rgba16f 临时快照纹理(与颜色缓冲同尺寸; 尺寸变则重建)。仅作 storage image(imageLoad/Store)。
+func _ensure_lit_tex(size: Vector2i) -> RID:
+	if _lit_tex.is_valid() and _lit_size == size:
+		return _lit_tex
+	if _lit_tex.is_valid():
+		_rd.free_rid(_lit_tex)
+		_lit_tex = RID()
+	var fmt := RDTextureFormat.new()
+	fmt.format = RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT
+	fmt.width = size.x
+	fmt.height = size.y
+	fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D
+	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT
+	_lit_tex = _rd.texture_create(fmt, RDTextureView.new(), [])
+	_lit_size = size
+	return _lit_tex
+
+
+# 始终建好 256×64 rgba16f LUT 纹理(storage+sample); 保证大气 pass 的 set 3 可绑(未烘时 lut_on=0 不采样)。
+func _ensure_lut_tex() -> RID:
+	if _lut_tex.is_valid():
+		return _lut_tex
+	var fmt := RDTextureFormat.new()
+	fmt.format = RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT
+	fmt.width = _LUT_W
+	fmt.height = _LUT_H
+	fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D
+	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
+	_lut_tex = _rd.texture_create(fmt, RDTextureView.new(), [])
+	return _lut_tex
+
+
+# 懒建 LUT 烘焙 pipeline(只试一次)。
+func _ensure_lut_pipeline() -> bool:
+	if _lut_tried:
+		return _lut_pipeline.is_valid()
+	_lut_tried = true
+	var c := _compile_pipeline(_LUT_PATH)
+	_lut_shader = c[0]
+	_lut_pipeline = c[1]
+	return _lut_pipeline.is_valid()
+
+
+func _ensure_lut_sampler() -> RID:
+	if _lut_sampler.is_valid():
+		return _lut_sampler
+	var st := RDSamplerState.new()
+	st.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	st.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	st.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	st.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	_lut_sampler = _rd.sampler_create(st)
+	return _lut_sampler
+
+
+# 烘焙透射率 LUT: 大气参数变时调一次。(rground,ratmo,densityFalloff,mieFalloff) 经 push constant 传入。
+func _dispatch_lut_bake(f: Dictionary) -> void:
+	var rground: float = f.get("rground", 100.0)
+	var ratmo: float = f.get("ratmo", 115.0)
+	var df: float = f.get("density_falloff", 6.0)
+	var mf: float = f.get("mie_falloff", 16.0)
+	var u := RDUniform.new()
+	u.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	u.binding = 0
+	u.add_id(_lut_tex)
+	var set0 := UniformSetCacheRD.get_cache(_lut_shader, 0, [u])
+	var pc := PackedFloat32Array([rground, ratmo, df, mf])
+	@warning_ignore("integer_division")
+	var xg: int = (_LUT_W - 1) / 8 + 1
+	@warning_ignore("integer_division")
+	var yg: int = (_LUT_H - 1) / 8 + 1
+	var cl := _rd.compute_list_begin()
+	_rd.compute_list_bind_compute_pipeline(cl, _lut_pipeline)
+	_rd.compute_list_bind_uniform_set(cl, set0, 0)
+	_rd.compute_list_set_push_constant(cl, pc.to_byte_array(), pc.size() * 4)
+	_rd.compute_list_dispatch(cl, xg, yg, 1)
+	_rd.compute_list_end()
+	_lut_rground = rground
+	_lut_ratmo = ratmo
+	_lut_df = df
+	_lut_mf = mf
 
 
 # 把帧参数快照 + 相机矩阵打包成 std140 FrameData 字节缓冲(布局须与 atmosphere_compute.glsl UBO 完全一致)。
@@ -169,14 +332,31 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 	if f.is_empty():
 		return   # planet.gd 还没推参数(首帧)→ 跳过, 下帧再跑
 
+	# 透射率 LUT(M3): 大气参数变 → 重烘。本帧刚烘则 lut_on=0(回退 march), 下帧起查表(避免同帧 storage→sampler 竞态)。
+	_ensure_lut_tex()   # 始终建好, 保证 set 3 可绑
+	var lut_on := 0.0
+	var lut_rg: float = f.get("rground", 100.0)
+	var lut_ra: float = f.get("ratmo", 115.0)
+	var lut_df: float = f.get("density_falloff", 6.0)
+	var lut_mf: float = f.get("mie_falloff", 16.0)
+	if (_lut_dirty or lut_rg != _lut_rground or lut_ra != _lut_ratmo
+			or lut_df != _lut_df or lut_mf != _lut_mf) and _ensure_lut_pipeline():
+		_lut_dirty = false
+		_dispatch_lut_bake(f)
+		_lut_baking = true
+	if not _lut_baking and _lut_pipeline.is_valid():
+		lut_on = 1.0
+	_lut_baking = false
+
 	var rsd := render_data.get_render_scene_data()
 	var view_count: int = rsb.get_view_count()
 	for view in range(view_count):
 		var color_image: RID = rsb.get_color_layer(view)
 		var depth_image: RID = rsb.get_depth_layer(view)
-		# get_cam_transform() 返回【视图矩阵 V】(世界→相机); 其逆 = 相机世界变换 V⁻¹(视图→世界)。
-		# (若不取逆, 视线方向反向 → 太空看不到大气、地表大气与地平线相反。)
-		var cam_xform: Transform3D = rsd.get_cam_transform().affine_inverse()
+		# get_cam_transform() 返回【相机世界变换 camera→world】(= 逆视图矩阵), 其 origin 即相机世界位。
+		# shader 里 farW = cam_xform * (inv_proj·ndc) 是把视图空间点变换到世界, 需要的正是 camera→world 本身,
+		# 【不能】再取逆(取逆会把相机镜像到行星背面 → 大气/散射错位成横切盘面的亮带)。
+		var cam_xform: Transform3D = rsd.get_cam_transform()
 		var cam_pos: Vector3 = cam_xform.origin
 		var inv_proj: Projection = rsd.get_cam_projection().inverse()
 
@@ -198,24 +378,110 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 		u2.binding = 0
 		u2.add_id(_ensure_depth_sampler())
 		u2.add_id(depth_image)
+		# set 3: 透射率 LUT(sampler + texture)
+		var u3 := RDUniform.new()
+		u3.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+		u3.binding = 0
+		u3.add_id(_ensure_lut_sampler())
+		u3.add_id(_lut_tex)
 
 		var set0 := UniformSetCacheRD.get_cache(_shader, 0, [u0])
 		var set1 := UniformSetCacheRD.get_cache(_shader, 1, [u1])
 		var set2 := UniformSetCacheRD.get_cache(_shader, 2, [u2])
+		var set3 := UniformSetCacheRD.get_cache(_shader, 3, [u3])
 
 		@warning_ignore("integer_division")
 		var xg: int = (size.x - 1) / 8 + 1
 		@warning_ignore("integer_division")
 		var yg: int = (size.y - 1) / 8 + 1
-		var pc := PackedFloat32Array([float(size.x), float(size.y), 0.0, 0.0])
+		var pc := PackedFloat32Array([float(size.x), float(size.y), lut_on, 0.0])
 
 		var cl := _rd.compute_list_begin()
 		_rd.compute_list_bind_compute_pipeline(cl, _pipeline)
 		_rd.compute_list_bind_uniform_set(cl, set0, 0)
 		_rd.compute_list_bind_uniform_set(cl, set1, 1)
 		_rd.compute_list_bind_uniform_set(cl, set2, 2)
+		_rd.compute_list_bind_uniform_set(cl, set3, 3)
 		_rd.compute_list_set_push_constant(cl, pc.to_byte_array(), pc.size() * 4)
 		_rd.compute_list_dispatch(cl, xg, yg, 1)
 		_rd.compute_list_end()
 
 		_rd.free_rid(ubo_rid)   # GPU 用完再释放(渲染设备延迟释放)
+
+		# —— 体积光 God rays(移植 web createGodrayPass): 大气合成后, 从太阳屏幕位置径向累积亮束 ——
+		if f.get("godrays_on", 0.0) > 0.5 and _ensure_godray():
+			_dispatch_godray(f, rsd, cam_xform, cam_pos, color_image, size, xg, yg)
+
+
+# 体积光两步: 1) copy color→lit 快照; 2) godray lit→color 径向累积。
+# sun_uv: 太阳(sun_dir 方向极远点)投影到屏幕的 uv; sun_vis: 相机朝向·太阳方向的 smoothstep(太阳在背后=0)。
+func _dispatch_godray(f: Dictionary, rsd, cam_xform: Transform3D, cam_pos: Vector3, color_image: RID, size: Vector2i, xg: int, yg: int) -> void:
+	var sd: Vector3 = f.get("sun_dir", Vector3(0.739, 0.443, 0.515))
+	# world→clip = proj * view; cam_xform 是 camera→world → 视图矩阵 view(world→camera) = 其逆。
+	var view_t: Transform3D = cam_xform.affine_inverse()
+	var proj: Projection = rsd.get_cam_projection()
+	var world_to_clip: Projection = proj * Projection(view_t)
+	var sun_world: Vector3 = cam_pos + sd * 1.0e7
+	var clip: Vector4 = world_to_clip * Vector4(sun_world.x, sun_world.y, sun_world.z, 1.0)
+	var sun_uv := Vector2(0.5, 0.5)
+	if absf(clip.w) > 1e-6:
+		sun_uv = Vector2(clip.x / clip.w * 0.5 + 0.5, clip.y / clip.w * 0.5 + 0.5)
+	# 太阳可见度: 相机朝向(-Z 世界)·太阳方向, smoothstep(0, 0.35)
+	var cam_fwd: Vector3 = -cam_xform.basis.z
+	var sv: float = clampf(cam_fwd.dot(sd) / 0.35, 0.0, 1.0)
+	sv = sv * sv * (3.0 - 2.0 * sv)
+	if sv <= 0.001:
+		return
+	var lit: RID = _ensure_lit_tex(size)
+
+	# 1) copy color → lit(快照, 供 godray 径向读取)
+	var cs0 := RDUniform.new()
+	cs0.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	cs0.binding = 0
+	cs0.add_id(color_image)
+	var cs1 := RDUniform.new()
+	cs1.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	cs1.binding = 0
+	cs1.add_id(lit)
+	var cset0 := UniformSetCacheRD.get_cache(_copy_shader, 0, [cs0])
+	var cset1 := UniformSetCacheRD.get_cache(_copy_shader, 1, [cs1])
+	var cpush := PackedFloat32Array([float(size.x), float(size.y), 0.0, 0.0])
+	var clc := _rd.compute_list_begin()
+	_rd.compute_list_bind_compute_pipeline(clc, _copy_pipeline)
+	_rd.compute_list_bind_uniform_set(clc, cset0, 0)
+	_rd.compute_list_bind_uniform_set(clc, cset1, 1)
+	_rd.compute_list_set_push_constant(clc, cpush.to_byte_array(), cpush.size() * 4)
+	_rd.compute_list_dispatch(clc, xg, yg, 1)
+	_rd.compute_list_end()
+
+	# 2) godray lit → color(径向累积亮束, 叠加到 base)
+	var gs0 := RDUniform.new()
+	gs0.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	gs0.binding = 0
+	gs0.add_id(color_image)
+	var gs1 := RDUniform.new()
+	gs1.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	gs1.binding = 0
+	gs1.add_id(lit)
+	var gset0 := UniformSetCacheRD.get_cache(_godray_shader, 0, [gs0])
+	var gset1 := UniformSetCacheRD.get_cache(_godray_shader, 1, [gs1])
+	var gpush := PackedFloat32Array()
+	gpush.append(float(size.x))
+	gpush.append(float(size.y))
+	gpush.append(sun_uv.x)
+	gpush.append(sun_uv.y)
+	gpush.append(sv)
+	gpush.append(f.get("godray_strength", 0.6))
+	gpush.append(f.get("godray_density", 0.7))
+	gpush.append(f.get("godray_decay", 0.96))
+	gpush.append(f.get("godray_weight", 0.6))
+	gpush.append(f.get("godray_threshold", 0.45))
+	gpush.append(float(f.get("godray_samples", 48)))
+	gpush.append(0.0)
+	var clg := _rd.compute_list_begin()
+	_rd.compute_list_bind_compute_pipeline(clg, _godray_pipeline)
+	_rd.compute_list_bind_uniform_set(clg, gset0, 0)
+	_rd.compute_list_bind_uniform_set(clg, gset1, 1)
+	_rd.compute_list_set_push_constant(clg, gpush.to_byte_array(), gpush.size() * 4)
+	_rd.compute_list_dispatch(clg, xg, yg, 1)
+	_rd.compute_list_end()

@@ -768,6 +768,14 @@ func _push_compositor_frame() -> void:
 		"silver": p.cloudSilver,
 		"powder": p.cloudPowder,
 		"cshadow": p.cloudShadow,
+		# 体积光 God rays(移植 web createGodrayPass)。decay/weight web 里是固定值, 这里也用常量。
+		"godrays_on": 1.0 if p.showGodrays else 0.0,
+		"godray_strength": p.godrayStrength,
+		"godray_density": p.godrayDensity,
+		"godray_samples": p.godraySamples,
+		"godray_threshold": p.godrayThreshold,
+		"godray_decay": 0.96,
+		"godray_weight": 0.6,
 	})
 
 

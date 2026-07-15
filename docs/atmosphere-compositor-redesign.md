@@ -46,15 +46,16 @@ Godot 大气是一个挂在 3D 世界里的 **spatial 球壳 shader**（`shaders
 **相机矩阵**从 `render_data.get_render_scene_data()`（rsd）在渲染线程取：
 
 - `rsd.get_cam_projection()` → 投影矩阵 P
-- `rsd.get_cam_transform()` → **视图矩阵 V**（世界→相机；⚠️ 不是相机世界变换，需取逆）
+- `rsd.get_cam_transform()` → **相机世界变换 C**（camera→world；origin 即相机世界位）。⚠️ 这**不是**视图矩阵 V，原样用、**不要再取逆**——取逆会把相机镜像到行星背面，大气/散射错位成横切盘面的亮带。
 
 **关键 API 语义（踩坑得来）**：
 - `get_view_projection(view)` 在单视图下返回的是**投影矩阵**，**不是** view-projection！所以不能直接 `.inverse()` 当 invViewProj。
 - 正确做法是**两步重建**：
   1. `inv_proj = get_cam_projection().inverse()`（NDC → 视图空间）
-  2. `cam_xform = get_cam_transform().affine_inverse()`（视图 → 世界，即相机世界变换 C）
+  2. `cam_xform = get_cam_transform()`（直接就是 camera→world，**不取逆**）
   3. shader 里 `cam_xform * (inv_proj * ndc)` = `C · P⁻¹ · ndc` = 等价 invViewProj
-- 相机世界位置 `ro = cam_xform.origin`（= affine_inverse(V).origin = C.origin）。
+- 相机世界位置 `ro = cam_xform.origin`。
+- 仅 godray 的**反向投影**（world→clip）才需要视图矩阵：`view = cam_xform.affine_inverse()`、`world_to_clip = P * Projection(view)`（见 `_dispatch_godray`）。
 
 **参数**（sun_dir / planet_center / 半径 / 散射 / 云…）：`planet.gd`（主线程）每帧打包成 UBO 字节快照，经 **Mutex** 写入 CompositorEffect 的 `_frame`；`_render_callback`（渲染线程）在 Mutex 下读快照上传 UBO。
 
@@ -124,11 +125,11 @@ vec4 cloud_c;           // cshadow, 0, 0, 0
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
 | **M1** 管线骨架 + 编辑器证明 | ✅ 完成 | trivial 染色 pass 挂进 main.tscn，编辑器视口+运行时都看到效果 → 证明 Compositor+compute+@tool+Forward+ 全链路通、color/depth 拿得到。 |
-| **M2** 移植大气（全分辨率融合 compute + 精确合成），删 spatial 球壳 | 🔧 进行中 | 大气/合成 compute 上线，输出线性 HDR，删 spatial 球壳。已修：相机矩阵两步重建、`affine_inverse`、reverse-Z NDC z（far=0 / depth 直接）。**待用户确认运动偏移修复。** |
-| **M3** 透射率 LUT | ⏳ 待做 | 256×64 compute 烘焙 + 大气 pass 查表，删每采样点太阳 march。预期：更快、可上更高步数、无 banding、外观不变。 |
+| **M2** 移植大气（全分辨率融合 compute + 精确合成），删 spatial 球壳 | 🔧 进行中 | 大气/合成 compute 上线，输出线性 HDR，删 spatial 球壳。已修：相机矩阵两步重建（`cam_xform = get_cam_transform()` 原样、**不取逆**）、reverse-Z NDC z（far=0 / depth 直接）。**待用户 F5 确认运动偏移修复。** |
+| **M3** 透射率 LUT | ✅ 完成 | `transmittance_lut_compute.glsl` 烘 256(mu)×64(r) LUT(rgb=光学深度)；大气 pass `lut_on` 分支查表替代向太阳 march（保留实时 march 回退）。参数(rground/ratmo/densityFalloff/mieFalloff)变则重烘，烘后**下一帧起**查表（避同帧 storage→sampler 竞态）。**待用户 F5 验外观不变+更快。** |
 | **M4** 云尺度按半径归一 | ✅ 完成 | 已折进 M2 的 `_push_compositor_frame`：`cfreq = cloudFreq/radius*100`。 |
-| **M5** 体积光 godray | ⏳ 待做 | 屏幕空间径向采样；太阳投到屏幕 UV + `dot(camFwd, sunDir)` 可见度；接 `showGodrays`/`godray*`。⚠️ 单缓冲读写 hazard → 先读副本再写。 |
-| **M6** 清理 + 可选半分辨率 | ⏳ 待做 | 删 `shaders/atmosphere.gdshader` + planet.gd 死代码；大气 pass 改半分辨率（`_lt_tex`）+ 合成全分辨率，对齐 web 性能结构。 |
+| **M5** 体积光 godray | ✅ 完成 | `godray_copy.glsl`(color→lit 快照) + `godray_compute.glsl`(lit→color 径向累积) 两 pass 已接 `_render_callback`；太阳投屏幕 UV + `dot(camFwd,sunDir)` smoothstep 可见度；lit 快照解决单缓冲读写竞态。**待用户 F5 验观感/参数。** |
+| **M6** 清理 + 可选半分辨率 | ✅ 清理完成 | 已删 `shaders/atmosphere.gdshader`(spatial 版)+ `.uid`（M2 已清 planet.gd 球壳死代码，grep 复查无残留）。半分辨率拆分（`_lt_tex` + 全分辨率 composite）为**可选**性能优化；当前全分辨率融合 compute 工作良好，**暂缓**，需要时再做。 |
 | **M7**（可选）参数对齐 web | ⏳ 待做 | main.tscn 的 `Resource_tefeu` 与 web 默认差很多（见下表），架构完成后按需对齐。**不强制，属调参，用户决定。** |
 
 ### main.tscn 当前参数 vs planet_params 默认
@@ -156,7 +157,7 @@ vec4 cloud_c;           // cshadow, 0, 0, 0
 | `SamplerStateDs.new()` doesn't exist | 类名错 | `RDSamplerState.new()` + `rd.sampler_create(st)` |
 | INTEGER_DIVISION 警告 `(size.x-1)/8+1` | GDScript 整除告警 | `@warning_ignore("integer_division")` |
 | 全屏蓝/白、随相机变化、吹白 | `get_view_projection(view)` 单视图返回**投影**而非 vp，`.inverse()` 给的是 inv_proj → rd 垃圾 | 拆两步：`inv_proj` + `cam_xform` |
-| 太空看不到大气 + 地表大气与地平线相反 + 颜色不对 | `get_cam_transform()` 返回**视图矩阵 V**，被当成了相机世界变换 → rd 反向 | `.affine_inverse()` 得 C |
+| 误以为 `get_cam_transform()` 返回视图矩阵 V 而加了 `.affine_inverse()` | 实际它**直接返回相机世界变换 C**（camera→world）；取逆会把相机镜像到行星背面 → 大气/散射错位成横切盘面的亮带 | `cam_xform = get_cam_transform()` 原样用、不取逆；`ro = cam_xform.origin` |
 | 方向对但运动有偏移（大气不跟球中心） | reverse-Z NDC z∈[0,1]：far plane 用了 `z=-1`（外推）、depth 用了 `*2-1`（当 [-1,1]）→ rd 系统偏差，相机转动时视差偏移 | far 用 `z=0`，depth 直接当 NDC z |
 
 ---
@@ -184,8 +185,9 @@ vec4 cloud_c;           // cshadow, 0, 0, 0
 **新增**
 - `scripts/render/atmosphere_compositor.gd` ✅
 - `shaders/compute/atmosphere_compute.glsl` ✅
-- `shaders/compute/transmittance_lut_compute.glsl` ⏳（M3）
-- `shaders/compute/godray_compute.glsl` ⏳（M5）
+- `shaders/compute/transmittance_lut_compute.glsl` ✅（M3）
+- `shaders/compute/godray_copy.glsl` ✅（M5）
+- `shaders/compute/godray_compute.glsl` ✅（M5）
 - `shaders/compute/composite_compute.glsl` ⏳（M6 拆分时）
 
 **修改**
@@ -193,7 +195,7 @@ vec4 cloud_c;           // cshadow, 0, 0, 0
 - `scenes/main.tscn`（compositor 通过代码挂 WorldEnvironment，未改 tscn）
 
 **删除（M6）**
-- `shaders/atmosphere.gdshader`（spatial 版，被 compute 取代）
+- ~~`shaders/atmosphere.gdshader`~~（spatial 版，已删 + `.uid`）
 
 ---
 

@@ -3,6 +3,7 @@
 [ext_resource type="Texture2D" uid="uid://1dvcnsbflecp" path="res://assets/picture/GalaxyBackground.hdr" id="1_0wfyh"]
 [ext_resource type="PackedScene" uid="uid://nuulebu1sk8m" path="res://scenes/planet.tscn" id="2_sugp2"]
 [ext_resource type="Script" uid="uid://cjg2w1cypjy4u" path="res://scripts/core/orbit_camera.gd" id="3_cam"]
+[ext_resource type="Script" uid="uid://c18n2n3tlwx8e" path="res://scripts/render/atmosphere_compositor.gd" id="3_o6xl0"]
 [ext_resource type="Script" uid="uid://7boxikbjeden" path="res://scripts/core/planet_params.gd" id="4_jyhfs"]
 [ext_resource type="PackedScene" uid="uid://m7jxxg83yibb" path="res://scenes/player.tscn" id="5_tbgi4"]
 [ext_resource type="Script" uid="uid://cnmiaw2pdp52j" path="res://scripts/core/main.gd" id="6_main"]
@@ -19,21 +20,35 @@ sky = SubResource("Sky_1j6d1")
 tonemap_mode = 4
 glow_enabled = true
 
-[sub_resource type="Resource" id="Resource_tefeu"]
+[sub_resource type="CompositorEffect" id="CompositorEffect_o6xl0"]
+resource_local_to_scene = false
+resource_name = ""
+enabled = true
+effect_callback_type = 4
+needs_motion_vectors = false
+needs_normal_roughness = false
+script = ExtResource("3_o6xl0")
+
+[sub_resource type="Compositor" id="Compositor_tipki"]
+compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_o6xl0")])
+
+[sub_resource type="Resource" id="Resource_85g3d"]
 resource_local_to_scene = true
 script = ExtResource("4_jyhfs")
-radius = 1000.0
-maxHeight = 20.0
+radius = 500.0
 showInset = false
 showOcean = false
+showClouds = false
 showGodrays = false
 walkSpeed = 10.0
-atmoRayleigh = 0.01
-atmoMie = 0.01
-atmoMieG = 0.0
-atmoDensityFalloff = 16.0
-atmoMieFalloff = 10.65
-atmoExposure = 0.55
+atmoMie = 0.03
+atmoDensityFalloff = 12.0
+atmoMieFalloff = 9.75
+atmoSunIntensity = 16.0
+atmoSteps = 64
+atmoLightSteps = 32
+atmoShadowSoftness = 0.24
+atmoTwilight = 0.35
 cloudBottom = 1.025
 cloudTop = 1.08
 cloudCoverage = 0.51
@@ -61,6 +76,7 @@ fps_label = NodePath("FpsLabel")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1411384491]
 environment = SubResource("Environment_r4dii")
+compositor = SubResource("Compositor_tipki")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1825422017]
 transform = Transform3D(0.6427876, -0.43938473, 0.6275074, 0, 0.81915146, 0.5735769, -0.7660443, -0.36868757, 0.52654123, 0, 0, 0)
@@ -74,7 +90,7 @@ current = true
 script = ExtResource("3_cam")
 
 [node name="Planet" parent="." unique_id=1626788951 node_paths=PackedStringArray("camera", "sun_light") instance=ExtResource("2_sugp2")]
-params = SubResource("Resource_tefeu")
+params = SubResource("Resource_85g3d")
 camera = NodePath("../Camera3D")
 sun_light = NodePath("../DirectionalLight3D")
 

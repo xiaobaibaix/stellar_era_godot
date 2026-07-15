@@ -1,6 +1,6 @@
 #[compute]
 
-// 大气 + 体积云 全屏后处理(compute)。移植自 atmosphere.gdshader(spatial 版)的 raymarch,
+// 大气 + 体积云 全屏后处理(compute)。移植自原 spatial 大气球壳 shader 的 raymarch,
 // 改为 compute: 读场景 color(全分辨率) + depth → 重建视线 → raymarch 瑞利/米氏/臭氧 + 体积云 →
 // front-to-back 合成 → 精确 color = scene·T(rgb) + L(逐通道透射, 比 web 半分辨率标量 T 更准) → 写回 color。
 // 输出线性 HDR(不 tonemap), 交给 WorldEnvironment 的 AgX 做全帧统一色调映射。
@@ -32,10 +32,11 @@ layout(set = 0, binding = 0, std140) uniform FrameData {
 
 layout(set = 1, binding = 0, rgba16f) uniform image2D color_image;
 layout(set = 2, binding = 0) uniform sampler2D depth_tex;
+layout(set = 3, binding = 0) uniform sampler2D lut_tex;   // 透射率 LUT(rgb=向太阳光学深度); lut_on=1 时用
 
 layout(push_constant, std430) uniform Push {
 	vec2 raster_size;
-	float _pad0;
+	float lut_on;     // 1=查透射率 LUT, 0=实时向太阳 march(回退)
 	float _pad1;
 } pc;
 
@@ -290,11 +291,20 @@ void main() {
 				}
 			}
 
-			// 大气内散射源
+			// 大气内散射源: 太阳→p 透射(透射率 LUT 查表 / 回退实时 march) × 行星软遮挡 × 散射×相位×密度
 			vec3 srcA = vec3(0.0);
 			float shadow = planetShadow(p);
 			if (shadow > 0.0) {
-				vec3 odSun = opticalDepthToSun(p);
+				vec3 odSun;
+				if (pc.lut_on > 0.5) {
+					// 透射率 LUT(M3): 球对称 → od 只取决于(r, 太阳天顶余弦 mu)。移植 web sampling。
+					float rr = length(p - fd.planet_center.xyz);
+					float mus = dot(normalize(p - fd.planet_center.xyz), normalize(fd.sun_dir.xyz));
+					vec2 luv = vec2(mus * 0.5 + 0.5, clamp((rr - fd.radii.x) / max(fd.radii.y - fd.radii.x, 1e-4), 0.0, 1.0));
+					odSun = texture(lut_tex, luv).rgb;
+				} else {
+					odSun = opticalDepthToSun(p);   // 回退: 实时向太阳 march
+				}
 				vec3 Tsun = exp(-(fd.scatter_r_m.xyz * odSun.x + vec3(fd.scatter_r_m.w * 1.1) * odSun.y + fd.ozone_dither.xyz * odSun.z)) * shadow;
 				srcA = fd.sun_exp_twilight.x * Tsun * (fd.scatter_r_m.xyz * phaseR * dens.x + vec3(fd.scatter_r_m.w * phaseM) * dens.y);
 			}
