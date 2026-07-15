@@ -171,6 +171,10 @@ signal bulk_changed
 ## 云在地表的投影强度。
 @export_range(0.0, 1.0, 0.01) var cloudShadow: float = 0.7:
 	set(v): cloudShadow = v; param_changed.emit("cloudShadow")
+## 晨昏线位移(云的明暗分界线): 正值→分界线向阳侧移动(云更早变暗、收进夜侧, 更贴近晨昏线);
+## 负值→分界线向背阳侧延伸(云在夜侧延伸更远才变暗)。默认 0 = 原行为(环境光延伸到 sunUp≈-0.4)。
+@export_range(-0.5, 0.5, 0.01) var cloudTerminatorShift: float = 0.0:
+	set(v): cloudTerminatorShift = v; param_changed.emit("cloudTerminatorShift")
 
 # ---- 海洋 ----
 @export_group("海洋")

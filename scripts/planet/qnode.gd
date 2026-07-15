@@ -80,7 +80,8 @@ func compute_strides() -> Array:
 	return [1, 1, 1]
 
 
-# cam_pos: 行星本地系相机(或 lod_target)位置; frustum: 世界系 Plane[]; cam_moved: 是否移动; _now: 未用。
+# cam_pos: 行星本地系聚焦目标(角色/相机)位置(LOD 距离 + 地平线剔除共用, 与 web planet.js 一致);
+# frustum: 世界系 Plane[]; cam_moved: 是否移动; _now: 未用。
 # cull: 是否做剔除(地平线+视锥)。编辑器由 Planet.update 传 false → 只跑距离 LOD 细分, 不隐藏任何 chunk。
 # 移植 planet.js QNode.selectLOD: 地平线剔除 → 视锥剔除 → 分裂/合并滞回(带预算) → 渲染。
 func select_lod(cam_pos: Vector3, frustum: Array, cam_moved: bool, _now: float, cull: bool = true) -> void:

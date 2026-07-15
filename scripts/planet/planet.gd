@@ -595,16 +595,17 @@ func count_node(node: QNode) -> void:
 
 
 func update(cam: Camera3D) -> void:
-	# LOD 距离判定用 lod_target(如 Player); 视锥剔除仍用渲染相机 cam 的 frustum。
+	# LOD 距离 + 地平线剔除都用 lod_target(角色)位置 cp; 视锥用渲染相机 frustum(与 web 一致)。
 	var focus: Node3D = lod_target if lod_target != null else cam
 	var cp: Vector3 = focus.global_position - global_position
 	# moved: 相对【上次真正跑 select_lod 时】的位置是否移动(_cam_pos 仅在真正跑时更新)。
 	var moved: bool = cp.distance_squared_to(_cam_pos) > 1e-6
-	# 相机变换变化: 角色模式下 lod_target=玩家, 原地转视角时 focus 不动但视锥变 → 需重跑更新视锥剔除。
+	# 相机变换变化(角色模式原地转视角也要重算视锥剔除): 上一版把这个删了 → 转视角时视锥停在旧朝向,
+	# 连脚下/当前视野方向的地形都被旧视锥误剔(截图里角色脚下地面消失)。必须保留。
 	var cam_xform: Transform3D = cam.global_transform
 	var cam_changed: bool = not cam_xform.is_equal_approx(_last_cam_xform)
-	# 静止短路(移植 web 版 !camMoved && inflight==0, 并加入相机变换检测): 移动/转视角/有在途 job →
-	# 标记需再跑几拍; 空闲后逐拍递减到 0 才短路(多跑几拍保证最后完成的 mesh 被 select_lod 显示出来)。
+	# 静止短路(移植 web 版 !camMoved && inflight==0): lod_target 移动 / 转视角 / 有在途 job → 标记需再跑几拍;
+	# 空闲后逐拍递减到 0 才短路(多跑几拍保证最后完成的 mesh 被 select_lod 显示出来)。
 	if moved or cam_changed or _pending > 0:
 		_lod_dirty = 3
 	if _lod_dirty <= 0:
@@ -618,6 +619,7 @@ func update(cam: Camera3D) -> void:
 	_cam_moved = moved
 	_cam_pos = cp
 	_last_cam_xform = cam_xform
+	cam.force_update_transform()   # 对齐 web camera.updateMatrixWorld(): 确保 get_frustum() 用本帧最新相机变换, 不滞后
 	var frustum: Array = cam.get_frustum()
 	var now: float = Time.get_ticks_msec() / 1000.0
 	# 编辑器不做剔除(地平线+视锥): 只跑距离 LOD 细分, chunk 不因「相机看不到」而被隐藏;
@@ -781,6 +783,7 @@ func _push_compositor_frame() -> void:
 		"silver": p.cloudSilver,
 		"powder": p.cloudPowder,
 		"cshadow": p.cloudShadow,
+		"cterminator": p.cloudTerminatorShift,
 		# 体积光 God rays(移植 web createGodrayPass)。decay/weight web 里是固定值, 这里也用常量。
 		"godrays_on": 1.0 if p.showGodrays else 0.0,
 		"godray_strength": p.godrayStrength,

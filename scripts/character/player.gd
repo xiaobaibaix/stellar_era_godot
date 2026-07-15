@@ -19,6 +19,9 @@ extends CharacterBody3D
 @export var cam_distance_min: float = 3.0   # 滚轮拉近下限
 @export var cam_distance_max: float = 40.0  # 滚轮拉远上限
 @export var cam_zoom_step: float = 1.0      # 滚轮每格缩放距离
+@export var cam_ground_margin: float = 1.5  # 相机与地面的最小间隙(解析碰撞留白, 防贴面 z-fight/穿透)
+@export var cam_collision_min: float = 1.5  # 相机被地形顶死时离枢轴的最小距离(防退化 look_at/钻进角色)
+@export var cam_collision_steps: int = 10   # 弹簧臂沿视线的探测步数(越多越贴合, 越费; 地形平滑 10 足够)
 
 var _yaw: float = 0.0           # 朝向角(绕径向 up 旋转)
 var _vel: Vector3 = Vector3.ZERO
@@ -168,10 +171,36 @@ func _unhandled_input(event: InputEvent) -> void:
 
 # 第三人称相机挂点: 绕角色上方枢轴, 按俯仰角摆在角色后上方并 look_at 枢轴。
 # 相机被 reparent 到 camera_slot 下后即跟随此处变换(见 main.gd)。
+# 解析弹簧臂: 沿视线方向探测球面高度场, 相机被地形顶住时收拢向角色 → 永不钻到地形以下。
 func _update_camera_slot(up: Vector3, fwd: Vector3) -> void:
 	if camera_slot == null:
 		return
 	var pivot: Vector3 = global_position + up * cam_height
-	var off: Vector3 = (-fwd * cos(_cam_pitch) + up * sin(_cam_pitch)) * cam_distance
-	camera_slot.global_position = pivot + off
+	# 相机相对枢轴的方向(含俯仰): _cam_pitch<0 时指向斜下方, 正是会钻进地形的情形。
+	var dir: Vector3 = (-fwd * cos(_cam_pitch) + up * sin(_cam_pitch)).normalized()
+	var safe_dist: float = _camera_arm_length(pivot, dir, cam_distance)
+	camera_slot.global_position = pivot + dir * safe_dist
 	camera_slot.look_at(pivot, up)
+
+
+# 相机碰撞(解析高度场, 与 _reground 同源): 从枢轴沿 dir 步进到 desired 距离,
+# 逐点用【该点自身径向】的地面半径判定(相机远离时脚下地面方向已随球面弯曲改变);
+# 一旦某点低于 地面半径+cam_ground_margin, 就停在上一个安全距离 → 相机贴着地面滑向角色。
+# 无碰撞体开销: 每帧至多 cam_collision_steps 次 height_at, 与角色贴地同量级。
+func _camera_arm_length(pivot: Vector3, dir: Vector3, desired: float) -> float:
+	var center: Vector3 = planet.global_position
+	var steps: int = maxi(cam_collision_steps, 1)
+	var safe: float = 0.0
+	for i in range(1, steps + 1):
+		var d: float = desired * float(i) / float(steps)
+		var p: Vector3 = pivot + dir * d
+		var radial: Vector3 = p - center
+		var pr: float = radial.length()
+		if pr <= 1e-4:
+			break
+		var up_here: Vector3 = radial / pr
+		var ground: float = _ground_radius(up_here) + cam_ground_margin
+		if pr < ground:
+			break   # 该点已在地形之内 → 相机停在上一个安全点(向角色收拢)
+		safe = d
+	return clampf(safe, cam_collision_min, desired)

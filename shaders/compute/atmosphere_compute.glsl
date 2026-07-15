@@ -27,7 +27,7 @@ layout(set = 0, binding = 0, std140) uniform FrameData {
 	vec4 counts;               // cloudSteps, lightSteps, cloudLightSteps, clouds_on
 	vec4 cloud_a;              // coverage, cdensity, cfreq(已按半径归一), cwarp
 	vec4 cloud_b;              // cwindspeed, absorb, silver, powder
-	vec4 cloud_c;              // cshadow, 0, 0, 0
+	vec4 cloud_c;              // cshadow, cterminator, 0, 0
 } fd;
 
 layout(set = 1, binding = 0, rgba16f) uniform image2D color_image;
@@ -281,7 +281,9 @@ void main() {
 				float dcl = cloudDensity(p, true);
 				if (dcl > 0.0) {
 					float sunT = lightMarch(p);
-					float sunUp = dot(normalize(p - fd.planet_center.xyz), normalize(fd.sun_dir.xyz));
+					// 晨昏线位移 cterminator: 正值→sunUp 有效值变小→day/amb 更早归零, 云的明暗分界线向阳侧移动(更贴近晨昏线);
+					// 负值→分界线向背阳侧延伸。默认 0 = 原行为。
+					float sunUp = dot(normalize(p - fd.planet_center.xyz), normalize(fd.sun_dir.xyz)) - fd.cloud_c.y;
 					float day = smoothstep(-0.12, 0.12, sunUp);
 					float amb = smoothstep(-0.4, 0.15, sunUp);
 					float powder = mix(1.0, 1.0 - exp(-dcl * fd.cloud_a.y * 2.0), fd.cloud_b.w);

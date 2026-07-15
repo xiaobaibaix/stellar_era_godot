@@ -308,8 +308,8 @@ func _build_frame_ubo(f: Dictionary, cam_pos: Vector3, inv_proj: Projection, cam
 	# cloud_b: cwindspeed, absorb, silver, powder
 	b.append(f.get("cwindspeed", 0.6)); b.append(f.get("absorb", 1.0))
 	b.append(f.get("silver", 1.0)); b.append(f.get("powder", 0.6))
-	# cloud_c: cshadow, 0, 0, 0
-	b.append(f.get("cshadow", 0.7)); b.append(0.0); b.append(0.0); b.append(0.0)
+	# cloud_c: cshadow, cterminator(云晨昏线位移), 0, 0
+	b.append(f.get("cshadow", 0.7)); b.append(f.get("cterminator", 0.0)); b.append(0.0); b.append(0.0)
 	return _rd.uniform_buffer_create(b.size() * 4, b.to_byte_array())
 
 
