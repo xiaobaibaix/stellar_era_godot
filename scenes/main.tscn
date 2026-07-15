@@ -54,7 +54,6 @@ cloudPowder = 1.0
 cloudTerminatorShift = 0.25
 seaLevel = 0.5
 godrayStrength = 1.39
-frustumMargin = 1.0
 splitBudget = 32
 continentSeed = 1346
 continentOctaves = 8

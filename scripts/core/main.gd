@@ -17,6 +17,15 @@ var _in_player_mode: bool = false
 var _wireframe: bool = false
 var _fps_acc: float = 0.0   # FPS 文本刷新累加器
 
+# 出生点标记模式: 「跟随角色」按下 → 先标记(鼠标可见、轨道相机仍可拖动环视) → 空格确认瞬移角色 + 进角色模式。
+var _aim_mode: bool = false
+var _aim_target: Vector3 = Vector3.ZERO          # 已标记的地表点(世界)
+var _aim_up: Vector3 = Vector3.UP                # 该点径向法线
+var _aim_has_target: bool = false                # 是否已放过标记(空格确认的前提)
+var _aim_press_pos: Vector2 = Vector2.ZERO       # 左键按下位置(拖拽阈值判定点击)
+var _aim_pressing: bool = false
+var _marker: SpawnMarker = null
+
 
 func _ready() -> void:
 	if camera != null:
@@ -33,6 +42,11 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	_update_fps(delta)
+	# 标记随相机距离缩放: 拉远/拉近时屏幕大小稳定(否则全球视角下箭头小到看不见)。
+	if _aim_mode and _marker != null and _marker.visible and _aim_has_target and camera != null:
+		var d: float = camera.global_position.distance_to(_aim_target)
+		var s: float = clampf(d / 300.0, 0.6, 12.0)
+		_marker.scale = Vector3.ONE * s
 
 
 func _update_fps(delta: float) -> void:
@@ -52,12 +66,34 @@ func _update_fps(delta: float) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	# ESC 退回轨道相机
-	if _in_player_mode and event.is_action_pressed("ui_cancel"):
-		if toggle != null:
-			toggle.set_pressed_no_signal(false)
-		_enter_orbit()
-		return
+	# ESC: 先退标记模式, 再退角色模式
+	if event.is_action_pressed("ui_cancel"):
+		if _aim_mode:
+			_cancel_aim()
+			return
+		if _in_player_mode:
+			if toggle != null:
+				toggle.set_pressed_no_signal(false)
+			_enter_orbit()
+			return
+
+	# 标记模式: 左键点击 = 放/移标记; 空格 = 确认瞬移 + 进角色模式
+	if _aim_mode:
+		if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+			if event.is_pressed():
+				_aim_press_pos = event.position
+				_aim_pressing = true
+			else:
+				# 拖拽阈值: 区分"轨道拖动"(OrbitCamera 处理)与"点击标记"。位移 < 6px 视为点击。
+				if _aim_pressing and event.position.distance_to(_aim_press_pos) < 6.0:
+					_aim_click(event.position)
+				_aim_pressing = false
+			return
+		if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_SPACE:
+			if _aim_has_target:
+				_commit_spawn()
+			return
+
 	# F1 纯透视线框(仅边、前后都可见) —— 与 CheckButton「显示线框」同步
 	if event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
@@ -71,9 +107,12 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _on_toggled(pressed: bool) -> void:
 	if pressed:
-		_enter_player()
+		_enter_aim()
 	else:
-		_enter_orbit()
+		if _in_player_mode:
+			_enter_orbit()
+		elif _aim_mode:
+			_cancel_aim()
 
 
 # 「显示线框」: 纯透视 wireframe(set_wireframe 同时关背面剔除 → 前后边都可见)
@@ -102,6 +141,8 @@ func _enter_player() -> void:
 	if planet != null:
 		planet.lod_target = player
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+	if toggle != null:
+		toggle.set_pressed_no_signal(true)   # 标记→确认瞬移后, 按钮=按下态
 
 
 func _enter_orbit() -> void:
@@ -120,3 +161,70 @@ func _enter_orbit() -> void:
 		camera.current = true
 		camera.set_process(true)
 		camera.set_process_unhandled_input(true)
+
+
+# ===================== 出生点标记模式 =====================
+# 「跟随角色」按下 → 进标记模式(不直接进角色模式): 鼠标可见, 轨道相机仍可左键拖动环视;
+# 左键点击地表 → 放/移箭头标记(可重复覆盖); 空格 → 瞬移角色到标记点 + 进角色模式; ESC → 取消。
+func _enter_aim() -> void:
+	if _in_player_mode or _aim_mode or camera == null or player == null or planet == null:
+		return
+	_aim_mode = true
+	_aim_has_target = false
+	_aim_pressing = false
+	Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)   # 显示光标好点选
+	if _marker == null:
+		_marker = SpawnMarker.new()
+		_marker.name = "SpawnMarker"
+		add_child(_marker)
+	_marker.visible = false
+
+
+func _cancel_aim() -> void:
+	_aim_mode = false
+	if toggle != null:
+		toggle.set_pressed_no_signal(false)
+	if _marker != null:
+		_marker.visible = false
+
+
+# 鼠标射线 → 行星基础球面相交 → 该方向径向 → height_at 算位移后地表点 + 法线 → 放标记。
+# 地形是 GPU 位移的, CPU 无精确网格; 用基础球面(R)求视线方向, 再用解析高度沿径向贴到真实地表。
+func _aim_click(mouse_pos: Vector2) -> void:
+	if camera == null or planet == null:
+		return
+	var origin: Vector3 = camera.project_ray_origin(mouse_pos)
+	var rdir: Vector3 = camera.project_ray_normal(mouse_pos)
+	var center: Vector3 = planet.global_position
+	var R: float = planet.params.radius
+	var oc: Vector3 = origin - center
+	var bb: float = oc.dot(rdir)
+	var cc: float = oc.dot(oc) - R * R
+	var disc: float = bb * bb - cc
+	if disc < 0.0:
+		return   # 点到天空了 → 忽略
+	var sq: float = sqrt(disc)
+	var t: float = -bb - sq          # 近交点(相机在球外)
+	if t < 0.0:
+		t = -bb + sq                # 相机在球内 → 取远交点
+	if t < 0.0:
+		return
+	var nd: Vector3 = (origin + rdir * t - center).normalized()
+	var h: float = planet.height_at(nd.x, nd.y, nd.z)
+	var surf: Vector3 = center + nd * (R + h * planet.params.maxHeight)
+	_aim_target = surf
+	_aim_up = nd
+	_aim_has_target = true
+	if _marker != null:
+		_marker.place(surf, nd)
+
+
+# 空格确认: 瞬移角色到标记点 → 进角色模式。
+func _commit_spawn() -> void:
+	if not _aim_has_target or player == null:
+		return
+	_aim_mode = false
+	if _marker != null:
+		_marker.visible = false
+	player.teleport_to(_aim_target, _aim_up)
+	_enter_player()

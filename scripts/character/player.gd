@@ -29,6 +29,7 @@ var _on_ground: bool = true
 var _cam_pitch: float = 0.35        # 相机俯仰(绕枢轴的仰角)
 var _initialized: bool = false      # 首帧(terrain 就绪后)贴地初始化
 var _jump_prev: bool = false        # 上一帧跳跃键状态(边沿检测)
+var _block_jump_until_release: bool = false   # 瞬移吃掉触发用的空格, 避免落地即跳(松开后恢复)
 
 
 func _ready() -> void:
@@ -78,7 +79,13 @@ func _physics_process(delta: float) -> void:
 	# 径向分量: 重力下拉 + 起跳(沿当前 up) —— 来自 PlanetParams
 	var radial_v: float = _vel.dot(up)
 	radial_v -= planet.params.gravity * delta
-	var jump_now: bool = Input.is_physical_key_pressed(KEY_SPACE)
+	var space_pressed: bool = Input.is_physical_key_pressed(KEY_SPACE)
+	# 标记模式空格确认瞬移后, 屏蔽这"一下"空格 → 避免落地即跳; 直到松开空格才恢复跳跃。
+	var jump_now: bool = space_pressed
+	if _block_jump_until_release:
+		jump_now = false
+		if not space_pressed:
+			_block_jump_until_release = false
 	if _on_ground and jump_now and not _jump_prev:
 		radial_v = planet.params.jumpForce
 	_jump_prev = jump_now
@@ -137,6 +144,23 @@ func _snap_to_surface() -> void:
 	var pos: Vector3 = global_position - center
 	var up: Vector3 = pos.normalized() if pos.length_squared() > 1e-6 else Vector3.UP
 	global_position = center + up * (_ground_radius(up) + feet_offset)
+
+
+## 瞬移到出生点(标记模式空格确认时调用)。
+## world_pos 已是位移后地表点; up = 该点径向法线。复用解析贴地: 设位 → 沿径向重贴 → 对齐基 → 刷相机槽位。
+## 清速度/归零 yaw, 避免瞬移后带惯性或朝向错乱。
+func teleport_to(world_pos: Vector3, up: Vector3) -> void:
+	if planet == null or not is_instance_valid(planet):
+		return
+	global_position = world_pos
+	_yaw = 0.0
+	_vel = Vector3.ZERO
+	_on_ground = true
+	_block_jump_until_release = true   # 吃掉触发瞬移的这次空格, 避免落地即跳
+	_snap_to_surface()
+	_align_basis()
+	var new_up: Vector3 = (global_position - planet.global_position).normalized()
+	_update_camera_slot(new_up, _tangent_forward(new_up))
 
 
 # 让模型 +Y 指向径向外(站直), -Z 指向朝向(以后挂相机用)

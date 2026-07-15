@@ -80,14 +80,16 @@ func compute_strides() -> Array:
 	return [1, 1, 1]
 
 
-# cam_pos: 行星本地系聚焦目标(角色/相机)位置(LOD 距离 + 地平线剔除共用, 与 web planet.js 一致);
+# cam_pos: LOD 细分距离用的聚焦目标(角色/lod_target)位置; cull_pos: 可见性剔除用的【真实渲染相机】位置;
 # frustum: 世界系 Plane[]; cam_moved: 是否移动; _now: 未用。
+# 角色模式下 cam_pos(角色)与 cull_pos(相机)分离: 角色贴地时几何地平线极近, 但第三人称相机抬高/后拉
+# 看得更远 → 地平线剔除必须用【相机】位置, 否则相机可见的 chunk 被角色地平线误剔 → 地形出现三角空洞。
 # cull: 是否做剔除(地平线+视锥)。编辑器由 Planet.update 传 false → 只跑距离 LOD 细分, 不隐藏任何 chunk。
 # 移植 planet.js QNode.selectLOD: 地平线剔除 → 视锥剔除 → 分裂/合并滞回(带预算) → 渲染。
-func select_lod(cam_pos: Vector3, frustum: Array, cam_moved: bool, _now: float, cull: bool = true) -> void:
+func select_lod(cam_pos: Vector3, cull_pos: Vector3, frustum: Array, cam_moved: bool, _now: float, cull: bool = true) -> void:
 	var p: PlanetParams = planet.params
-	# 1) 地平线剔除: 行星本体背面的 chunk 直接跳过(整棵子树隐藏)
-	if cull and p.horizonCulling and _is_below_horizon(cam_pos):
+	# 1) 地平线剔除(用渲染相机 cull_pos): 行星本体背面的 chunk 直接跳过(整棵子树隐藏)
+	if cull and p.horizonCulling and _is_below_horizon(cull_pos):
 		_hide_subtree()
 		return
 	var d: float = cam_pos.distance_to(center_world)
@@ -112,7 +114,7 @@ func select_lod(cam_pos: Vector3, frustum: Array, cam_moved: bool, _now: float, 
 	# 死区(既不分裂也不合并): 维持现状
 
 	if children != null:
-		_render_interior(cam_pos, frustum, cam_moved, cull)
+		_render_interior(cam_pos, cull_pos, frustum, cam_moved, cull)
 	else:
 		_render_leaf()
 
@@ -128,7 +130,7 @@ func _render_leaf() -> void:
 
 
 # 渲染为内部节点: 4 子全就绪 → 隐藏自身、递归子; 否则请求缺失子 + 自身兜底显示(消除 pop-in)。
-func _render_interior(cam_pos: Vector3, frustum: Array, cam_moved: bool, cull: bool = true) -> void:
+func _render_interior(cam_pos: Vector3, cull_pos: Vector3, frustum: Array, cam_moved: bool, cull: bool = true) -> void:
 	var all_ready: bool = (
 		children[0].mesh_inst.mesh != null
 		and children[1].mesh_inst.mesh != null
@@ -138,7 +140,7 @@ func _render_interior(cam_pos: Vector3, frustum: Array, cam_moved: bool, cull: b
 	if all_ready:
 		mesh_inst.visible = false  # 隐藏本层 mesh(子 Qnode 是兄弟, 不受影响)
 		for c in children:
-			c.select_lod(cam_pos, frustum, cam_moved, 0.0, cull)
+			c.select_lod(cam_pos, cull_pos, frustum, cam_moved, 0.0, cull)
 		return
 	# 子未就绪: 请求缺失子 patch, 隐藏子树, 自身兜底渲染
 	for c in children:

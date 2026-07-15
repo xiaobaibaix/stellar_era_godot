@@ -595,7 +595,7 @@ func count_node(node: QNode) -> void:
 
 
 func update(cam: Camera3D) -> void:
-	# LOD 距离 + 地平线剔除都用 lod_target(角色)位置 cp; 视锥用渲染相机 frustum(与 web 一致)。
+	# LOD 细分距离用 lod_target(角色)位置 cp; 地平线剔除/视锥用【真实渲染相机】(见下方 cull_pos/frustum)。
 	var focus: Node3D = lod_target if lod_target != null else cam
 	var cp: Vector3 = focus.global_position - global_position
 	# moved: 相对【上次真正跑 select_lod 时】的位置是否移动(_cam_pos 仅在真正跑时更新)。
@@ -631,8 +631,11 @@ func update(cam: Camera3D) -> void:
 	_stride_used = 0
 	_remaining_splits = params.splitBudget  # 每 LOD pass 重置分裂预算(移植 web splitBudget)
 	_tree_changed = false   # 本 pass 结构变化标记(select_lod 内 split/merge 置 true)
+	# 地平线剔除(可见性)用真实渲染相机位置 cull_pos; LOD 细分距离仍用 lod_target(cp)。
+	# 角色贴地时地平线极近, 但第三人称相机抬高/后拉看得更远 → 用相机位判可见, 消除中远景三角空洞。
+	var cull_pos: Vector3 = cam.global_position - global_position
 	for r in roots:
-		r.select_lod(cp, frustum, _cam_moved, now, cull)
+		r.select_lod(cp, cull_pos, frustum, _cam_moved, now, cull)
 	# 结构仍在变(分裂/合并级联) 或 有在途 mesh → 保持 _lod_dirty, 让 select_lod 继续跑到稳定。
 	# 这样改参数后即便相机静止, 也会按当前 lod 相机位置重新细分(不再停在最低细分等相机移动)。
 	if _tree_changed or _pending > 0:
