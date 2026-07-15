@@ -196,6 +196,7 @@ func _split() -> void:
 		child.set_owner(null)
 		child.setup(planet, tris[i][0], tris[i][1], tris[i][2], L, _qnode_scene)
 		children.append(child)
+	planet._tree_changed = true   # 通知 Planet 本 pass 发生结构变化 → 保持 select_lod 继续跑到稳定
 
 
 # 合并(移植 planet.js QNode._merge): 释放并删除 4 个子。滞回死区保证不会立刻再分裂 → 无 churn。
@@ -204,6 +205,7 @@ func _merge() -> void:
 		c.dispose()
 		c.queue_free()
 	children = null
+	planet._tree_changed = true   # 通知 Planet 本 pass 发生结构变化 → 保持 select_lod 继续跑到稳定
 
 
 # 销毁前清理: 立即隐藏 + 取消 pending + 递归子树。节点本身由调用方 queue_free。
