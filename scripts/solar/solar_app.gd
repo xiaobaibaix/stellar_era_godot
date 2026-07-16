@@ -92,7 +92,7 @@ func _physics_process(_delta: float) -> void:
 		return
 	# 推进物理(子步提稳定性)
 	var dt := dt_fixed * sim_speed
-	var sub := max(substeps, 1)
+	var sub: int = max(substeps, 1)   # max() 返回 Variant → 显式标 int, 避免"从 Variant 推断类型"被当错误
 	for _i in range(sub):
 		sim.step(dt / float(sub))
 	# 浮动原点 = 聚焦体
