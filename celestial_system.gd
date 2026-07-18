@@ -37,6 +37,9 @@ static var global_oz: float = 0.0
 
 @export_group("仅顶层")
 @export var orbit_camera: OrbitCamera
+## 轨迹预测线(F3)重算间隔(帧)。越小越跟手(1=每帧), 越大越省 CPU。预测是数值积分,
+## 闭合轨道几十步即停; 只有非闭合(被踢飞/逃逸)才跑满。默认 10。
+@export_range(1, 60, 1) var orbit_predict_interval: int = 10
 
 var sim: NBodySystem
 var members: Array[Celestial] = []
@@ -230,7 +233,7 @@ func _frame() -> void:
 		t._update_soi(global_ox, global_oy, global_oz)
 	# 轨迹预测: 每 30 帧重算一次(积分开销), 每帧用缓存画
 	_predict_counter += 1
-	if _predict_counter >= 30 or _predict_data.is_empty():
+	if _predict_counter >= orbit_predict_interval or _predict_data.is_empty():
 		_predict_counter = 0
 		_compute_predictions()
 	_update_orbit(global_ox, global_oy, global_oz)
