@@ -381,6 +381,10 @@ func _update_soi(ox: float, oy: float, oz: float) -> void:
 		if tgt.dominant != null:
 			(_soi_spheres[i] as Node3D).global_position = Vector3(
 				tgt.dominant._wx - ox, tgt.dominant._wy - oy, tgt.dominant._wz - oz)
+		else:
+			# 群(无 dominant): 边界框居中在群质心(=本系统基座位; zero_momentum 后质心不动)。
+			(_soi_spheres[i] as Node3D).global_position = Vector3(
+				tgt._bcx - ox, tgt._bcy - oy, tgt._bcz - oz)
 
 
 # ===================== 动态 SOI(Step3) =====================
@@ -560,7 +564,8 @@ func _build_soi_visuals_all() -> void:
 
 
 func _collect_soi(sys: CelestialSystem) -> void:
-	if sys._hill_radius > 0.0:
+	# 顶层(无父级系统)不画 SOI 范围球 —— 它是整个星系群/系统的外边界, 画框无意义(此前误加)。
+	if sys.parent_system != null and sys._hill_radius > 0.0:
 		_add_soi_sphere(sys)
 	for sub in sys.child_systems:
 		_collect_soi(sub)
