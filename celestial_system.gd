@@ -560,7 +560,7 @@ func _reparent_celestial(c: Celestial, from: CelestialSystem, to: CelestialSyste
 	var vz: float = c._wvz
 	# 2) 从 from 摘除(members + sim body + 场景树节点)
 	from.members.erase(c)
-	from._remove_visuals_for(c)
+	_trail_container_for(c)._remove_visuals_for(c)
 	if c.body != null:
 		from.sim.bodies.erase(c.body)
 	if c.get_parent() == from:
@@ -578,7 +578,7 @@ func _reparent_celestial(c: Celestial, from: CelestialSystem, to: CelestialSyste
 	to.members.append(c)
 	c.body = nb
 	c.owner_system = to
-	to._ensure_visuals_for(c)
+	_trail_container_for(c)._ensure_visuals_for(c)
 	# 4) 节点挂到 to(视觉位置每帧由物理驱动, 此处只为层级一致)
 	if c.get_parent() == from:
 		from.remove_child(c)
@@ -809,6 +809,15 @@ func _trail_reference(c: Celestial) -> Celestial:
 	return null
 
 
+# c 的轨迹/轨道应挂的容器系统: 它绕的中心(ref)所在的 system; ref==null(绕群质心)→顶层群。
+# 顶层群容器存恒星系中心; 恒星系容器存行星; 行星系容器存卫星 —— 按轨道层级(与 _build_visuals_in 一致)。
+func _trail_container_for(c: Celestial) -> CelestialSystem:
+	var ref: Celestial = _trail_reference(c)
+	if ref != null:
+		return ref.owner_system
+	return _get_top_of(c.owner_system)
+
+
 # 清空 sys 子树内所有天体的拖尾(子系统移交后父链变 → 参考体变, 历史拖尾会错位)。
 func _clear_trails_in(sys: CelestialSystem) -> void:
 	for c in sys.members:
@@ -836,14 +845,14 @@ func _collect_soi(sys: CelestialSystem) -> void:
 func _ensure_visuals_for(c: Celestial) -> void:
 	if _trails_container != null and c._trail_visual == null:
 		var t := MeshInstance3D.new()
-		t.name = "Trail_" + c.name
+		t.name = "Trail_" + c.name + "_" + c.owner_system.name
 		t.material_override = _make_trail_material()
 		t.visible = false
 		_trails_container.add_child(t)
 		c._trail_visual = t
 	if _orbits_container != null and c._orbit_visual == null:
 		var o := MeshInstance3D.new()
-		o.name = "Orbit_" + c.name
+		o.name = "Orbit_" + c.name + "_" + c.owner_system.name
 		o.material_override = _make_orbit_material()
 		o.visible = false
 		_orbits_container.add_child(o)
@@ -867,8 +876,15 @@ func _build_celestial_visuals_all() -> void:
 
 
 func _build_visuals_in(sys: CelestialSystem) -> void:
+	# sys 容器存"绕 sys 中心的天体": 非 dominant member(绕 sys.dominant) + 子系统中心(绕 sys 中心)。
+	# 顶层群容器存恒星系中心(Star); 恒星系容器存行星; 行星系容器存卫星 —— 按轨道层级。
 	for c in sys.members:
+		if c == sys.dominant:
+			continue
 		sys._ensure_visuals_for(c)
+	for sub in sys.child_systems:
+		if sub.dominant != null:
+			sys._ensure_visuals_for(sub.dominant)
 	for sub in sys.child_systems:
 		_build_visuals_in(sub)
 
