@@ -31,6 +31,8 @@ var _visual: Node3D = null                        # 外观子树根(internal 子
 var _default_mesh: CelestialMesh = null           # fallback 默认策略(缓存, 避免每次 rebuild 都 new)
 var _built: bool = false                          # 首次构建完成标志(setter 据此决定是否 rebuild)
 
+var _trail: Array = []                            # Array[Vector3] 世界 double 位置(运动尾迹, 系统每帧追加)
+
 
 func _ready() -> void:
 	_build_visual()

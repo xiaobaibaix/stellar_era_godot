@@ -80,6 +80,10 @@ var _show_orbit: bool = true
 var _orbit_rings: Array[MeshInstance3D] = []
 var _orbit_centers: Array[Celestial] = []
 
+# 尾迹(仅 main_top): 所有天体走过的真实路径, 每帧追加 → 动态反映真实运动(改 mass 也会跟着变)
+var _show_trail: bool = true
+var _trail_mesh: MeshInstance3D = null
+
 # 属性编辑面板(仅 main_top): 显示当前聚焦天体的 mass/radius/color, 运行时动态改
 var _editor_title: Label = null
 var _mass_spin: SpinBox = null
@@ -114,6 +118,7 @@ func _ready() -> void:
 			call_deferred("_build_soi_visuals_all")
 			call_deferred("_build_orbit_visuals_all")
 			call_deferred("_build_celestial_editor")
+			call_deferred("_build_trail_mesh")
 
 
 func _collect() -> void:
@@ -231,6 +236,7 @@ func _frame() -> void:
 		t._render_recursive(global_ox, global_oy, global_oz)
 		t._update_soi(global_ox, global_oy, global_oz)
 	_update_orbit(global_ox, global_oy, global_oz)
+	_update_trail_mesh(global_ox, global_oy, global_oz)
 	_update_camera_and_hud()
 
 
@@ -246,6 +252,11 @@ func _step_recursive() -> void:
 		c._wx = _bcx + c.body.px
 		c._wy = _bcy + c.body.py
 		c._wz = _bcz + c.body.pz
+		var wp := Vector3(c._wx, c._wy, c._wz)
+		if c._trail.is_empty() or (c._trail.back() as Vector3).distance_to(wp) > max(c.radius * 0.3, 5.0):
+			c._trail.append(wp)
+			if c._trail.size() > 400:
+				c._trail.remove_at(0)
 	for sub in child_systems:
 		var pb: Body = child_proxy[sub]
 		sub._bcx = _bcx + pb.px
@@ -424,6 +435,60 @@ func _make_orbit_material() -> Material:
 	return mat
 
 
+func _build_trail_mesh() -> void:
+	_trail_mesh = MeshInstance3D.new()
+	_trail_mesh.name = "Trails"
+	_trail_mesh.material_override = _make_trail_material()
+	_trail_mesh.visible = _show_trail
+	add_child(_trail_mesh)
+
+
+# 收集所有天体(跨顶层递归)。
+func _all_celestials() -> Array[Celestial]:
+	var all: Array[Celestial] = []
+	for t in _get_all_tops():
+		_collect_celestials(t, all)
+	return all
+
+
+func _collect_celestials(sys: CelestialSystem, out: Array[Celestial]) -> void:
+	for c in sys.members:
+		out.append(c)
+	for sub in sys.child_systems:
+		_collect_celestials(sub, out)
+
+
+# 每帧把所有天体尾迹合并成一个折线 mesh(世界 double − 浮动原点)。
+func _update_trail_mesh(ox: float, oy: float, oz: float) -> void:
+	if _trail_mesh == null or not _show_trail:
+		return
+	var positions := PackedVector3Array()
+	for c in _all_celestials():
+		var tr: Array = c._trail
+		var n: int = tr.size()
+		for i in range(n - 1):
+			var p0: Vector3 = tr[i]
+			var p1: Vector3 = tr[i + 1]
+			positions.append(Vector3(p0.x - ox, p0.y - oy, p0.z - oz))
+			positions.append(Vector3(p1.x - ox, p1.y - oy, p1.z - oz))
+	var arr_mesh := ArrayMesh.new()
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = positions
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arrays)
+	_trail_mesh.mesh = arr_mesh
+
+
+func _make_trail_material() -> Material:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.9, 0.9, 1.0, 0.5)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.no_depth_test = true
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return mat
+
+
 func _update_camera_and_hud() -> void:
 	if _focus_list.is_empty():
 		return
@@ -467,6 +532,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				_show_orbit = not _show_orbit
 				for ring in _orbit_rings:
 					ring.visible = _show_orbit
+			KEY_F4:
+				_show_trail = not _show_trail
+				if _trail_mesh != null:
+					_trail_mesh.visible = _show_trail
 
 
 func _pick_focus(mouse_pos: Vector2) -> void:
