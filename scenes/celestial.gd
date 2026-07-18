@@ -27,6 +27,11 @@ var _wx: float = 0.0
 var _wy: float = 0.0
 var _wz: float = 0.0
 
+# 世界 double 速度缓存(系统每帧写; 动态 SOI 跨系统移交时换算局部速度用)
+var _wvx: float = 0.0
+var _wvy: float = 0.0
+var _wvz: float = 0.0
+
 var _visual: Node3D = null                        # 外观子树根(internal 子节点)
 var _default_mesh: CelestialMesh = null           # fallback 默认策略(缓存, 避免每次 rebuild 都 new)
 var _built: bool = false                          # 首次构建完成标志(setter 据此决定是否 rebuild)

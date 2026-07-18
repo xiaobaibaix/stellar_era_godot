@@ -1,24 +1,15 @@
 ## 递归天体系统节点。
 ##
-## 自相似: 恒星系是一个 CelestialSystem, 行星系(行星+卫星)也是 CelestialSystem。
-## 物理: 每层持自己的 NBodySystem(复用 scripts/solar/nbody_system.gd), 只算本层成员。
-## 耦合: 子 CelestialSystem 在父层注册为一个"质点 body"(质量=子系统总质量),
-##       随父层 sim 积分 → 整体轨道; 子层内部独立积分 → 相对轨道。叠加 = 嵌套。
-## 多顶层: 多个恒星系可并列挂在 Main 下(各自独立 sim, 互不隶属)。
-##       第一个顶层 = main_top, 管全局浮动原点 / 相机 / HUD / 跨顶层聚焦 / SOI / 轨道线 / 属性面板;
-##       其他顶层只跑自己的 sim + 渲染。
-##       顶层物理原点 = 节点编辑器位置(读 transform) → 并列恒星系各自定位, 不重叠。
-## 坐标: 成员 body.p 是【相对本系统主导体】的 double; 世界 double = world_barycenter + body.p;
-##       渲染 = 世界 double − 全局浮动原点 → 32 位 global_position(大尺度不抖)。
-## 操作: TAB 聚焦 / [/] 调速 / F2 SOI / F3 轨迹线 / 左键点击聚焦 / 滚轮缩放 / 右上面板改属性。
-## SOI: 每个天体系统的引力作用范围; F2 开关线框(稀疏经纬线, 半透明, 只画朝相机半球)。
-##      - 子系统(有父): 相对父 dominant 的 Hill 球 r=a·(m/(3M))^(1/3)。
-##      - 顶层(无父): 系统边界 = 最远成员/子系统距离 × 1.5。
-## 轨道线: 每个绕 dominant 的天体的完整预测轨道圆(解析, 跟随中心天体); F3 开关, 默认开。
+## 多顶层: 多个恒星系并列挂 Main 下(各自独立 sim)。第一个顶层 = main_top 管全局协调
+##       (浮动原点 / 相机 / HUD / 跨顶层聚焦 / SOI / 轨道预测 / 尾迹 / 属性面板)。
+## 操作: TAB 聚焦 / [/] 调速 / F2 SOI / F3 轨迹预测 / F4 尾迹 / 左键点击 / 滚轮缩放。
+## SOI: 引力作用范围(F2 线框, discard 背面)。子系统=Hill球 r=a·(m/(3M))^(1/3); 顶层=系统边界。
+## 轨迹预测(F3): 从天体当前 位置/速度/受力(leapfrog 积分副本)预测未来轨迹;
+##       闭合(回到起点)就画整圈, 否则画一段。定期重算 + 改 mass 重算。
+## 尾迹(F4): 天体走过的真实路径, 每帧追加, 动态反映真实运动。
 class_name CelestialSystem
 extends Node3D
 
-# SOI 线框 shader: fragment 阶段判断线段片段径向是否朝相机, 背面(背离相机)丢弃。
 const _SOI_SHADER_CODE := """
 shader_type spatial;
 render_mode unshaded, cull_disabled, depth_test_disabled;
@@ -32,7 +23,6 @@ void fragment() {
 }
 """
 
-# 全局协调(多顶层共享): main_top 管全局浮动原点 / 相机 / HUD / 跨顶层聚焦 / SOI / 轨道线 / 属性面板。
 static var main_top: CelestialSystem = null
 static var global_ox: float = 0.0
 static var global_oy: float = 0.0
@@ -46,52 +36,60 @@ static var global_oz: float = 0.0
 @export_range(0.0, 10.0, 0.1) var sim_speed: float = 1.0
 
 @export_group("仅顶层")
-@export var orbit_camera: OrbitCamera              # 跟随相机(复用 main 的 Camera3D)
+@export var orbit_camera: OrbitCamera
 
 var sim: NBodySystem
-var members: Array[Celestial] = []           # 本层天体
-var dominant: Celestial = null    # 主导体(恒星 / 行星) = 本层 sim 原点
+var members: Array[Celestial] = []
+var dominant: Celestial = null
 var child_systems: Array[CelestialSystem] = []
-var child_proxy: Dictionary = {}  # CelestialSystem -> Body(它在父 sim 里的质点)
-var _lights: Array[OmniLight3D] = []   # 手动加的直接子点光源 → 跟随本层 dominant(恒星)
+var child_proxy: Dictionary = {}
+var _lights: Array[OmniLight3D] = []
 
 var parent_system: CelestialSystem = null
-var _is_main_top: bool = false     # 本顶层是否为协调者(第一个顶层)
+var _is_main_top: bool = false
 
-var _hill_radius: float = 0.0          # 本系统的引力作用范围半径(子系统=Hill球; 顶层=系统边界)
+var _hill_radius: float = 0.0
 
-# 本系统主导体的【世界 double 位置】(顶层=节点编辑器位置; 子层由父层每帧下传)
 var _bcx: float = 0.0
 var _bcy: float = 0.0
 var _bcz: float = 0.0
 
+# 基座速度(世界 double): 子系统基座在父系统中的速度, 沿链累加。
+# 顶层基座不动(_bcx 取自 global_position 固定) → _bvx=0。用于动态 SOI 移交时换算局部速度。
+var _bvx: float = 0.0
+var _bvy: float = 0.0
+var _bvz: float = 0.0
+
+# 动态 SOI 边界 hysteresis: 进入需 <IN×Hill, 逃出需 >OUT×Hill; 中间死区防抖动。
+const _SOI_HYSTERESIS_IN: float = 0.9
+const _SOI_HYSTERESIS_OUT: float = 1.1
+
 var _hud: Label = null
 var focus_idx: int = 0
-var _last_focus_idx: int = -1     # 上次聚焦索引; 仅切换时重置相机距离 + 同步属性面板
-var _focus_list: Array = []       # Array[Celestial] 跨顶层递归收集, main_top 聚焦用
+var _last_focus_idx: int = -1
+var _focus_list: Array = []
 
-# SOI 可视化(仅 main_top 管理, 收集所有系统的线框球)
 var _show_soi: bool = false
 var _soi_spheres: Array[MeshInstance3D] = []
 var _soi_targets: Array[CelestialSystem] = []
 
-# 轨道线可视化(仅 main_top 管理, 收集所有天体的预测轨道圆)
+# 轨迹预测(数值积分, F3): 每个非 dominant 天体一条预测线, 动态更新
 var _show_orbit: bool = true
 var _orbit_rings: Array[MeshInstance3D] = []
-var _orbit_centers: Array[Celestial] = []
+var _orbit_targets: Array[Celestial] = []        # 每条预测线对应的天体
+var _predict_data: Dictionary = {}               # Celestial -> PackedVector3Array(世界预测轨迹)
+var _predict_counter: int = 0
 
-# 尾迹(仅 main_top): 所有天体走过的真实路径, 每帧追加 → 动态反映真实运动(改 mass 也会跟着变)
+# 尾迹(F4): 天体走过的真实路径
 var _show_trail: bool = true
 var _trail_mesh: MeshInstance3D = null
 
-# 属性编辑面板(仅 main_top): 显示当前聚焦天体的 mass/radius/color, 运行时动态改
 var _editor_title: Label = null
 var _mass_spin: SpinBox = null
 var _radius_spin: SpinBox = null
 var _color_pick: ColorPickerButton = null
-var _editor_syncing: bool = false   # 同步控件值时禁止回调(避免反向触发改值)
+var _editor_syncing: bool = false
 
-# 左键点击聚焦(顶层): 短按 = 射线拾取天体聚焦; 拖动 > 6px 视为 OrbitCamera 旋转
 var _clicking: bool = false
 var _click_pos: Vector2 = Vector2.ZERO
 
@@ -102,18 +100,15 @@ func _ready() -> void:
 	_collect()
 	_init_physics()
 	if parent_system == null:
-		# 顶层物理原点 = 节点编辑器位置(读 transform) → 并列恒星系各自定位, 不重叠
 		var gp: Vector3 = global_position
 		_bcx = gp.x
 		_bcy = gp.y
 		_bcz = gp.z
-		# 第一个有效顶层 = main_top(管全局协调); 游戏重启时旧的已失效, 重新认主
 		if main_top == null or not is_instance_valid(main_top):
 			main_top = self
 		if main_top == self:
 			_is_main_top = true
 			_build_hud()
-			# 延迟到所有兄弟顶层 _ready 完成(CS2 等)再收集 → 跨顶层 focus / SOI / 轨道 / 面板才完整
 			call_deferred("_collect_focus_all")
 			call_deferred("_build_soi_visuals_all")
 			call_deferred("_build_orbit_visuals_all")
@@ -133,8 +128,6 @@ func _collect() -> void:
 			_lights.append(c)
 
 
-# 建本层 sim: 主导体放原点, 其余绕主导体; 子系统作质点绕主导体。
-# 初始相位用编辑器位置方向 → 运行时初始位置对齐编辑器。
 func _init_physics() -> void:
 	if dominant == null and not members.is_empty():
 		dominant = members[0]
@@ -143,7 +136,7 @@ func _init_physics() -> void:
 		db.type = dominant.type
 		db.radius = dominant.radius
 		db.color = dominant.color
-		db.set_pos(0.0, 0.0, 0.0)              # 主导体 = 本层原点
+		db.set_pos(0.0, 0.0, 0.0)
 		sim.add(db)
 		dominant.body = db
 		dominant.owner_system = self
@@ -155,7 +148,7 @@ func _init_physics() -> void:
 			var dist: float = rel.length()
 			if dist < 1.0:
 				dist = 2000.0 + float(idx) * 1000.0
-			var phase: float = atan2(rel.z, rel.x)      # 编辑器位置的方向角
+			var phase: float = atan2(rel.z, rel.x)
 			var b: Body = sim.add_orbiting(db, {
 				"mass": c.mass, "dist": dist, "phase": phase,
 				"inclination": 0.25 if c.type == "moon" else 0.0,
@@ -202,7 +195,6 @@ func get_total_mass() -> float:
 	return m
 
 
-# 收集所有并列顶层(Main 下的 CelestialSystem 且无父系统)。
 func _get_all_tops() -> Array[CelestialSystem]:
 	var tops: Array[CelestialSystem] = []
 	var p: Node = get_parent()
@@ -215,14 +207,12 @@ func _get_all_tops() -> Array[CelestialSystem]:
 	return tops
 
 
-# 只有 main_top 驱动整棵树(含其他并列顶层); 其他节点 _physics_process 空转。
 func _physics_process(_delta: float) -> void:
 	if not _is_main_top:
 		return
 	_frame()
 
 
-# main_top 一帧: step 所有顶层 → 定全局浮动原点 → 渲染所有顶层 → SOI/轨道 → 相机/HUD。
 func _frame() -> void:
 	var tops: Array[CelestialSystem] = _get_all_tops()
 	for t in tops:
@@ -232,15 +222,22 @@ func _frame() -> void:
 		global_ox = fc._wx
 		global_oy = fc._wy
 		global_oz = fc._wz
+	# 动态 SOI(Step3): 按当前 Hill 球归属跨系统移交天体(逃出→提升到父, 进入→被捕获)。
+	# 在渲染前完成, 使本帧渲染直接用新归属。世界坐标驱动, 不依赖浮动原点。
+	_update_dynamic_soi()
 	for t in tops:
 		t._render_recursive(global_ox, global_oy, global_oz)
 		t._update_soi(global_ox, global_oy, global_oz)
+	# 轨迹预测: 每 30 帧重算一次(积分开销), 每帧用缓存画
+	_predict_counter += 1
+	if _predict_counter >= 30 or _predict_data.is_empty():
+		_predict_counter = 0
+		_compute_predictions()
 	_update_orbit(global_ox, global_oy, global_oz)
 	_update_trail_mesh(global_ox, global_oy, global_oz)
 	_update_camera_and_hud()
 
 
-# 自顶向下: step 本层 → 暂存成员世界 double 位置 → 下传子系统质心 → 递归。
 func _step_recursive() -> void:
 	var dt := dt_fixed * sim_speed
 	var nsub: int = max(substeps, 1)
@@ -252,6 +249,9 @@ func _step_recursive() -> void:
 		c._wx = _bcx + c.body.px
 		c._wy = _bcy + c.body.py
 		c._wz = _bcz + c.body.pz
+		c._wvx = _bvx + c.body.vx
+		c._wvy = _bvy + c.body.vy
+		c._wvz = _bvz + c.body.vz
 		var wp := Vector3(c._wx, c._wy, c._wz)
 		if c._trail.is_empty() or (c._trail.back() as Vector3).distance_to(wp) > max(c.radius * 0.3, 5.0):
 			c._trail.append(wp)
@@ -262,10 +262,12 @@ func _step_recursive() -> void:
 		sub._bcx = _bcx + pb.px
 		sub._bcy = _bcy + pb.py
 		sub._bcz = _bcz + pb.pz
+		sub._bvx = _bvx + pb.vx
+		sub._bvy = _bvy + pb.vy
+		sub._bvz = _bvz + pb.vz
 		sub._step_recursive()
 
 
-# 写 global_position(世界 double − 全局浮动原点)。点光源跟随本层 dominant。
 func _render_recursive(ox: float, oy: float, oz: float) -> void:
 	if dominant != null and not _lights.is_empty():
 		var lx: float = dominant._wx - ox
@@ -291,12 +293,148 @@ func _update_soi(ox: float, oy: float, oz: float) -> void:
 				tgt.dominant._wx - ox, tgt.dominant._wy - oy, tgt.dominant._wz - oz)
 
 
+# ===================== 动态 SOI(Step3) =====================
+# 天体从属关系由运行时 Hill 球归属决定, 不再固定于编辑器层级。
+# 每帧扫描每个非主导叶子天体: 逃出当前系统 Hill(×OUT)→提升到父系统;
+# 落入某子系统 Hill(×IN)→被该子系统捕获。两侧 hysteresis 之间为死区, 防边界抖动。
+# 移交 = 在 members/sim/场景树之间搬天体, 用世界位速换算到新系统局部坐标。
+func _update_dynamic_soi() -> void:
+	var changed := false
+	for t in _get_all_tops():
+		if _scan_system_soi(t):
+			changed = true
+	if changed:
+		_after_reparent()
+
+
+func _scan_system_soi(sys: CelestialSystem) -> bool:
+	var changed := false
+	var snap: Array[Celestial] = []
+	snap.assign(sys.members)
+	for c in snap:
+		if c == sys.dominant or c.body == null:
+			continue
+		var desired: CelestialSystem = _resolve_desired_owner(c)
+		if desired != null and desired != c.owner_system:
+			_reparent_celestial(c, c.owner_system, desired)
+			changed = true
+	for sub in sys.child_systems:
+		if _scan_system_soi(sub):
+			changed = true
+	return changed
+
+
+# 决定天体 c 应属哪个系统(同一顶层内), 两侧 hysteresis:
+#  - 逃出: c 到当前主导距离 > 当前 Hill×OUT → 离开当前系统, 从父起向下找捕获目标。
+#  - 捕获: 否则从当前系统起向下找更深的包含者(顶层成员可被行星 Hill 捕获)。
+func _resolve_desired_owner(c: Celestial) -> CelestialSystem:
+	var cur: CelestialSystem = c.owner_system
+	var px: float = c._wx
+	var py: float = c._wy
+	var pz: float = c._wz
+	if cur.parent_system != null and cur.dominant != null and cur._hill_radius > 0.0:
+		var de: float = _dist3(px, py, pz, cur.dominant._wx, cur.dominant._wy, cur.dominant._wz)
+		if de > cur._hill_radius * _SOI_HYSTERESIS_OUT:
+			return _capture_descend(cur.parent_system, px, py, pz)
+	return _capture_descend(cur, px, py, pz)
+
+
+# 从 start 向下找包含点 (px,py,pz) 的最深子系统(含 start 自身)。
+# 仅当到子系统主导距离 < 子系统 Hill×IN 才下钻(捕获阈值)。
+func _capture_descend(start: CelestialSystem, px: float, py: float, pz: float) -> CelestialSystem:
+	var s: CelestialSystem = start
+	while true:
+		var nxt: CelestialSystem = null
+		for sub in s.child_systems:
+			if sub.dominant == null or sub._hill_radius <= 0.0:
+				continue
+			var d: float = _dist3(px, py, pz, sub.dominant._wx, sub.dominant._wy, sub.dominant._wz)
+			if d < sub._hill_radius * _SOI_HYSTERESIS_IN:
+				nxt = sub
+				break
+		if nxt == null:
+			return s
+		s = nxt
+	return s   # 不可达; 满足 GDScript 全路径返回检查
+
+
+# 把天体 c 从 from 系统移交给 to 系统: 摘旧 Body, 用世界位速在 to 里建新 Body(局部坐标)。
+func _reparent_celestial(c: Celestial, from: CelestialSystem, to: CelestialSystem) -> void:
+	# 1) 世界位/速(本帧 _step_recursive 已写)
+	var wx: float = c._wx
+	var wy: float = c._wy
+	var wz: float = c._wz
+	var vx: float = c._wvx
+	var vy: float = c._wvy
+	var vz: float = c._wvz
+	# 2) 从 from 摘除(members + sim body + 场景树节点)
+	from.members.erase(c)
+	if c.body != null:
+		from.sim.bodies.erase(c.body)
+	if c.get_parent() == from:
+		from.remove_child(c)
+	# 3) 在 to 里用局部坐标(世界 − to 基座位/速)建新 Body
+	var nb := Body.new(c.name, c.mass)
+	nb.type = c.type
+	nb.radius = c.radius
+	nb.color = c.color
+	nb.set_pos(wx - to._bcx, wy - to._bcy, wz - to._bcz)
+	nb.set_vel(vx - to._bvx, vy - to._bvy, vz - to._bvz)
+	if to.dominant != null and to.dominant.body != null:
+		nb.primary = to.dominant.body
+	to.sim.add(nb)
+	to.members.append(c)
+	c.body = nb
+	c.owner_system = to
+	# 4) 节点挂到 to(视觉位置每帧由物理驱动, 此处只为层级一致)
+	if c.get_parent() == from:
+		from.remove_child(c)
+	if c.get_parent() == null:
+		to.add_child(c)
+	print("[SOI] %s: %s -> %s" % [c.name, from.name, to.name])
+
+
+# 移交后刷新: Hill(顶层边界随成员变化)/SOI 球/轨道预测。
+func _after_reparent() -> void:
+	_recompute_hill_all()
+	_rebuild_soi_spheres()
+	_compute_predictions()
+
+
+func _dist3(ax: float, ay: float, az: float, bx: float, by: float, bz: float) -> float:
+	var dx: float = ax - bx
+	var dy: float = ay - by
+	var dz: float = az - bz
+	return sqrt(dx * dx + dy * dy + dz * dz)
+
+
 func _update_orbit(ox: float, oy: float, oz: float) -> void:
 	if not _show_orbit:
 		return
 	for i in range(_orbit_rings.size()):
-		var c: Celestial = _orbit_centers[i]
-		(_orbit_rings[i] as Node3D).global_position = Vector3(c._wx - ox, c._wy - oy, c._wz - oz)
+		var c: Celestial = _orbit_targets[i]
+		var sph: MeshInstance3D = _orbit_rings[i]
+		if not _predict_data.has(c):
+			sph.visible = false
+			continue
+		sph.visible = true
+		var traj: PackedVector3Array = _predict_data[c]
+		sph.mesh = _make_line_mesh(traj, ox, oy, oz)
+
+
+# 折线 mesh(世界 double − 浮动原点)。
+func _make_line_mesh(traj: PackedVector3Array, ox: float, oy: float, oz: float) -> ArrayMesh:
+	var positions := PackedVector3Array()
+	var n := traj.size()
+	for i in range(n - 1):
+		positions.append(Vector3(traj[i].x - ox, traj[i].y - oy, traj[i].z - oz))
+		positions.append(Vector3(traj[i + 1].x - ox, traj[i + 1].y - oy, traj[i + 1].z - oz))
+	var arr_mesh := ArrayMesh.new()
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = positions
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arrays)
+	return arr_mesh
 
 
 func _collect_focus_all() -> void:
@@ -310,6 +448,20 @@ func _collect_focus(sys: CelestialSystem) -> void:
 		_focus_list.append(c)
 	for sub in sys.child_systems:
 		_collect_focus(sub)
+
+
+func _all_celestials() -> Array[Celestial]:
+	var all: Array[Celestial] = []
+	for t in _get_all_tops():
+		_collect_celestials(t, all)
+	return all
+
+
+func _collect_celestials(sys: CelestialSystem, out: Array[Celestial]) -> void:
+	for c in sys.members:
+		out.append(c)
+	for sub in sys.child_systems:
+		_collect_celestials(sub, out)
 
 
 func _build_soi_visuals_all() -> void:
@@ -372,57 +524,99 @@ func _make_wireframe_sphere(r: float, n_lon: int, n_lat: int) -> ArrayMesh:
 	return arr_mesh
 
 
+# 为每个有预测的天体建一条预测线 mesh: 非 dominant 成员 + 子系统 dominant(作为父质点绕父)。
 func _build_orbit_visuals_all() -> void:
 	for t in _get_all_tops():
-		_collect_orbits(t)
+		_collect_orbit_targets(t)
 
 
-func _collect_orbits(sys: CelestialSystem) -> void:
-	if sys.dominant != null:
-		for c in sys.members:
-			if c == sys.dominant:
-				continue
-			var d: float = (c.position - sys.dominant.position).length()
-			if d < 1.0:
-				continue
-			var incl: float = 0.25 if c.type == "moon" else 0.0
-			_add_orbit_ring(sys.dominant, d, incl)
-		for sub in sys.child_systems:
-			var sd: float = (sub.position - sys.dominant.position).length()
-			if sd < 1.0:
-				continue
-			_add_orbit_ring(sys.dominant, sd, 0.0)
+func _collect_orbit_targets(sys: CelestialSystem) -> void:
+	for c in sys.members:
+		if c == sys.dominant or c.body == null:
+			continue
+		_add_orbit_mesh(c)
 	for sub in sys.child_systems:
-		_collect_orbits(sub)
+		if sub.dominant != null:
+			_add_orbit_mesh(sub.dominant)
+	for sub in sys.child_systems:
+		_collect_orbit_targets(sub)
 
 
-func _add_orbit_ring(center: Celestial, dist: float, inclination: float) -> void:
-	var ring := MeshInstance3D.new()
-	ring.name = "Orbit"
-	ring.mesh = _make_orbit_ring(dist, inclination)
-	ring.material_override = _make_orbit_material()
-	ring.visible = _show_orbit
-	add_child(ring)
-	_orbit_rings.append(ring)
-	_orbit_centers.append(center)
+func _add_orbit_mesh(c: Celestial) -> void:
+	if c in _orbit_targets:
+		return
+	var sph := MeshInstance3D.new()
+	sph.name = "Orbit_%s" % c.name
+	sph.material_override = _make_orbit_material()
+	sph.visible = _show_orbit
+	add_child(sph)
+	_orbit_rings.append(sph)
+	_orbit_targets.append(c)
 
 
-func _make_orbit_ring(dist: float, inclination: float) -> ArrayMesh:
-	var positions := PackedVector3Array()
-	var n := 128
-	var cc := cos(inclination)
-	var ss := sin(inclination)
-	for i in range(n):
-		var a0 := TAU * float(i) / float(n)
-		var a1 := TAU * float(i + 1) / float(n)
-		positions.append(Vector3(cos(a0) * dist, -sin(a0) * dist * ss, sin(a0) * dist * cc))
-		positions.append(Vector3(cos(a1) * dist, -sin(a1) * dist * ss, sin(a1) * dist * cc))
-	var arr_mesh := ArrayMesh.new()
-	var arrays: Array = []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = positions
-	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arrays)
-	return arr_mesh
+# 数值预测: 遍历每层 sim, 对"非 dominant"天体(非 dominant 成员 + 子系统质点)做二体 leapfrog 积分;
+# 回到起点附近(闭合)就停 → 整圈, 否则画一段。改 mass/速度后实时重算。
+func _compute_predictions() -> void:
+	_predict_data.clear()
+	for t in _get_all_tops():
+		_predict_layer(t)
+
+
+func _predict_layer(sys: CelestialSystem) -> void:
+	if sys.dominant != null and sys.dominant.body != null:
+		var dom_body: Body = sys.dominant.body
+		var mu: float = G * sys.dominant.mass
+		for c in sys.members:                                 # 非 dominant 成员(如卫星)
+			if c == sys.dominant or c.body == null:
+				continue
+			_predict_one(sys, dom_body, mu, c.body, c)
+		for sub in sys.child_systems:                         # 子系统质点 → 挂子系统 dominant
+			if sys.child_proxy.has(sub) and sub.dominant != null:
+				_predict_one(sys, dom_body, mu, sys.child_proxy[sub], sub.dominant)
+	for sub in sys.child_systems:
+		_predict_layer(sub)
+
+
+func _predict_one(sys: CelestialSystem, dom_body: Body, mu: float, body: Body, target: Celestial) -> void:
+	var rx: float = body.px - dom_body.px
+	var ry: float = body.py - dom_body.py
+	var rz: float = body.pz - dom_body.pz
+	var vx: float = body.vx - dom_body.vx
+	var vy: float = body.vy - dom_body.vy
+	var vz: float = body.vz - dom_body.vz
+	var r_len: float = sqrt(rx * rx + ry * ry + rz * rz)
+	if r_len < 1.0 or mu <= 0.0:
+		return
+	var v_len: float = sqrt(vx * vx + vy * vy + vz * vz)
+	var dt_p: float = max(r_len / max(v_len, 0.1) / 20.0, 0.5)
+	var start := Vector3(rx, ry, rz)
+	var traj := PackedVector3Array()
+	var max_steps := 4000
+	for step in range(max_steps):
+		var r2 := rx * rx + ry * ry + rz * rz
+		var inv_r := 1.0 / sqrt(r2)
+		var k := mu * inv_r / r2
+		vx -= k * rx * dt_p * 0.5
+		vy -= k * ry * dt_p * 0.5
+		vz -= k * rz * dt_p * 0.5
+		rx += vx * dt_p
+		ry += vy * dt_p
+		rz += vz * dt_p
+		r2 = rx * rx + ry * ry + rz * rz
+		inv_r = 1.0 / sqrt(r2)
+		k = mu * inv_r / r2
+		vx -= k * rx * dt_p * 0.5
+		vy -= k * ry * dt_p * 0.5
+		vz -= k * rz * dt_p * 0.5
+		if step % 2 == 0:
+			traj.append(Vector3(rx, ry, rz))
+			if step > 40 and Vector3(rx, ry, rz).distance_to(start) < r_len * 0.02:
+				break
+	var dom_world := Vector3(sys.dominant._wx, sys.dominant._wy, sys.dominant._wz)
+	var world_traj := PackedVector3Array()
+	for p in traj:
+		world_traj.append(dom_world + p)
+	_predict_data[target] = world_traj
 
 
 func _make_orbit_material() -> Material:
@@ -443,22 +637,6 @@ func _build_trail_mesh() -> void:
 	add_child(_trail_mesh)
 
 
-# 收集所有天体(跨顶层递归)。
-func _all_celestials() -> Array[Celestial]:
-	var all: Array[Celestial] = []
-	for t in _get_all_tops():
-		_collect_celestials(t, all)
-	return all
-
-
-func _collect_celestials(sys: CelestialSystem, out: Array[Celestial]) -> void:
-	for c in sys.members:
-		out.append(c)
-	for sub in sys.child_systems:
-		_collect_celestials(sub, out)
-
-
-# 每帧把所有天体尾迹合并成一个折线 mesh(世界 double − 浮动原点)。
 func _update_trail_mesh(ox: float, oy: float, oz: float) -> void:
 	if _trail_mesh == null or not _show_trail:
 		return
@@ -500,7 +678,7 @@ func _update_camera_and_hud() -> void:
 			_last_focus_idx = focus_idx
 			_sync_editor_from_focus()
 	if _hud != null and sim != null:
-		_hud.text = "focus: %s   speed: %.1f   (TAB 聚焦  [/] 调速  F2 SOI  F3 轨迹  左键点击  滚轮缩放)\nenergy: %.3f" % [
+		_hud.text = "focus: %s   speed: %.1f   (TAB [/]调速 F2 SOI F3 轨迹 F4 尾迹 左键 滚轮)\nenergy: %.3f" % [
 			fc.name, sim_speed, sim.energy().get("total", 0.0)]
 
 
@@ -569,7 +747,6 @@ func _pick_focus(mouse_pos: Vector2) -> void:
 
 
 # ===================== 属性编辑面板 =====================
-# 右上角面板: 显示当前聚焦天体的 mass/radius/color, 运行时动态改。
 func _build_celestial_editor() -> void:
 	var cl := CanvasLayer.new()
 	add_child(cl)
@@ -642,7 +819,6 @@ func _current_focus() -> Celestial:
 	return _focus_list[focus_idx % _focus_list.size()]
 
 
-# 聚焦切换时: 把面板控件值同步成新天体的属性(用 _editor_syncing 禁回调避免反向改值)。
 func _sync_editor_from_focus() -> void:
 	if _editor_title == null:
 		return
@@ -665,15 +841,11 @@ func _on_mass_changed(v: float) -> void:
 	if fc != null:
 		fc.mass = v
 		if fc.body != null:
-			fc.body.mass = v          # 同步到 sim → 立刻影响引力(其他天体受力变化)
+			fc.body.mass = v
 		_recompute_after_mass_change(fc)
 
 
-# 改 mass 后: 沿 owner 链向上更新子系统质点 mass + 重算所有 Hill + 重建 SOI 球。
-# 注意: 改一个天体的 mass, 它【自己】的轨道不变(物理: 加速度与自身质量无关);
-#       变的是 别人受它的引力 + 它作为子系统 dominant 时该子系统的总质量(→父sim里质点mass)。
 func _recompute_after_mass_change(fc: Celestial) -> void:
-	# fc 所属系统的总质量变了 → 它在父 sim 里的质点(proxy)mass 要更新, 一直递归到顶层
 	var sys: CelestialSystem = fc.owner_system
 	while sys != null:
 		var parent: CelestialSystem = sys.parent_system
@@ -683,6 +855,7 @@ func _recompute_after_mass_change(fc: Celestial) -> void:
 		sys = parent
 	_recompute_hill_all()
 	_rebuild_soi_spheres()
+	_compute_predictions()              # 改 mass → 重新数值预测轨道
 
 
 func _recompute_hill_all() -> void:
@@ -690,7 +863,6 @@ func _recompute_hill_all() -> void:
 		_recompute_hill_recursive(t)
 
 
-# 重算每个系统的引力作用范围(子系统=Hill球 用当前 sim 距离; 顶层=系统边界)。
 func _recompute_hill_recursive(sys: CelestialSystem) -> void:
 	if sys.parent_system != null and sys.dominant != null:
 		var parent: CelestialSystem = sys.parent_system
@@ -704,7 +876,6 @@ func _recompute_hill_recursive(sys: CelestialSystem) -> void:
 				var m: float = float(sys.get_total_mass())
 				sys._hill_radius = sdist * pow(m / (3.0 * parent.dominant.mass), 1.0 / 3.0)
 	elif sys.dominant != null and sys.dominant.body != null:
-		# 顶层系统边界 = 最远成员/子系统到 dominant 的距离 × 1.5
 		var max_d: float = 0.0
 		for c in sys.members:
 			if c == sys.dominant or c.body == null:
@@ -725,8 +896,6 @@ func _recompute_hill_recursive(sys: CelestialSystem) -> void:
 		_recompute_hill_recursive(sub)
 
 
-# 用最新的 _hill_radius 更新现有 SOI 球的 mesh(不 free/new 节点 → 不闪烁)。
-# 只换 mesh: 半径没变的球顶点不变(视觉无变化), 变了的球才会改 → 等效"改哪个哪个变"。
 func _rebuild_soi_spheres() -> void:
 	for i in range(_soi_spheres.size()):
 		var tgt: CelestialSystem = _soi_targets[i]
@@ -738,7 +907,7 @@ func _on_radius_changed(v: float) -> void:
 		return
 	var fc: Celestial = _current_focus()
 	if fc != null:
-		fc.radius = v               # celestial.gd setter → 自动重建 mesh(大小变化)
+		fc.radius = v
 
 
 func _on_color_changed(c: Color) -> void:
@@ -746,7 +915,7 @@ func _on_color_changed(c: Color) -> void:
 		return
 	var fc: Celestial = _current_focus()
 	if fc != null:
-		fc.color = c                # celestial.gd setter → 自动重建 material(颜色变化)
+		fc.color = c
 
 
 func _build_hud() -> void:
