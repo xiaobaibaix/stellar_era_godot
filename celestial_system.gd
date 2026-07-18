@@ -5,12 +5,12 @@
 ## 耦合: 子 CelestialSystem 在父层注册为一个"质点 body"(质量=子系统总质量),
 ##       随父层 sim 积分 → 整体轨道; 子层内部独立积分 → 相对轨道。叠加 = 嵌套。
 ## 多顶层: 多个恒星系可并列挂在 Main 下(各自独立 sim, 互不隶属)。
-##       第一个顶层 = main_top, 管全局浮动原点 / 相机 / HUD / 跨顶层聚焦 / SOI / 轨道线;
+##       第一个顶层 = main_top, 管全局浮动原点 / 相机 / HUD / 跨顶层聚焦 / SOI / 轨道线 / 属性面板;
 ##       其他顶层只跑自己的 sim + 渲染。
 ##       顶层物理原点 = 节点编辑器位置(读 transform) → 并列恒星系各自定位, 不重叠。
 ## 坐标: 成员 body.p 是【相对本系统主导体】的 double; 世界 double = world_barycenter + body.p;
 ##       渲染 = 世界 double − 全局浮动原点 → 32 位 global_position(大尺度不抖)。
-## 操作: TAB 聚焦 / [/] 调速 / F2 SOI / F3 轨迹线 / 左键点击聚焦 / 滚轮缩放。
+## 操作: TAB 聚焦 / [/] 调速 / F2 SOI / F3 轨迹线 / 左键点击聚焦 / 滚轮缩放 / 右上面板改属性。
 ## SOI: 每个天体系统的引力作用范围; F2 开关线框(稀疏经纬线, 半透明, 只画朝相机半球)。
 ##      - 子系统(有父): 相对父 dominant 的 Hill 球 r=a·(m/(3M))^(1/3)。
 ##      - 顶层(无父): 系统边界 = 最远成员/子系统距离 × 1.5。
@@ -32,7 +32,7 @@ void fragment() {
 }
 """
 
-# 全局协调(多顶层共享): main_top 管全局浮动原点 / 相机 / HUD / 跨顶层聚焦 / SOI / 轨道线。
+# 全局协调(多顶层共享): main_top 管全局浮动原点 / 相机 / HUD / 跨顶层聚焦 / SOI / 轨道线 / 属性面板。
 static var main_top: CelestialSystem = null
 static var global_ox: float = 0.0
 static var global_oy: float = 0.0
@@ -67,7 +67,7 @@ var _bcz: float = 0.0
 
 var _hud: Label = null
 var focus_idx: int = 0
-var _last_focus_idx: int = -1     # 上次聚焦索引; 仅切换时重置相机距离, 否则滚轮缩放会被每帧覆盖
+var _last_focus_idx: int = -1     # 上次聚焦索引; 仅切换时重置相机距离 + 同步属性面板
 var _focus_list: Array = []       # Array[Celestial] 跨顶层递归收集, main_top 聚焦用
 
 # SOI 可视化(仅 main_top 管理, 收集所有系统的线框球)
@@ -78,7 +78,14 @@ var _soi_targets: Array[CelestialSystem] = []
 # 轨道线可视化(仅 main_top 管理, 收集所有天体的预测轨道圆)
 var _show_orbit: bool = true
 var _orbit_rings: Array[MeshInstance3D] = []
-var _orbit_centers: Array[Celestial] = []   # 每条轨道圆的中心天体(跟随它)
+var _orbit_centers: Array[Celestial] = []
+
+# 属性编辑面板(仅 main_top): 显示当前聚焦天体的 mass/radius/color, 运行时动态改
+var _editor_title: Label = null
+var _mass_spin: SpinBox = null
+var _radius_spin: SpinBox = null
+var _color_pick: ColorPickerButton = null
+var _editor_syncing: bool = false   # 同步控件值时禁止回调(避免反向触发改值)
 
 # 左键点击聚焦(顶层): 短按 = 射线拾取天体聚焦; 拖动 > 6px 视为 OrbitCamera 旋转
 var _clicking: bool = false
@@ -102,10 +109,11 @@ func _ready() -> void:
 		if main_top == self:
 			_is_main_top = true
 			_build_hud()
-			# 延迟到所有兄弟顶层 _ready 完成(CS2 等)再收集 → 跨顶层 focus / SOI / 轨道才完整
+			# 延迟到所有兄弟顶层 _ready 完成(CS2 等)再收集 → 跨顶层 focus / SOI / 轨道 / 面板才完整
 			call_deferred("_collect_focus_all")
 			call_deferred("_build_soi_visuals_all")
 			call_deferred("_build_orbit_visuals_all")
+			call_deferred("_build_celestial_editor")
 
 
 func _collect() -> void:
@@ -170,7 +178,6 @@ func _init_physics() -> void:
 			sidx += 1
 	if parent_system == null:
 		sim.zero_momentum()
-		# 顶层自身的引力作用范围(系统边界): 最远成员/子系统到 dominant 的距离 × 1.5
 		var max_d: float = 0.0
 		for c in members:
 			if c == dominant:
@@ -263,7 +270,6 @@ func _render_recursive(ox: float, oy: float, oz: float) -> void:
 		sub._render_recursive(ox, oy, oz)
 
 
-# SOI 线框跟随各自系统 dominant 的渲染位置。
 func _update_soi(ox: float, oy: float, oz: float) -> void:
 	if not _show_soi:
 		return
@@ -274,7 +280,6 @@ func _update_soi(ox: float, oy: float, oz: float) -> void:
 				tgt.dominant._wx - ox, tgt.dominant._wy - oy, tgt.dominant._wz - oz)
 
 
-# 轨道圆跟随各自中心天体(dominant)的渲染位置。
 func _update_orbit(ox: float, oy: float, oz: float) -> void:
 	if not _show_orbit:
 		return
@@ -283,7 +288,6 @@ func _update_orbit(ox: float, oy: float, oz: float) -> void:
 		(_orbit_rings[i] as Node3D).global_position = Vector3(c._wx - ox, c._wy - oy, c._wz - oz)
 
 
-# 跨顶层收集聚焦天体(main_top 用)。
 func _collect_focus_all() -> void:
 	_focus_list.clear()
 	for t in _get_all_tops():
@@ -297,7 +301,6 @@ func _collect_focus(sys: CelestialSystem) -> void:
 		_collect_focus(sub)
 
 
-# 跨顶层收集所有系统的作用范围线框(main_top 用)。
 func _build_soi_visuals_all() -> void:
 	for t in _get_all_tops():
 		_collect_soi(t)
@@ -321,7 +324,6 @@ func _add_soi_sphere(target_sys: CelestialSystem) -> void:
 	_soi_targets.append(target_sys)
 
 
-# 顶层系统边界用不同颜色, 和子系统 Hill 球区分; 都用低透明度。shader discard 背面。
 func _make_soi_material(target_sys: CelestialSystem) -> Material:
 	var is_top: bool = target_sys.parent_system == null
 	var col: Color = Color(1.0, 0.85, 0.3, 0.35) if is_top else Color(0.3, 0.85, 1.0, 0.35)
@@ -333,7 +335,6 @@ func _make_soi_material(target_sys: CelestialSystem) -> Material:
 	return mat
 
 
-# 经纬线网格球(线框)。n_lon 条经线(过两极) + n_lat-1 条纬线(水平圆), 用 PRIMITIVE_LINES。
 func _make_wireframe_sphere(r: float, n_lon: int, n_lat: int) -> ArrayMesh:
 	var positions := PackedVector3Array()
 	for i in range(1, n_lat):
@@ -360,7 +361,6 @@ func _make_wireframe_sphere(r: float, n_lon: int, n_lat: int) -> ArrayMesh:
 	return arr_mesh
 
 
-# 跨顶层收集所有天体的预测轨道圆(main_top 用)。
 func _build_orbit_visuals_all() -> void:
 	for t in _get_all_tops():
 		_collect_orbits(t)
@@ -368,7 +368,6 @@ func _build_orbit_visuals_all() -> void:
 
 func _collect_orbits(sys: CelestialSystem) -> void:
 	if sys.dominant != null:
-		# 非 dominant 天体: 绕本层 dominant
 		for c in sys.members:
 			if c == sys.dominant:
 				continue
@@ -377,7 +376,6 @@ func _collect_orbits(sys: CelestialSystem) -> void:
 				continue
 			var incl: float = 0.25 if c.type == "moon" else 0.0
 			_add_orbit_ring(sys.dominant, d, incl)
-		# 子系统: 绕本层 dominant(无倾角)
 		for sub in sys.child_systems:
 			var sd: float = (sub.position - sys.dominant.position).length()
 			if sd < 1.0:
@@ -398,7 +396,6 @@ func _add_orbit_ring(center: Celestial, dist: float, inclination: float) -> void
 	_orbit_centers.append(center)
 
 
-# 完整轨道圆(解析): xz 平面圆 + 绕 x 轴倾斜 inclination(与 add_orbiting 一致)。
 func _make_orbit_ring(dist: float, inclination: float) -> ArrayMesh:
 	var positions := PackedVector3Array()
 	var n := 128
@@ -407,7 +404,6 @@ func _make_orbit_ring(dist: float, inclination: float) -> ArrayMesh:
 	for i in range(n):
 		var a0 := TAU * float(i) / float(n)
 		var a1 := TAU * float(i + 1) / float(n)
-		# xz 平面 (cos·dist, 0, sin·dist) 再绕 x 轴: y'=−z·sin, z'=z·cos
 		positions.append(Vector3(cos(a0) * dist, -sin(a0) * dist * ss, sin(a0) * dist * cc))
 		positions.append(Vector3(cos(a1) * dist, -sin(a1) * dist * ss, sin(a1) * dist * cc))
 	var arr_mesh := ArrayMesh.new()
@@ -423,7 +419,7 @@ func _make_orbit_material() -> Material:
 	mat.albedo_color = Color(0.6, 0.65, 0.8, 0.4)
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.no_depth_test = true                             # 透过天体也能看到整圈轨道
+	mat.no_depth_test = true
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	return mat
 
@@ -437,6 +433,7 @@ func _update_camera_and_hud() -> void:
 		if focus_idx != _last_focus_idx:
 			orbit_camera.distance = fc.radius * 6.0
 			_last_focus_idx = focus_idx
+			_sync_editor_from_focus()
 	if _hud != null and sim != null:
 		_hud.text = "focus: %s   speed: %.1f   (TAB 聚焦  [/] 调速  F2 SOI  F3 轨迹  左键点击  滚轮缩放)\nenergy: %.3f" % [
 			fc.name, sim_speed, sim.energy().get("total", 0.0)]
@@ -445,7 +442,6 @@ func _update_camera_and_hud() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if not _is_main_top:
 		return
-	# 左键: 短按(位移<6px) = 射线拾取天体聚焦; 拖动由 OrbitCamera 旋转, 不触发聚焦。
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
 		if event.is_pressed():
 			_clicking = true
@@ -473,7 +469,6 @@ func _unhandled_input(event: InputEvent) -> void:
 					ring.visible = _show_orbit
 
 
-# 鼠标射线 → 和所有聚焦天体(跨顶层)做球相交 → 命中最近的就 focus_idx 指过去。
 func _pick_focus(mouse_pos: Vector2) -> void:
 	if orbit_camera == null or _focus_list.is_empty():
 		return
@@ -502,6 +497,122 @@ func _pick_focus(mouse_pos: Vector2) -> void:
 			best_i = i
 	if best_i >= 0:
 		focus_idx = best_i
+
+
+# ===================== 属性编辑面板 =====================
+# 右上角面板: 显示当前聚焦天体的 mass/radius/color, 运行时动态改。
+func _build_celestial_editor() -> void:
+	var cl := CanvasLayer.new()
+	add_child(cl)
+	var panel := PanelContainer.new()
+	cl.add_child(panel)
+	panel.anchor_left = 1.0
+	panel.anchor_right = 1.0
+	panel.anchor_top = 0.0
+	panel.anchor_bottom = 0.0
+	panel.offset_left = -250.0
+	panel.offset_right = -10.0
+	panel.offset_top = 60.0
+	panel.offset_bottom = 60.0
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 8)
+	margin.add_theme_constant_override("margin_right", 8)
+	margin.add_theme_constant_override("margin_top", 6)
+	margin.add_theme_constant_override("margin_bottom", 6)
+	panel.add_child(margin)
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	margin.add_child(vbox)
+	_editor_title = Label.new()
+	_editor_title.text = "(未聚焦)"
+	vbox.add_child(_editor_title)
+	_mass_spin = _add_prop_spin(vbox, "mass", 0.0, 10000000.0, 10.0, _on_mass_changed)
+	_radius_spin = _add_prop_spin(vbox, "radius", 1.0, 5000.0, 5.0, _on_radius_changed)
+	_color_pick = _add_prop_color(vbox, "color", _on_color_changed)
+	_sync_editor_from_focus()
+
+
+func _add_prop_spin(parent: Control, label_text: String, minv: float, maxv: float, step: float, callback: Callable) -> SpinBox:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	parent.add_child(row)
+	var l := Label.new()
+	l.text = label_text
+	l.custom_minimum_size = Vector2(52, 0)
+	row.add_child(l)
+	var spin := SpinBox.new()
+	spin.min_value = minv
+	spin.max_value = maxv
+	spin.step = step
+	spin.value_changed.connect(callback)
+	spin.custom_minimum_size = Vector2(140, 0)
+	row.add_child(spin)
+	return spin
+
+
+func _add_prop_color(parent: Control, label_text: String, callback: Callable) -> ColorPickerButton:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	parent.add_child(row)
+	var l := Label.new()
+	l.text = label_text
+	l.custom_minimum_size = Vector2(52, 0)
+	row.add_child(l)
+	var cp := ColorPickerButton.new()
+	cp.color = Color.WHITE
+	cp.custom_minimum_size = Vector2(140, 0)
+	cp.edit_alpha = false
+	cp.color_changed.connect(callback)
+	row.add_child(cp)
+	return cp
+
+
+func _current_focus() -> Celestial:
+	if _focus_list.is_empty():
+		return null
+	return _focus_list[focus_idx % _focus_list.size()]
+
+
+# 聚焦切换时: 把面板控件值同步成新天体的属性(用 _editor_syncing 禁回调避免反向改值)。
+func _sync_editor_from_focus() -> void:
+	if _editor_title == null:
+		return
+	var fc: Celestial = _current_focus()
+	if fc == null:
+		_editor_title.text = "(未聚焦)"
+		return
+	_editor_syncing = true
+	_editor_title.text = "编辑: %s" % fc.name
+	_mass_spin.value = fc.mass
+	_radius_spin.value = fc.radius
+	_color_pick.color = fc.color
+	_editor_syncing = false
+
+
+func _on_mass_changed(v: float) -> void:
+	if _editor_syncing:
+		return
+	var fc: Celestial = _current_focus()
+	if fc != null:
+		fc.mass = v
+		if fc.body != null:
+			fc.body.mass = v          # 同步到 sim → 立刻影响引力(其他天体受力变化)
+
+
+func _on_radius_changed(v: float) -> void:
+	if _editor_syncing:
+		return
+	var fc: Celestial = _current_focus()
+	if fc != null:
+		fc.radius = v               # celestial.gd setter → 自动重建 mesh(大小变化)
+
+
+func _on_color_changed(c: Color) -> void:
+	if _editor_syncing:
+		return
+	var fc: Celestial = _current_focus()
+	if fc != null:
+		fc.color = c                # celestial.gd setter → 自动重建 material(颜色变化)
 
 
 func _build_hud() -> void:
