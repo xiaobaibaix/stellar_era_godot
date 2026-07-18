@@ -180,16 +180,100 @@ func _init_physics() -> void:
 			var msub: float = float(sub.get_total_mass())
 			sub._hill_radius = sdist * pow(msub / (3.0 * dominant.mass), 1.0 / 3.0)
 			sidx += 1
+	elif not child_systems.is_empty():
+		# 顶层"星系群": 无 dominant, 各 child_system 作质点 N 体互绕(互相制约; 双星 = N=2 特例)。
+		_init_cluster_physics()
 	if parent_system == null:
 		sim.zero_momentum()
-		var max_d: float = 0.0
+		_hill_radius = _compute_top_boundary()
+
+
+## 顶层星系群初始化(无 dominant): 各 child_system 作质点放入本层 sim, 两两引力互绕。
+## 每个质点绕群质心给切向速度 → 互相束缚。双星(N=2)用精确二体圆速度; 多体取质心圆速度 0.6 倍(略偏心)。
+func _init_cluster_physics() -> void:
+	var total_mass := 0.0
+	var bx := 0.0
+	var by := 0.0
+	var bz := 0.0
+	for sub in child_systems:
+		var ms: float = float(sub.get_total_mass())
+		bx += sub.position.x * ms
+		by += sub.position.y * ms
+		bz += sub.position.z * ms
+		total_mass += ms
+	if total_mass <= 0.0:
+		return
+	bx /= total_mass
+	by /= total_mass
+	bz /= total_mass
+	var is_binary: bool = child_systems.size() == 2
+	for sub in child_systems:
+		var ms: float = float(sub.get_total_mass())
+		var rx: float = sub.position.x - bx
+		var ry: float = sub.position.y - by
+		var rz: float = sub.position.z - bz
+		var ri: float = sqrt(rx * rx + ry * ry + rz * rz)
+		if ri < 1.0:
+			rx = 5000.0
+			ri = 5000.0
+		var speed: float
+		if is_binary:
+			# 精确二体圆速度: v_i = √(G·m_other² / (M·d)), d = 2·ri(质心对称)
+			var m_other: float = total_mass - ms
+			var d: float = ri * 2.0
+			speed = sqrt(G * m_other * m_other / (total_mass * d))
+		else:
+			speed = sqrt(G * total_mass / ri) * 0.6
+		# xz 平面切向方向 (-rz, 0, rx) 归一化
+		var tx: float = -rz
+		var tz: float = rx
+		var tl: float = sqrt(tx * tx + tz * tz)
+		if tl < 1e-9:
+			tx = 0.0
+			tz = 1.0
+			tl = 1.0
+		var proxy := Body.new(sub.name, ms)
+		proxy.type = "system"
+		proxy.set_pos(rx, ry, rz)
+		proxy.set_vel(tx / tl * speed, 0.0, tz / tl * speed)
+		sim.add(proxy)
+		child_proxy[sub] = proxy
+		# 子系统在群里的 Hill: a·(m/(3·M_total))^(1/3)
+		sub._hill_radius = ri * pow(ms / (3.0 * total_mass), 1.0 / 3.0)
+
+
+## 顶层边界(画群 SOI / 判逃逸用): 有 dominant → 最远成员到 dominant ×1.5;
+## 无 dominant(星系群) → 最远质点到群质心 ×1.5。
+func _compute_top_boundary() -> float:
+	var max_d: float = 0.0
+	if dominant != null:
 		for c in members:
 			if c == dominant:
 				continue
 			max_d = max(max_d, float((c.position - dominant.position).length()))
 		for sub in child_systems:
 			max_d = max(max_d, float((sub.position - dominant.position).length()))
-		_hill_radius = max_d * 1.5
+	else:
+		var tm := 0.0
+		var bx := 0.0
+		var by := 0.0
+		var bz := 0.0
+		for sub in child_systems:
+			var ms: float = float(sub.get_total_mass())
+			bx += sub.position.x * ms
+			by += sub.position.y * ms
+			bz += sub.position.z * ms
+			tm += ms
+		if tm > 0.0:
+			bx /= tm
+			by /= tm
+			bz /= tm
+		for sub in child_systems:
+			var dx: float = sub.position.x - bx
+			var dy: float = sub.position.y - by
+			var dz: float = sub.position.z - bz
+			max_d = max(max_d, sqrt(dx * dx + dy * dy + dz * dz))
+	return max_d * 1.5
 
 
 func get_total_mass() -> float:
@@ -894,34 +978,49 @@ func _recompute_hill_all() -> void:
 
 
 func _recompute_hill_recursive(sys: CelestialSystem) -> void:
-	if sys.parent_system != null and sys.dominant != null:
-		var parent: CelestialSystem = sys.parent_system
-		if parent.dominant != null and parent.dominant.body != null and parent.child_proxy.has(sys):
-			var proxy: Body = parent.child_proxy[sys]
-			var dx: float = proxy.px - parent.dominant.body.px
-			var dy: float = proxy.py - parent.dominant.body.py
-			var dz: float = proxy.pz - parent.dominant.body.pz
-			var sdist: float = sqrt(dx * dx + dy * dy + dz * dz)
-			if sdist > 0.0:
-				var m: float = float(sys.get_total_mass())
-				sys._hill_radius = sdist * pow(m / (3.0 * parent.dominant.mass), 1.0 / 3.0)
-	elif sys.dominant != null and sys.dominant.body != null:
-		var max_d: float = 0.0
-		for c in sys.members:
-			if c == sys.dominant or c.body == null:
-				continue
-			var dx: float = c.body.px - sys.dominant.body.px
-			var dy: float = c.body.py - sys.dominant.body.py
-			var dz: float = c.body.pz - sys.dominant.body.pz
-			max_d = max(max_d, sqrt(dx * dx + dy * dy + dz * dz))
-		for sub in sys.child_systems:
-			if sys.child_proxy.has(sub):
-				var proxy: Body = sys.child_proxy[sub]
-				var dx: float = proxy.px - sys.dominant.body.px
-				var dy: float = proxy.py - sys.dominant.body.py
-				var dz: float = proxy.pz - sys.dominant.body.pz
-				max_d = max(max_d, sqrt(dx * dx + dy * dy + dz * dz))
-		sys._hill_radius = max_d * 1.5
+	var parent: CelestialSystem = sys.parent_system
+	if parent != null and sys.dominant != null and parent.child_proxy.has(sys):
+		# 子系统(有 dominant)的 Hill: 相对父参考点, M = 父参考质量。
+		# 父有 dominant → 相对父 dominant, M = 父 dominant 质量;
+		# 父是星系群(无 dominant) → 相对群质心, M = 群总质量。
+		var proxy: Body = parent.child_proxy[sys]
+		var sdist: float = 0.0
+		var m_ref: float = 0.0
+		if parent.dominant != null and parent.dominant.body != null:
+			var db: Body = parent.dominant.body
+			var dx: float = proxy.px - db.px
+			var dy: float = proxy.py - db.py
+			var dz: float = proxy.pz - db.pz
+			sdist = sqrt(dx * dx + dy * dy + dz * dz)
+			m_ref = parent.dominant.mass
+		else:
+			var tm := 0.0
+			var bx := 0.0
+			var by := 0.0
+			var bz := 0.0
+			for s2 in parent.child_systems:
+				if not parent.child_proxy.has(s2):
+					continue
+				var pb2: Body = parent.child_proxy[s2]
+				tm += pb2.mass
+				bx += pb2.px * pb2.mass
+				by += pb2.py * pb2.mass
+				bz += pb2.pz * pb2.mass
+			if tm > 0.0:
+				bx /= tm
+				by /= tm
+				bz /= tm
+			var dx: float = proxy.px - bx
+			var dy: float = proxy.py - by
+			var dz: float = proxy.pz - bz
+			sdist = sqrt(dx * dx + dy * dy + dz * dz)
+			m_ref = tm
+		if sdist > 0.0 and m_ref > 0.0:
+			var m: float = float(sys.get_total_mass())
+			sys._hill_radius = sdist * pow(m / (3.0 * m_ref), 1.0 / 3.0)
+	elif parent == null:
+		# 顶层边界(有 dominant → 最远成员; 星系群 → 最远质点到质心)
+		sys._hill_radius = sys._compute_top_boundary()
 	for sub in sys.child_systems:
 		_recompute_hill_recursive(sub)
 
