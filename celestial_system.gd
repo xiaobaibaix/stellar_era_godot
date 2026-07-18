@@ -114,6 +114,13 @@ func _ready() -> void:
 			main_top = self
 		if main_top == self:
 			_is_main_top = true
+			# main_top(容器) 若未指定 orbit_camera, 自动找场景里的 OrbitCamera(TAB 聚焦/相机跟随需要)。
+			if orbit_camera == null and get_parent() != null:
+				for c in get_parent().get_children():
+					var oc := c as OrbitCamera
+					if oc != null:
+						orbit_camera = oc
+						break
 			_build_hud()
 			call_deferred("_resolve_initial_ownership_all")
 			call_deferred("_collect_focus_all")
