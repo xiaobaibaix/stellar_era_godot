@@ -132,13 +132,35 @@ func _ready() -> void:
 					if oc != null:
 						orbit_camera = oc
 						break
-			_build_hud()
+			_acquire_ui()
 			call_deferred("_resolve_initial_ownership_all")
 			call_deferred("_collect_focus_all")
 			call_deferred("_build_soi_visuals_all")
 			call_deferred("_build_celestial_visuals_all")
 			call_deferred("_build_orbit_visuals_all")
-			call_deferred("_build_celestial_editor")
+
+
+# 获取 main.tscn 的 UI 节点引用(HUD/编辑器, 全局只一份, 非 CelestialSystem 预制体子节点)。
+# UI 结构在编辑器搭好, 运行时只更新内容(Label.text / SpinBox.value / ColorPicker.color)。
+func _acquire_ui() -> void:
+	var ui_root: Node = get_parent()
+	if ui_root == null:
+		return
+	_hud = ui_root.get_node_or_null("HUDLayer/HUD") as Label
+	var editor: PanelContainer = ui_root.get_node_or_null("EditorLayer/Editor") as PanelContainer
+	if editor == null:
+		return
+	_editor_title = editor.get_node_or_null("Margin/VBox/Title") as Label
+	_mass_spin = editor.get_node_or_null("Margin/VBox/MassRow/SpinBox") as SpinBox
+	_radius_spin = editor.get_node_or_null("Margin/VBox/RadiusRow/SpinBox") as SpinBox
+	_color_pick = editor.get_node_or_null("Margin/VBox/ColorRow/ColorPicker") as ColorPickerButton
+	if _mass_spin != null:
+		_mass_spin.value_changed.connect(_on_mass_changed)
+	if _radius_spin != null:
+		_radius_spin.value_changed.connect(_on_radius_changed)
+	if _color_pick != null:
+		_color_pick.color_changed.connect(_on_color_changed)
+	_sync_editor_from_focus()
 
 
 func _collect() -> void:
@@ -729,6 +751,7 @@ func _update_orbit(ox: float, oy: float, oz: float) -> void:
 			sph.visible = false
 			continue
 		sph.visible = true
+		sph.global_position = Vector3.ZERO   # 节点原点对齐渲染原点(顶点已是渲染坐标, 抵消容器场景位)
 		var traj: PackedVector3Array = _predict_data[c]
 		sph.mesh = _make_line_mesh(traj, ox, oy, oz)
 
@@ -1054,6 +1077,7 @@ func _update_trail_mesh(ox: float, oy: float, oz: float) -> void:
 		if c._trail_visual == null:
 			continue
 		c._trail_visual.visible = true
+		c._trail_visual.global_position = Vector3.ZERO   # 节点原点对齐渲染原点(顶点已是渲染坐标, 抵消容器场景位)
 		var ref_c: Celestial = _trail_reference(c)
 		var rx := 0.0
 		var ry := 0.0
@@ -1070,6 +1094,8 @@ func _update_trail_mesh(ox: float, oy: float, oz: float) -> void:
 			var p1: Vector3 = tr[i + 1]
 			positions.append(Vector3(p0.x + rx - ox, p0.y + ry - oy, p0.z + rz - oz))
 			positions.append(Vector3(p1.x + rx - ox, p1.y + ry - oy, p1.z + rz - oz))
+		if positions.size() < 2:
+			continue   # trail 不足一段, 跳过(避免空 mesh 警告)
 		var arr_mesh := ArrayMesh.new()
 		var arrays: Array = []
 		arrays.resize(Mesh.ARRAY_MAX)

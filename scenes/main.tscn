@@ -52,6 +52,74 @@ offset_bottom = 26.0
 text = "FPS:111  patch:314  tri:110.5k  job:0"
 horizontal_alignment = 2
 
+[node name="HUDLayer" type="CanvasLayer" parent="."]
+
+[node name="HUD" type="Label" parent="HUDLayer"]
+offset_left = 10.0
+offset_top = 40.0
+theme_override_font_sizes/font_size = 14
+
+[node name="EditorLayer" type="CanvasLayer" parent="."]
+
+[node name="Editor" type="PanelContainer" parent="EditorLayer"]
+anchor_left = 1.0
+anchor_right = 1.0
+anchor_top = 0.0
+anchor_bottom = 0.0
+offset_left = -250.0
+offset_right = -10.0
+offset_top = 60.0
+offset_bottom = 60.0
+
+[node name="Margin" type="MarginContainer" parent="EditorLayer/Editor"]
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_top = 6
+theme_override_constants/margin_bottom = 6
+
+[node name="VBox" type="VBoxContainer" parent="EditorLayer/Editor/Margin"]
+theme_override_constants/separation = 4
+
+[node name="Title" type="Label" parent="EditorLayer/Editor/Margin/VBox"]
+text = "(未聚焦)"
+
+[node name="MassRow" type="HBoxContainer" parent="EditorLayer/Editor/Margin/VBox"]
+theme_override_constants/separation = 6
+
+[node name="Key" type="Label" parent="EditorLayer/Editor/Margin/VBox/MassRow"]
+text = "mass"
+custom_minimum_size = Vector2(52, 0)
+
+[node name="SpinBox" type="SpinBox" parent="EditorLayer/Editor/Margin/VBox/MassRow"]
+custom_minimum_size = Vector2(140, 0)
+min_value = 0.0
+max_value = 10000000.0
+step = 10.0
+
+[node name="RadiusRow" type="HBoxContainer" parent="EditorLayer/Editor/Margin/VBox"]
+theme_override_constants/separation = 6
+
+[node name="Key" type="Label" parent="EditorLayer/Editor/Margin/VBox/RadiusRow"]
+text = "radius"
+custom_minimum_size = Vector2(52, 0)
+
+[node name="SpinBox" type="SpinBox" parent="EditorLayer/Editor/Margin/VBox/RadiusRow"]
+custom_minimum_size = Vector2(140, 0)
+min_value = 1.0
+max_value = 5000.0
+step = 5.0
+
+[node name="ColorRow" type="HBoxContainer" parent="EditorLayer/Editor/Margin/VBox"]
+theme_override_constants/separation = 6
+
+[node name="Key" type="Label" parent="EditorLayer/Editor/Margin/VBox/ColorRow"]
+text = "color"
+custom_minimum_size = Vector2(52, 0)
+
+[node name="ColorPicker" type="ColorPickerButton" parent="EditorLayer/Editor/Margin/VBox/ColorRow"]
+custom_minimum_size = Vector2(140, 0)
+edit_alpha = false
+
 [node name="CelestialSystem" parent="." unique_id=2094240379 instance=ExtResource("8_tipki")]
 
 [node name="CelestialSystem1" parent="CelestialSystem" unique_id=422503284 node_paths=PackedStringArray("orbit_camera") instance=ExtResource("8_tipki")]
