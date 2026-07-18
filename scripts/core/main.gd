@@ -6,8 +6,6 @@ extends Node
 
 @export var camera: Camera3D
 @export var player: Player
-@export var toggle: CheckButton
-@export var wire_toggle: CheckButton       # 显示线框(纯透视 wireframe)开关
 @export var planet: Planet                 # 读 stats 刷新 FPS 行 / 控制 wireframe / LOD 聚焦目标
 @export var fps_label: Label                # 右上角 FPS 显示(运行时每 0.25s 刷新)
 
@@ -31,13 +29,7 @@ func _ready() -> void:
 	if camera != null:
 		_orbit_parent = camera.get_parent()
 		_orbit_transform = camera.global_transform
-	if toggle != null:
-		toggle.toggled.connect(_on_toggled)
-		# 空格是跳跃键; CheckButton 带键盘焦点时会被空格切换 → 跳跃时误退出控制。
-		toggle.focus_mode = Control.FOCUS_NONE
-	if wire_toggle != null:
-		wire_toggle.toggled.connect(_on_wire_toggled)
-		wire_toggle.focus_mode = Control.FOCUS_NONE
+	# 「跟随角色」「显示线框」CheckButton 已移除 → 改由天体系统驱动相机/渲染
 
 
 func _process(delta: float) -> void:
@@ -72,8 +64,6 @@ func _unhandled_input(event: InputEvent) -> void:
 			_cancel_aim()
 			return
 		if _in_player_mode:
-			if toggle != null:
-				toggle.set_pressed_no_signal(false)
 			_enter_orbit()
 			return
 
@@ -101,8 +91,6 @@ func _unhandled_input(event: InputEvent) -> void:
 				_wireframe = not _wireframe
 				if planet != null:
 					planet.set_wireframe(_wireframe)
-				if wire_toggle != null:
-					wire_toggle.set_pressed_no_signal(_wireframe)
 
 
 func _on_toggled(pressed: bool) -> void:
@@ -141,8 +129,6 @@ func _enter_player() -> void:
 	if planet != null:
 		planet.lod_target = player
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
-	if toggle != null:
-		toggle.set_pressed_no_signal(true)   # 标记→确认瞬移后, 按钮=按下态
 
 
 func _enter_orbit() -> void:
@@ -182,8 +168,6 @@ func _enter_aim() -> void:
 
 func _cancel_aim() -> void:
 	_aim_mode = false
-	if toggle != null:
-		toggle.set_pressed_no_signal(false)
 	if _marker != null:
 		_marker.visible = false
 

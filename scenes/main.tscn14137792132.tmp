@@ -31,9 +31,11 @@ script = ExtResource("3_o6xl0")
 [sub_resource type="Compositor" id="Compositor_tipki"]
 compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_o6xl0")])
 
-[node name="Main" type="Node" unique_id=502546147 node_paths=PackedStringArray("camera", "fps_label")]
+[node name="Main" type="Node" unique_id=502546147 node_paths=PackedStringArray("camera", "toggle", "wire_toggle", "fps_label")]
 script = ExtResource("6_main")
 camera = NodePath("Camera3D")
+toggle = NodePath("CheckButtonPlay")
+wire_toggle = NodePath("CheckButtonWire")
 fps_label = NodePath("FpsLabel")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1411384491]
@@ -45,6 +47,17 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1345.2281)
 current = true
 script = ExtResource("3_cam")
 
+[node name="CheckButtonWire" type="CheckButton" parent="." unique_id=204736276]
+offset_top = 31.0
+offset_right = 112.0
+offset_bottom = 62.0
+text = "显示线框"
+
+[node name="CheckButtonPlay" type="CheckButton" parent="." unique_id=1056460260]
+offset_right = 112.0
+offset_bottom = 31.0
+text = "跟随角色"
+
 [node name="FpsLabel" type="Label" parent="." unique_id=1044356931]
 offset_left = 860.0
 offset_right = 1136.0
@@ -52,39 +65,19 @@ offset_bottom = 26.0
 text = "FPS:111  patch:314  tri:110.5k  job:0"
 horizontal_alignment = 2
 
-[node name="CelestialSystem1" parent="." unique_id=422503284 node_paths=PackedStringArray("orbit_camera") instance=ExtResource("8_tipki")]
-orbit_camera = NodePath("../Camera3D")
+[node name="CelestialSystem1" parent="." unique_id=2076772381 instance=ExtResource("8_tipki")]
 
-[node name="Star" parent="CelestialSystem1" unique_id=1469884144 instance=ExtResource("9_cel")]
-mass = 1000000.0
-radius = 800.0
-type = "star"
-color = Color(1, 0.85, 0.4, 1)
-is_dominant = true
+[node name="Star" parent="CelestialSystem1" unique_id=1775776760 instance=ExtResource("9_cel")]
 
-[node name="OmniLight3D" type="OmniLight3D" parent="CelestialSystem1" unique_id=1095267187]
-
-[node name="Planet1" parent="CelestialSystem1" unique_id=512211728 instance=ExtResource("8_tipki")]
+[node name="Planet1" parent="CelestialSystem1" unique_id=2073102211 instance=ExtResource("8_tipki")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3500, 0, 0)
 
-[node name="Planet" parent="CelestialSystem1/Planet1" unique_id=1378551634 instance=ExtResource("9_cel")]
-mass = 60.0
-radius = 300.0
-color = Color(0.4, 0.6, 1, 1)
-is_dominant = true
+[node name="Planet" parent="CelestialSystem1/Planet1" unique_id=147589881 instance=ExtResource("9_cel")]
 
-[node name="Moon" parent="CelestialSystem1/Planet1" unique_id=607143191 instance=ExtResource("9_cel")]
+[node name="Moon" parent="CelestialSystem1/Planet1" unique_id=934080543 instance=ExtResource("9_cel")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 600, 0, 0)
-mass = 0.5
-radius = 80.0
-type = "moon"
-color = Color(0.75, 0.75, 0.75, 1)
 
-[node name="Planet2" parent="CelestialSystem1" unique_id=689757741 instance=ExtResource("8_tipki")]
+[node name="Planet2" parent="CelestialSystem1" unique_id=178024159 instance=ExtResource("8_tipki")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6500, 0, 0)
 
-[node name="Planet" parent="CelestialSystem1/Planet2" unique_id=769974027 instance=ExtResource("9_cel")]
-mass = 50.0
-radius = 250.0
-color = Color(0.9, 0.5, 0.3, 1)
-is_dominant = true
+[node name="Planet" parent="CelestialSystem1/Planet2" unique_id=1814368496 instance=ExtResource("9_cel")]

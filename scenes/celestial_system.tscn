@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://dvvumqb10vtc8"]
+
+[ext_resource type="Script" uid="uid://wtc1vb7c6gl" path="res://celestial_system.gd" id="1_a48o5"]
+
+[node name="CelestialSystem" type="Node3D"]
+script = ExtResource("1_a48o5")
