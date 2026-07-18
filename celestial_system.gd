@@ -413,10 +413,41 @@ func _scan_system_soi(sys: CelestialSystem) -> bool:
 		if desired != null and desired != c.owner_system:
 			_reparent_celestial(c, c.owner_system, desired)
 			changed = true
-	for sub in sys.child_systems:
+	# 子系统(child_system)动态归属: rogue 子系统进某星 Hill → 被捕获回行星系; 飞出父 Hill → 上抛。
+	# 与 member 移交同构, 操作 child_proxy(_reparent_subsystem)。实现 S-type⇄P-type 运行时切换。
+	var sub_snap: Array[CelestialSystem] = []
+	sub_snap.assign(sys.child_systems)
+	for sub in sub_snap:
+		var desired_sub: CelestialSystem = _resolve_desired_owner_sub(sub)
+		if desired_sub != null and desired_sub != sub.parent_system:
+			_reparent_subsystem(sub, sub.parent_system, desired_sub)
+			changed = true
+	# 递归用快照(上面子系统移交可能改了 sys.child_systems, 不能直接迭代)。
+	var rec_snap: Array[CelestialSystem] = []
+	rec_snap.assign(sys.child_systems)
+	for sub in rec_snap:
 		if _scan_system_soi(sub):
 			changed = true
 	return changed
+
+
+# 决定子系统 sub 应属哪个系统(与 _resolve_desired_owner 对应, 对象是 child_system):
+#  - 逃出: sub 到当前父 dominant 距离 > 父 Hill×OUT → 上抛到祖父。
+#  - 捕获: 否则从当前父起向下找更深包含者(rogue 子系统进某星 Hill → 被捕获为该星行星系)。
+# 顶层群(无 dominant)的子系统只做捕获判定(群无 Hill; rogue 在群里受多源引力)。
+func _resolve_desired_owner_sub(sub: CelestialSystem) -> CelestialSystem:
+	var cur: CelestialSystem = sub.parent_system
+	if cur == null or not cur.child_proxy.has(sub):
+		return null
+	var pb: Body = cur.child_proxy[sub]
+	var px: float = cur._bcx + pb.px
+	var py: float = cur._bcy + pb.py
+	var pz: float = cur._bcz + pb.pz
+	if cur.dominant != null and cur.parent_system != null and cur._hill_radius > 0.0:
+		var de: float = _dist3(px, py, pz, cur.dominant._wx, cur.dominant._wy, cur.dominant._wz)
+		if de > cur._hill_radius * _SOI_HYSTERESIS_OUT:
+			return _capture_descend(cur.parent_system, px, py, pz, sub)
+	return _capture_descend(cur, px, py, pz, sub)
 
 
 # 决定天体 c 应属哪个系统(同一顶层内), 两侧 hysteresis:
@@ -436,12 +467,13 @@ func _resolve_desired_owner(c: Celestial) -> CelestialSystem:
 
 # 从 start 向下找包含点 (px,py,pz) 的最深子系统(含 start 自身)。
 # 仅当到子系统主导距离 < 子系统 Hill×IN 才下钻(捕获阈值)。
-func _capture_descend(start: CelestialSystem, px: float, py: float, pz: float) -> CelestialSystem:
+func _capture_descend(start: CelestialSystem, px: float, py: float, pz: float, exclude: CelestialSystem = null) -> CelestialSystem:
 	var s: CelestialSystem = start
 	while true:
 		var nxt: CelestialSystem = null
 		for sub in s.child_systems:
-			if sub.dominant == null or sub._hill_radius <= 0.0:
+			# exclude: 子系统归属判定时跳过它自己(其 dominant 恰在自身位置 → 距离0 会误判为自我捕获)。
+			if sub == exclude or sub.dominant == null or sub._hill_radius <= 0.0:
 				continue
 			var d: float = _dist3(px, py, pz, sub.dominant._wx, sub.dominant._wy, sub.dominant._wz)
 			if d < sub._hill_radius * _SOI_HYSTERESIS_IN:
@@ -573,8 +605,14 @@ func _reparent_subsystem(sub: CelestialSystem, from: CelestialSystem, to: Celest
 	if sub.get_parent() == from:
 		from.remove_child(sub)
 	# 3) 在 to 里用局部坐标(世界 − to 基座位/速)建新 proxy
-	#    改唯一名: 两个星系的同名子系统都上抛到群时, 避免节点名冲突(Godot 会自动改成 @Node3D@N)。
-	sub.name = sub.name + "_" + from.name
+	#    防重名: 仅当 to 已有同名子系统时加来源后缀(避免 Godot 自动改 @Node3D@N; 运行时反复移交不累积)。
+	var has_dup := false
+	for c in to.get_children():
+		if c is CelestialSystem and c.name == sub.name:
+			has_dup = true
+			break
+	if has_dup:
+		sub.name = sub.name + "_" + from.name
 	var nb := Body.new(sub.name, float(sub.get_total_mass()))
 	nb.type = "system"
 	nb.set_pos(wx - to._bcx, wy - to._bcy, wz - to._bcz)
