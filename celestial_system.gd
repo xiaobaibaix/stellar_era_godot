@@ -37,9 +37,9 @@ static var global_oz: float = 0.0
 
 @export_group("仅顶层")
 @export var orbit_camera: OrbitCamera
-## 轨迹预测线(F3)重算间隔(帧)。越小越跟手(1=每帧), 越大越省 CPU。预测是数值积分,
-## 闭合轨道几十步即停; 只有非闭合(被踢飞/逃逸)才跑满。默认 10。
-@export_range(1, 60, 1) var orbit_predict_interval: int = 10
+## 轨迹预测线(F3)重算间隔(帧)。解析椭圆(每条仅 192 次三角运算)极廉价 → 默认 1(每帧)
+## = 零滞后最丝滑。天体很多时可调大省 CPU。
+@export_range(1, 60, 1) var orbit_predict_interval: int = 1
 
 var sim: NBodySystem
 var members: Array[Celestial] = []
@@ -66,6 +66,9 @@ var _bvz: float = 0.0
 # 动态 SOI 边界 hysteresis: 进入需 <IN×Hill, 逃出需 >OUT×Hill; 中间死区防抖动。
 const _SOI_HYSTERESIS_IN: float = 0.9
 const _SOI_HYSTERESIS_OUT: float = 1.1
+
+# 解析轨道椭圆的采样段数(移植 web ORBIT_SEG)。越大越圆滑, 192 已目测完美闭合。
+const _ORBIT_SEG: int = 192
 
 var _hud: Label = null
 var focus_idx: int = 0
@@ -557,8 +560,8 @@ func _add_orbit_mesh(c: Celestial) -> void:
 	_orbit_targets.append(c)
 
 
-# 数值预测: 遍历每层 sim, 对"非 dominant"天体(非 dominant 成员 + 子系统质点)做二体 leapfrog 积分;
-# 回到起点附近(闭合)就停 → 整圈, 否则画一段。改 mass/速度后实时重算。
+# 解析轨道椭圆: 遍历每层 sim, 对"非 dominant"天体(成员 + 子系统质点)从当前 (r,v) 求 Kepler
+# 椭圆并采样。每帧重算 → 永远反映当前 osculating 轨道。逃逸体(能量≥0)不画。
 func _compute_predictions() -> void:
 	_predict_data.clear()
 	for t in _get_all_tops():
@@ -580,6 +583,9 @@ func _predict_layer(sys: CelestialSystem) -> void:
 		_predict_layer(sub)
 
 
+# 解析轨道椭圆(移植 web writeOrbit): 从当前状态矢量 (r,v) 相对 dominant 求 Kepler 椭圆,
+# 采样 _ORBIT_SEG 段完美闭合曲线。逃逸/双曲(能量≥0 或 e≥1)→ 不画。
+# 每帧从当前状态重算 → 永远反映当前 osculating 轨道, 无数值积分误差/滞后 → 丝滑。
 func _predict_one(sys: CelestialSystem, dom_body: Body, mu: float, body: Body, target: Celestial) -> void:
 	var rx: float = body.px - dom_body.px
 	var ry: float = body.py - dom_body.py
@@ -588,37 +594,58 @@ func _predict_one(sys: CelestialSystem, dom_body: Body, mu: float, body: Body, t
 	var vy: float = body.vy - dom_body.vy
 	var vz: float = body.vz - dom_body.vz
 	var r_len: float = sqrt(rx * rx + ry * ry + rz * rz)
-	if r_len < 1.0 or mu <= 0.0:
+	if r_len < 1e-9 or mu <= 0.0:
 		return
-	var v_len: float = sqrt(vx * vx + vy * vy + vz * vz)
-	var dt_p: float = max(r_len / max(v_len, 0.1) / 20.0, 0.5)
-	var start := Vector3(rx, ry, rz)
-	var traj := PackedVector3Array()
-	var max_steps := 4000
-	for step in range(max_steps):
-		var r2 := rx * rx + ry * ry + rz * rz
-		var inv_r := 1.0 / sqrt(r2)
-		var k := mu * inv_r / r2
-		vx -= k * rx * dt_p * 0.5
-		vy -= k * ry * dt_p * 0.5
-		vz -= k * rz * dt_p * 0.5
-		rx += vx * dt_p
-		ry += vy * dt_p
-		rz += vz * dt_p
-		r2 = rx * rx + ry * ry + rz * rz
-		inv_r = 1.0 / sqrt(r2)
-		k = mu * inv_r / r2
-		vx -= k * rx * dt_p * 0.5
-		vy -= k * ry * dt_p * 0.5
-		vz -= k * rz * dt_p * 0.5
-		if step % 2 == 0:
-			traj.append(Vector3(rx, ry, rz))
-			if step > 40 and Vector3(rx, ry, rz).distance_to(start) < r_len * 0.02:
-				break
+	# 角动量 h = r × v
+	var hx: float = ry * vz - rz * vy
+	var hy: float = rz * vx - rx * vz
+	var hz: float = rx * vy - ry * vx
+	var h_len: float = sqrt(hx * hx + hy * hy + hz * hz)
+	if h_len < 1e-9:
+		return
+	# 偏心率矢量 e = (v × h)/μ − r/|r|  (指向近星点)
+	var vxh_x: float = vy * hz - vz * hy
+	var vxh_y: float = vz * hx - vx * hz
+	var vxh_z: float = vx * hy - vy * hx
+	var ex: float = vxh_x / mu - rx / r_len
+	var ey: float = vxh_y / mu - ry / r_len
+	var ez: float = vxh_z / mu - rz / r_len
+	var e: float = sqrt(ex * ex + ey * ey + ez * ez)
+	var energy: float = 0.5 * (vx * vx + vy * vy + vz * vz) - mu / r_len
+	if energy >= 0.0 or e >= 0.999:
+		return                                 # 逃逸/双曲 → 不画闭合椭圆
+	var p: float = h_len * h_len / mu          # 半通径 p = h²/μ
+	# 轨道平面正交基: nHat=h/|h|; pHat=e/e (e≈0 取 r方向); qHat=nHat×pHat
+	var nx: float = hx / h_len
+	var ny: float = hy / h_len
+	var nz: float = hz / h_len
+	var pxh: float
+	var pyh: float
+	var pzh: float
+	if e > 1e-5:
+		pxh = ex / e
+		pyh = ey / e
+		pzh = ez / e
+	else:
+		pxh = rx / r_len
+		pyh = ry / r_len
+		pzh = rz / r_len
+	var qx: float = ny * pzh - nz * pyh
+	var qy: float = nz * pxh - nx * pzh
+	var qz: float = nx * pyh - ny * pxh
+	# 采样闭合椭圆: r(θ) = p/(1+e·cosθ), 点 = dominant世界位 + rr·(cos·pHat + sin·qHat)
 	var dom_world := Vector3(sys.dominant._wx, sys.dominant._wy, sys.dominant._wz)
 	var world_traj := PackedVector3Array()
-	for p in traj:
-		world_traj.append(dom_world + p)
+	var n: int = _ORBIT_SEG
+	for i in range(n):
+		var th: float = (float(i) / float(n - 1)) * TAU
+		var c: float = cos(th)
+		var s: float = sin(th)
+		var rr: float = p / (1.0 + e * c)
+		world_traj.append(Vector3(
+			dom_world.x + rr * (c * pxh + s * qx),
+			dom_world.y + rr * (c * pyh + s * qy),
+			dom_world.z + rr * (c * pzh + s * qz)))
 	_predict_data[target] = world_traj
 
 
