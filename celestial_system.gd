@@ -78,6 +78,9 @@ var _focus_list: Array = []
 var _show_soi: bool = false
 var _soi_spheres: Array[MeshInstance3D] = []
 var _soi_targets: Array[CelestialSystem] = []
+var _soi_visual: MeshInstance3D = null     # 本系统自带的 SOI 节点(预制体)
+var _trails_container: Node3D = null       # 预制体 Trails 容器(代码生成的拖尾节点挂此, 和天体并列)
+var _orbits_container: Node3D = null       # 预制体 Orbits 容器(代码生成的轨道节点挂此, 和天体并列)
 
 # 轨迹预测(数值积分, F3): 每个非 dominant 天体一条预测线, 动态更新
 var _show_orbit: bool = true
@@ -104,6 +107,14 @@ func _ready() -> void:
 	sim = NBodySystem.new(G, softening)
 	parent_system = get_parent() as CelestialSystem
 	_collect()
+	# 预制体 SOI 节点: 设单位球 mesh + 材质(运行时只更新 scale/位置)。
+	_soi_visual = get_node_or_null("SOI") as MeshInstance3D
+	if _soi_visual != null:
+		_soi_visual.mesh = _make_wireframe_sphere(1.0, 24, 12)
+		_soi_visual.material_override = _make_soi_material(self)
+	# 预制体容器: 代码生成的 trail/orbit 节点挂此(和天体并列, 进出系统时增删)。
+	_trails_container = get_node_or_null("Trails")
+	_orbits_container = get_node_or_null("Orbits")
 	_init_physics()
 	if parent_system == null:
 		var gp: Vector3 = global_position
@@ -125,9 +136,9 @@ func _ready() -> void:
 			call_deferred("_resolve_initial_ownership_all")
 			call_deferred("_collect_focus_all")
 			call_deferred("_build_soi_visuals_all")
+			call_deferred("_build_celestial_visuals_all")
 			call_deferred("_build_orbit_visuals_all")
 			call_deferred("_build_celestial_editor")
-			call_deferred("_build_trail_mesh")
 
 
 func _collect() -> void:
@@ -527,6 +538,7 @@ func _reparent_celestial(c: Celestial, from: CelestialSystem, to: CelestialSyste
 	var vz: float = c._wvz
 	# 2) 从 from 摘除(members + sim body + 场景树节点)
 	from.members.erase(c)
+	from._remove_visuals_for(c)
 	if c.body != null:
 		from.sim.bodies.erase(c.body)
 	if c.get_parent() == from:
@@ -544,6 +556,7 @@ func _reparent_celestial(c: Celestial, from: CelestialSystem, to: CelestialSyste
 	to.members.append(c)
 	c.body = nb
 	c.owner_system = to
+	to._ensure_visuals_for(c)
 	# 4) 节点挂到 to(视觉位置每帧由物理驱动, 此处只为层级一致)
 	if c.get_parent() == from:
 		from.remove_child(c)
@@ -787,11 +800,54 @@ func _build_soi_visuals_all() -> void:
 
 
 func _collect_soi(sys: CelestialSystem) -> void:
-	# 顶层(无父级系统)不画 SOI 范围球 —— 它是整个星系群/系统的外边界, 画框无意义(此前误加)。
-	if sys.parent_system != null and sys._hill_radius > 0.0:
-		_add_soi_sphere(sys)
+	# 顶层(无父级系统)不画 SOI —— 整个星系群外边界, 画框无意义。收集各系统自带的预制体 SOI 节点。
+	if sys.parent_system != null and sys._hill_radius > 0.0 and sys._soi_visual != null:
+		_soi_spheres.append(sys._soi_visual)
+		_soi_targets.append(sys)
 	for sub in sys.child_systems:
 		_collect_soi(sub)
+
+
+# 为天体 c 在本系统的 Trails/Orbits 容器里生成 trail+orbit 节点(命名 Trail_/Orbit_<名>)。
+# 行星进入系统时调; 节点和天体并列(非天体子节点), 编辑器层级清晰。
+func _ensure_visuals_for(c: Celestial) -> void:
+	if _trails_container != null and c._trail_visual == null:
+		var t := MeshInstance3D.new()
+		t.name = "Trail_" + c.name
+		t.material_override = _make_trail_material()
+		t.visible = false
+		_trails_container.add_child(t)
+		c._trail_visual = t
+	if _orbits_container != null and c._orbit_visual == null:
+		var o := MeshInstance3D.new()
+		o.name = "Orbit_" + c.name
+		o.material_override = _make_orbit_material()
+		o.visible = false
+		_orbits_container.add_child(o)
+		c._orbit_visual = o
+
+
+# 行星离开系统时删除其 trail+orbit 节点(从本系统容器移除)。
+func _remove_visuals_for(c: Celestial) -> void:
+	if c._trail_visual != null:
+		c._trail_visual.queue_free()
+		c._trail_visual = null
+	if c._orbit_visual != null:
+		c._orbit_visual.queue_free()
+		c._orbit_visual = null
+
+
+# 初始化: 为每个天体在其 owner 系统的容器生成 trail/orbit 节点。
+func _build_celestial_visuals_all() -> void:
+	for t in _get_all_tops():
+		_build_visuals_in(t)
+
+
+func _build_visuals_in(sys: CelestialSystem) -> void:
+	for c in sys.members:
+		sys._ensure_visuals_for(c)
+	for sub in sys.child_systems:
+		_build_visuals_in(sub)
 
 
 func _add_soi_sphere(target_sys: CelestialSystem) -> void:
@@ -854,12 +910,21 @@ func _collect_orbit_targets(sys: CelestialSystem) -> void:
 	for c in sys.members:
 		if c == sys.dominant or c.body == null:
 			continue
-		_add_orbit_mesh(c)
+		_collect_orbit_prefab(c)
 	for sub in sys.child_systems:
 		if sub.dominant != null:
-			_add_orbit_mesh(sub.dominant)
+			_collect_orbit_prefab(sub.dominant)
 	for sub in sys.child_systems:
 		_collect_orbit_targets(sub)
+
+
+# 收集天体自带的预制体 Orbit 节点(替代运行时 new MeshInstance3D)。
+func _collect_orbit_prefab(c: Celestial) -> void:
+	if c._orbit_visual == null:
+		return
+	if not _orbit_targets.has(c):
+		_orbit_rings.append(c._orbit_visual)
+		_orbit_targets.append(c)
 
 
 func _add_orbit_mesh(c: Celestial) -> void:
@@ -982,11 +1047,13 @@ func _build_trail_mesh() -> void:
 
 
 func _update_trail_mesh(ox: float, oy: float, oz: float) -> void:
-	if _trail_mesh == null or not _show_trail:
+	if not _show_trail:
 		return
-	var positions := PackedVector3Array()
+	# 每天体更新自己的预制体 Trail 节点(替代单 mesh)。trail 点相对父级(dominant), 加参考当前位。
 	for c in _all_celestials():
-		# trail 点相对父级(dominant), 显示时加参考当前世界位 → 拖尾跟随中心、形状是局部轨道。
+		if c._trail_visual == null:
+			continue
+		c._trail_visual.visible = true
 		var ref_c: Celestial = _trail_reference(c)
 		var rx := 0.0
 		var ry := 0.0
@@ -995,6 +1062,7 @@ func _update_trail_mesh(ox: float, oy: float, oz: float) -> void:
 			rx = ref_c._wx
 			ry = ref_c._wy
 			rz = ref_c._wz
+		var positions := PackedVector3Array()
 		var tr: Array = c._trail
 		var n: int = tr.size()
 		for i in range(n - 1):
@@ -1002,12 +1070,12 @@ func _update_trail_mesh(ox: float, oy: float, oz: float) -> void:
 			var p1: Vector3 = tr[i + 1]
 			positions.append(Vector3(p0.x + rx - ox, p0.y + ry - oy, p0.z + rz - oz))
 			positions.append(Vector3(p1.x + rx - ox, p1.y + ry - oy, p1.z + rz - oz))
-	var arr_mesh := ArrayMesh.new()
-	var arrays: Array = []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = positions
-	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arrays)
-	_trail_mesh.mesh = arr_mesh
+		var arr_mesh := ArrayMesh.new()
+		var arrays: Array = []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = positions
+		arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arrays)
+		c._trail_visual.mesh = arr_mesh
 
 
 func _make_trail_material() -> Material:
@@ -1065,8 +1133,9 @@ func _unhandled_input(event: InputEvent) -> void:
 					ring.visible = _show_orbit
 			KEY_F4:
 				_show_trail = not _show_trail
-				if _trail_mesh != null:
-					_trail_mesh.visible = _show_trail
+				for c in _all_celestials():
+					if c._trail_visual != null:
+						c._trail_visual.visible = _show_trail
 
 
 func _pick_focus(mouse_pos: Vector2) -> void:

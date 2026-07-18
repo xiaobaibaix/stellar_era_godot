@@ -33,6 +33,8 @@ var _wvy: float = 0.0
 var _wvz: float = 0.0
 
 var _visual: Node3D = null                        # 外观子树根(internal 子节点)
+var _trail_visual: MeshInstance3D = null          # 预制体拖尾节点(每帧更新 mesh)
+var _orbit_visual: MeshInstance3D = null          # 预制体轨道预测节点(每帧更新 mesh)
 var _default_mesh: CelestialMesh = null           # fallback 默认策略(缓存, 避免每次 rebuild 都 new)
 var _built: bool = false                          # 首次构建完成标志(setter 据此决定是否 rebuild)
 
