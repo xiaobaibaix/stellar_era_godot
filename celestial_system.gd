@@ -308,6 +308,8 @@ func _frame() -> void:
 	var tops: Array[CelestialSystem] = _get_all_tops()
 	for t in tops:
 		t._step_recursive()
+	# 每帧重算 Hill: SOI 随轨道位置动态变化(圆轨道不变; 椭圆/多体/rogue 子系统随 sdist 变)。
+	_recompute_hill_all()
 	if not _focus_list.is_empty():
 		var fc: Celestial = _focus_list[focus_idx % _focus_list.size()]
 		global_ox = fc._wx
@@ -378,13 +380,17 @@ func _update_soi(ox: float, oy: float, oz: float) -> void:
 	if not _show_soi:
 		return
 	for i in range(_soi_spheres.size()):
+		var sph: MeshInstance3D = _soi_spheres[i]
 		var tgt: CelestialSystem = _soi_targets[i]
+		# 半径每帧随 _hill_radius 动态缩放(单位球 mesh × scale)。
+		var r: float = tgt._hill_radius
+		sph.scale = Vector3(r, r, r)
 		if tgt.dominant != null:
-			(_soi_spheres[i] as Node3D).global_position = Vector3(
+			sph.global_position = Vector3(
 				tgt.dominant._wx - ox, tgt.dominant._wy - oy, tgt.dominant._wz - oz)
 		else:
 			# 群(无 dominant): 边界框居中在群质心(=本系统基座位; zero_momentum 后质心不动)。
-			(_soi_spheres[i] as Node3D).global_position = Vector3(
+			sph.global_position = Vector3(
 				tgt._bcx - ox, tgt._bcy - oy, tgt._bcz - oz)
 
 
@@ -706,7 +712,9 @@ func _collect_soi(sys: CelestialSystem) -> void:
 func _add_soi_sphere(target_sys: CelestialSystem) -> void:
 	var sph := MeshInstance3D.new()
 	sph.name = "SOI_%s" % target_sys.name
-	sph.mesh = _make_wireframe_sphere(target_sys._hill_radius, 24, 12)
+	# 单位球 mesh + scale: 半径每帧由 _update_soi 随 _hill_radius 动态缩放(免重建 mesh)。
+	sph.mesh = _make_wireframe_sphere(1.0, 24, 12)
+	sph.scale = Vector3(target_sys._hill_radius, target_sys._hill_radius, target_sys._hill_radius)
 	sph.material_override = _make_soi_material(target_sys)
 	sph.visible = _show_soi
 	add_child(sph)
@@ -1162,10 +1170,9 @@ func _recompute_hill_recursive(sys: CelestialSystem) -> void:
 		_recompute_hill_recursive(sub)
 
 
+# 单位球 + scale 方案后, 半径由 _update_soi 每帧随 _hill_radius 更新, 无需重建 mesh。保留空函数避免改调用点。
 func _rebuild_soi_spheres() -> void:
-	for i in range(_soi_spheres.size()):
-		var tgt: CelestialSystem = _soi_targets[i]
-		(_soi_spheres[i] as MeshInstance3D).mesh = _make_wireframe_sphere(tgt._hill_radius, 24, 12)
+	pass
 
 
 func _on_radius_changed(v: float) -> void:
