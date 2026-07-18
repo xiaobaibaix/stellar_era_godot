@@ -382,16 +382,24 @@ func _update_soi(ox: float, oy: float, oz: float) -> void:
 	for i in range(_soi_spheres.size()):
 		var sph: MeshInstance3D = _soi_spheres[i]
 		var tgt: CelestialSystem = _soi_targets[i]
-		# 半径每帧随 _hill_radius 动态缩放(单位球 mesh × scale)。
 		var r: float = tgt._hill_radius
-		sph.scale = Vector3(r, r, r)
 		if tgt.dominant != null:
 			sph.global_position = Vector3(
 				tgt.dominant._wx - ox, tgt.dominant._wy - oy, tgt.dominant._wz - oz)
+			# Roche lobe 椭球近似: 双星系统内(顶层为群)的 SOI 朝群质心(伴星方向)收尖, 反映真实
+			# 作用区"朝扰动体泪滴"形状(替代球); 单恒星系顶层用球。z 局部轴经 look_at 朝群质心。
+			var top: CelestialSystem = _get_top_of(tgt)
+			if top != null and top != tgt and top.dominant == null:
+				var center_render := Vector3(top._bcx - ox, top._bcy - oy, top._bcz - oz)
+				if sph.global_position.distance_to(center_render) > 1.0:
+					sph.look_at(center_render)
+				sph.scale = Vector3(r, r, r * 0.8)   # z(朝群质心=伴星)收尖
+			else:
+				sph.scale = Vector3(r, r, r)
 		else:
 			# 群(无 dominant): 边界框居中在群质心(=本系统基座位; zero_momentum 后质心不动)。
-			sph.global_position = Vector3(
-				tgt._bcx - ox, tgt._bcy - oy, tgt._bcz - oz)
+			sph.global_position = Vector3(tgt._bcx - ox, tgt._bcy - oy, tgt._bcz - oz)
+			sph.scale = Vector3(r, r, r)
 
 
 # ===================== 动态 SOI(Step3) =====================
@@ -474,15 +482,16 @@ func _resolve_desired_owner(c: Celestial) -> CelestialSystem:
 # 从 start 向下找包含点 (px,py,pz) 的最深子系统(含 start 自身)。
 # 仅当到子系统主导距离 < 子系统 Hill×IN 才下钻(捕获阈值)。
 func _capture_descend(start: CelestialSystem, px: float, py: float, pz: float, exclude: CelestialSystem = null) -> CelestialSystem:
+	# 椭球 Roche lobe 判定: sub 在 dominant 的椭球作用区内才下钻(朝群质心=伴星方向收尖,
+	# 随相位转; 单恒星系退化为球)。动力学正确(L1/L2 稳定区), 区别于瞬时引力比(对双星成员错)。
+	# exclude: 子系统归属判定时跳过自身(其 dominant 恰在自身位 → 距离0 误判自我捕获)。
 	var s: CelestialSystem = start
 	while true:
 		var nxt: CelestialSystem = null
 		for sub in s.child_systems:
-			# exclude: 子系统归属判定时跳过它自己(其 dominant 恰在自身位置 → 距离0 会误判为自我捕获)。
 			if sub == exclude or sub.dominant == null or sub._hill_radius <= 0.0:
 				continue
-			var d: float = _dist3(px, py, pz, sub.dominant._wx, sub.dominant._wy, sub.dominant._wz)
-			if d < sub._hill_radius * _SOI_HYSTERESIS_IN:
+			if _inside_roche_ellipse(sub, px, py, pz):
 				nxt = sub
 				break
 		if nxt == null:
@@ -638,6 +647,45 @@ func _dist3(ax: float, ay: float, az: float, bx: float, by: float, bz: float) ->
 	var dy: float = ay - by
 	var dz: float = az - bz
 	return sqrt(dx * dx + dy * dy + dz * dz)
+
+
+# 点 (px,py,pz) 是否在 sub 的 Roche lobe 椭球作用区内(朝顶层群质心=伴星方向收尖)。
+# 群内子系统: 椭球(radial=Hill×0.8 朝质心, perp=Hill 垂直); 单恒星系顶层/无群: 退化为球(Hill)。
+# 几何上即"L1/L2 稳定区"的椭球近似(随相位转), 动力学正确 —— 区别于瞬时引力比(对双星成员错)。
+func _inside_roche_ellipse(sub: CelestialSystem, px: float, py: float, pz: float) -> bool:
+	var dx: float = px - sub.dominant._wx
+	var dy: float = py - sub.dominant._wy
+	var dz: float = pz - sub.dominant._wz
+	var r_in: float = sub._hill_radius * _SOI_HYSTERESIS_IN
+	var top: CelestialSystem = _get_top_of(sub)
+	if top == null or top == sub or top.dominant != null:
+		return (dx * dx + dy * dy + dz * dz) < r_in * r_in
+	var cx: float = top._bcx - sub.dominant._wx
+	var cy: float = top._bcy - sub.dominant._wy
+	var cz: float = top._bcz - sub.dominant._wz
+	var cl: float = sqrt(cx * cx + cy * cy + cz * cz)
+	if cl < 1.0:
+		return (dx * dx + dy * dy + dz * dz) < r_in * r_in
+	cx /= cl
+	cy /= cl
+	cz /= cl
+	var radial: float = dx * cx + dy * cy + dz * cz
+	var perp_x: float = dx - radial * cx
+	var perp_y: float = dy - radial * cy
+	var perp_z: float = dz - radial * cz
+	var perp: float = sqrt(perp_x * perp_x + perp_y * perp_y + perp_z * perp_z)
+	var rad_r: float = r_in * 0.8     # 朝伴星(L1)方向收尖
+	var u: float = radial / rad_r
+	var v: float = perp / r_in
+	return u * u + v * v < 1.0
+
+
+# sys 的顶层系统(沿 parent_system 上溯到无父)。视觉椭球找群质心方向用。
+func _get_top_of(sys: CelestialSystem) -> CelestialSystem:
+	var s: CelestialSystem = sys
+	while s.parent_system != null:
+		s = s.parent_system
+	return s
 
 
 func _update_orbit(ox: float, oy: float, oz: float) -> void:
