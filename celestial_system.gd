@@ -5,15 +5,16 @@
 ## 耦合: 子 CelestialSystem 在父层注册为一个"质点 body"(质量=子系统总质量),
 ##       随父层 sim 积分 → 整体轨道; 子层内部独立积分 → 相对轨道。叠加 = 嵌套。
 ## 多顶层: 多个恒星系可并列挂在 Main 下(各自独立 sim, 互不隶属)。
-##       第一个顶层 = main_top, 管全局浮动原点 / 相机 / HUD / 跨顶层聚焦 / SOI;
+##       第一个顶层 = main_top, 管全局浮动原点 / 相机 / HUD / 跨顶层聚焦 / SOI / 轨道线;
 ##       其他顶层只跑自己的 sim + 渲染。
 ##       顶层物理原点 = 节点编辑器位置(读 transform) → 并列恒星系各自定位, 不重叠。
 ## 坐标: 成员 body.p 是【相对本系统主导体】的 double; 世界 double = world_barycenter + body.p;
 ##       渲染 = 世界 double − 全局浮动原点 → 32 位 global_position(大尺度不抖)。
-## 操作: TAB 聚焦 / [/] 调速 / F2 SOI / 左键点击聚焦天体 / 滚轮缩放。
+## 操作: TAB 聚焦 / [/] 调速 / F2 SOI / F3 轨迹线 / 左键点击聚焦 / 滚轮缩放。
 ## SOI: 每个天体系统的引力作用范围; F2 开关线框(稀疏经纬线, 半透明, 只画朝相机半球)。
 ##      - 子系统(有父): 相对父 dominant 的 Hill 球 r=a·(m/(3M))^(1/3)。
 ##      - 顶层(无父): 系统边界 = 最远成员/子系统距离 × 1.5。
+## 轨道线: 每个绕 dominant 的天体的完整预测轨道圆(解析, 跟随中心天体); F3 开关, 默认开。
 class_name CelestialSystem
 extends Node3D
 
@@ -31,7 +32,7 @@ void fragment() {
 }
 """
 
-# 全局协调(多顶层共享): main_top 管全局浮动原点 / 相机 / HUD / 跨顶层聚焦与 SOI。
+# 全局协调(多顶层共享): main_top 管全局浮动原点 / 相机 / HUD / 跨顶层聚焦 / SOI / 轨道线。
 static var main_top: CelestialSystem = null
 static var global_ox: float = 0.0
 static var global_oy: float = 0.0
@@ -74,6 +75,11 @@ var _show_soi: bool = false
 var _soi_spheres: Array[MeshInstance3D] = []
 var _soi_targets: Array[CelestialSystem] = []
 
+# 轨道线可视化(仅 main_top 管理, 收集所有天体的预测轨道圆)
+var _show_orbit: bool = true
+var _orbit_rings: Array[MeshInstance3D] = []
+var _orbit_centers: Array[Celestial] = []   # 每条轨道圆的中心天体(跟随它)
+
 # 左键点击聚焦(顶层): 短按 = 射线拾取天体聚焦; 拖动 > 6px 视为 OrbitCamera 旋转
 var _clicking: bool = false
 var _click_pos: Vector2 = Vector2.ZERO
@@ -96,9 +102,10 @@ func _ready() -> void:
 		if main_top == self:
 			_is_main_top = true
 			_build_hud()
-			# 延迟到所有兄弟顶层 _ready 完成(CS2 等)再收集 → 跨顶层 focus / SOI 才完整
+			# 延迟到所有兄弟顶层 _ready 完成(CS2 等)再收集 → 跨顶层 focus / SOI / 轨道才完整
 			call_deferred("_collect_focus_all")
 			call_deferred("_build_soi_visuals_all")
+			call_deferred("_build_orbit_visuals_all")
 
 
 func _collect() -> void:
@@ -203,7 +210,7 @@ func _physics_process(_delta: float) -> void:
 	_frame()
 
 
-# main_top 一帧: step 所有顶层 → 定全局浮动原点 → 渲染所有顶层 → SOI → 相机/HUD。
+# main_top 一帧: step 所有顶层 → 定全局浮动原点 → 渲染所有顶层 → SOI/轨道 → 相机/HUD。
 func _frame() -> void:
 	var tops: Array[CelestialSystem] = _get_all_tops()
 	for t in tops:
@@ -216,6 +223,7 @@ func _frame() -> void:
 	for t in tops:
 		t._render_recursive(global_ox, global_oy, global_oz)
 		t._update_soi(global_ox, global_oy, global_oz)
+	_update_orbit(global_ox, global_oy, global_oz)
 	_update_camera_and_hud()
 
 
@@ -264,6 +272,15 @@ func _update_soi(ox: float, oy: float, oz: float) -> void:
 		if tgt.dominant != null:
 			(_soi_spheres[i] as Node3D).global_position = Vector3(
 				tgt.dominant._wx - ox, tgt.dominant._wy - oy, tgt.dominant._wz - oz)
+
+
+# 轨道圆跟随各自中心天体(dominant)的渲染位置。
+func _update_orbit(ox: float, oy: float, oz: float) -> void:
+	if not _show_orbit:
+		return
+	for i in range(_orbit_rings.size()):
+		var c: Celestial = _orbit_centers[i]
+		(_orbit_rings[i] as Node3D).global_position = Vector3(c._wx - ox, c._wy - oy, c._wz - oz)
 
 
 # 跨顶层收集聚焦天体(main_top 用)。
@@ -343,6 +360,74 @@ func _make_wireframe_sphere(r: float, n_lon: int, n_lat: int) -> ArrayMesh:
 	return arr_mesh
 
 
+# 跨顶层收集所有天体的预测轨道圆(main_top 用)。
+func _build_orbit_visuals_all() -> void:
+	for t in _get_all_tops():
+		_collect_orbits(t)
+
+
+func _collect_orbits(sys: CelestialSystem) -> void:
+	if sys.dominant != null:
+		# 非 dominant 天体: 绕本层 dominant
+		for c in sys.members:
+			if c == sys.dominant:
+				continue
+			var d: float = (c.position - sys.dominant.position).length()
+			if d < 1.0:
+				continue
+			var incl: float = 0.25 if c.type == "moon" else 0.0
+			_add_orbit_ring(sys.dominant, d, incl)
+		# 子系统: 绕本层 dominant(无倾角)
+		for sub in sys.child_systems:
+			var sd: float = (sub.position - sys.dominant.position).length()
+			if sd < 1.0:
+				continue
+			_add_orbit_ring(sys.dominant, sd, 0.0)
+	for sub in sys.child_systems:
+		_collect_orbits(sub)
+
+
+func _add_orbit_ring(center: Celestial, dist: float, inclination: float) -> void:
+	var ring := MeshInstance3D.new()
+	ring.name = "Orbit"
+	ring.mesh = _make_orbit_ring(dist, inclination)
+	ring.material_override = _make_orbit_material()
+	ring.visible = _show_orbit
+	add_child(ring)
+	_orbit_rings.append(ring)
+	_orbit_centers.append(center)
+
+
+# 完整轨道圆(解析): xz 平面圆 + 绕 x 轴倾斜 inclination(与 add_orbiting 一致)。
+func _make_orbit_ring(dist: float, inclination: float) -> ArrayMesh:
+	var positions := PackedVector3Array()
+	var n := 128
+	var cc := cos(inclination)
+	var ss := sin(inclination)
+	for i in range(n):
+		var a0 := TAU * float(i) / float(n)
+		var a1 := TAU * float(i + 1) / float(n)
+		# xz 平面 (cos·dist, 0, sin·dist) 再绕 x 轴: y'=−z·sin, z'=z·cos
+		positions.append(Vector3(cos(a0) * dist, -sin(a0) * dist * ss, sin(a0) * dist * cc))
+		positions.append(Vector3(cos(a1) * dist, -sin(a1) * dist * ss, sin(a1) * dist * cc))
+	var arr_mesh := ArrayMesh.new()
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = positions
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arrays)
+	return arr_mesh
+
+
+func _make_orbit_material() -> Material:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.6, 0.65, 0.8, 0.4)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.no_depth_test = true                             # 透过天体也能看到整圈轨道
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return mat
+
+
 func _update_camera_and_hud() -> void:
 	if _focus_list.is_empty():
 		return
@@ -353,7 +438,7 @@ func _update_camera_and_hud() -> void:
 			orbit_camera.distance = fc.radius * 6.0
 			_last_focus_idx = focus_idx
 	if _hud != null and sim != null:
-		_hud.text = "focus: %s   speed: %.1f   (TAB 聚焦  [/] 调速  F2 SOI  左键点击聚焦  滚轮缩放)\nenergy: %.3f" % [
+		_hud.text = "focus: %s   speed: %.1f   (TAB 聚焦  [/] 调速  F2 SOI  F3 轨迹  左键点击  滚轮缩放)\nenergy: %.3f" % [
 			fc.name, sim_speed, sim.energy().get("total", 0.0)]
 
 
@@ -382,6 +467,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				_show_soi = not _show_soi
 				for sph in _soi_spheres:
 					sph.visible = _show_soi
+			KEY_F3:
+				_show_orbit = not _show_orbit
+				for ring in _orbit_rings:
+					ring.visible = _show_orbit
 
 
 # 鼠标射线 → 和所有聚焦天体(跨顶层)做球相交 → 命中最近的就 focus_idx 指过去。
