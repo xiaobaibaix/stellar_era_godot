@@ -57,34 +57,37 @@ orbit_camera = NodePath("../Camera3D")
 
 [node name="Star" parent="CelestialSystem1" unique_id=1469884144 instance=ExtResource("9_cel")]
 mass = 1000000.0
-radius = 800.0
+radius = 300.0
 type = "star"
 color = Color(1, 0.85, 0.4, 1)
 is_dominant = true
 
 [node name="OmniLight3D" type="OmniLight3D" parent="CelestialSystem1" unique_id=1095267187]
+light_energy = 3.0
+omni_range = 20000.0
+omni_attenuation = -0.1
 
 [node name="Planet1" parent="CelestialSystem1" unique_id=512211728 instance=ExtResource("8_tipki")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3500, 0, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6000, 0, 0)
 
 [node name="Planet" parent="CelestialSystem1/Planet1" unique_id=1378551634 instance=ExtResource("9_cel")]
-mass = 60.0
-radius = 300.0
+mass = 1000.0
+radius = 80.0
 color = Color(0.4, 0.6, 1, 1)
 is_dominant = true
 
 [node name="Moon" parent="CelestialSystem1/Planet1" unique_id=607143191 instance=ExtResource("9_cel")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 600, 0, 0)
-mass = 0.5
-radius = 80.0
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 300, 0, 0)
+mass = 5.0
+radius = 20.0
 type = "moon"
 color = Color(0.75, 0.75, 0.75, 1)
 
 [node name="Planet2" parent="CelestialSystem1" unique_id=689757741 instance=ExtResource("8_tipki")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6500, 0, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10000, 0, 0)
 
 [node name="Planet" parent="CelestialSystem1/Planet2" unique_id=769974027 instance=ExtResource("9_cel")]
-mass = 50.0
-radius = 250.0
+mass = 800.0
+radius = 60.0
 color = Color(0.9, 0.5, 0.3, 1)
 is_dominant = true

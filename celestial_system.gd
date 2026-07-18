@@ -1,4 +1,4 @@
-## 递归天体系统节点(第1步:静态嵌套轨道, 暂不做飞船 / SOI)。
+## 递归天体系统节点(第1步:静态嵌套轨道, 暂不做飞船 / SOI 切换)。
 ##
 ## 自相似: 恒星系是一个 CelestialSystem, 行星系(行星+卫星)也是 CelestialSystem。
 ## 物理: 每层持自己的 NBodySystem(复用 scripts/solar/nbody_system.gd), 只算本层成员。
@@ -6,7 +6,8 @@
 ##       随父层 sim 积分 → 整体轨道; 子层内部独立积分 → 相对轨道。叠加 = 嵌套。
 ## 坐标: 成员 body.p 是【相对本系统主导体】的 double; 世界 double = world_barycenter + body.p;
 ##       渲染 = 世界 double − 全局浮动原点 → 32 位 global_position(大尺度不抖)。
-## 顶层(parent 不是 CelestialSystem): 额外管 浮动原点 / 轨道相机 / HUD / TAB 聚焦 / [/] 调速。
+## 顶层(parent 不是 CelestialSystem): 额外管 浮动原点 / 轨道相机 / HUD / TAB 聚焦 / [/] 调速 / F2 SOI。
+## SOI: 每个子系统相对父系统 dominant 的 Hill 球(引力作用范围); F2 开关半透明可视化。
 class_name CelestialSystem
 extends Node3D
 
@@ -25,8 +26,11 @@ var members: Array[Celestial] = []           # 本层天体
 var dominant: Celestial = null    # 主导体(恒星 / 行星) = 本层 sim 原点
 var child_systems: Array[CelestialSystem] = []
 var child_proxy: Dictionary = {}  # CelestialSystem -> Body(它在父 sim 里的质点)
+var _lights: Array[OmniLight3D] = []   # 手动加的直接子点光源 → 跟随本层 dominant(恒星)
 
 var parent_system: CelestialSystem = null
+
+var _hill_radius: float = 0.0          # 本系统相对【父系统】dominant 的 Hill 球半径; 顶层=0
 
 # 本系统主导体的【世界 double 位置】(父层每帧下传; 顶层 = 0)
 var _bcx: float = 0.0
@@ -41,6 +45,11 @@ var _hud: Label = null
 var focus_idx: int = 0
 var _focus_list: Array = []       # Array[Celestial] 递归收集, 顶层聚焦用
 
+# SOI 可视化(仅顶层管理)
+var _show_soi: bool = false
+var _soi_spheres: Array[MeshInstance3D] = []   # 每个子系统的 Hill 球 mesh
+var _soi_targets: Array[CelestialSystem] = []  # 球对应的子系统(跟随其 dominant)
+
 
 func _ready() -> void:
 	sim = NBodySystem.new(G, softening)
@@ -50,6 +59,7 @@ func _ready() -> void:
 	if parent_system == null:
 		_build_hud()
 		_collect_focus(self)
+		_build_soi_visuals()
 
 
 func _collect() -> void:
@@ -60,6 +70,8 @@ func _collect() -> void:
 				dominant = c
 		elif c is CelestialSystem:
 			child_systems.append(c)
+		elif c is OmniLight3D:
+			_lights.append(c)
 
 
 # 建本层 sim: 主导体放原点, 其余绕主导体; 子系统作质点绕主导体。
@@ -94,7 +106,7 @@ func _init_physics() -> void:
 			c.body = b
 			c.owner_system = self
 			idx += 1
-		# 子 CelestialSystem → 质点 body(质量=总质量, 绕主导体)
+		# 子 CelestialSystem → 质点 body(质量=总质量, 绕主导体) + 算其 Hill 球
 		var sidx := 0
 		for sub in child_systems:
 			var sdist := float((sub.position - dominant.position).length())
@@ -105,6 +117,9 @@ func _init_physics() -> void:
 				"phase": sidx * 2.3 + 0.5, "name": sub.name, "type": "system",
 			})
 			child_proxy[sub] = proxy
+			# Hill 球半径 = a · (m / (3·M))^(1/3); a=sdist, m=子系统总质量, M=本层 dominant 质量
+			var msub: float = float(sub.get_total_mass())
+			sub._hill_radius = sdist * pow(msub / (3.0 * dominant.mass), 1.0 / 3.0)
 			sidx += 1
 	if parent_system == null:
 		sim.zero_momentum()                    # 顶层归零总动量 → 质心不漂移
@@ -127,7 +142,7 @@ func _physics_process(_delta: float) -> void:
 	_frame()
 
 
-# 顶层一帧: step 整棵树 → 定浮动原点 → 渲染整棵树 → 相机/HUD。
+# 顶层一帧: step 整棵树 → 定浮动原点 → 渲染整棵树 → SOI → 相机/HUD。
 func _frame() -> void:
 	_step_recursive()
 	if not _focus_list.is_empty():
@@ -136,6 +151,7 @@ func _frame() -> void:
 		_oy = fc._wy
 		_oz = fc._wz
 	_render_recursive(_ox, _oy, _oz)
+	_update_soi(_ox, _oy, _oz)
 	_update_camera_and_hud()
 
 
@@ -160,7 +176,15 @@ func _step_recursive() -> void:
 
 
 # 自顶向下写 global_position(世界 double − 浮动原点)。
+# 手动加的直接子点光源也在此跟随本层 dominant(恒星)的渲染位置:
+# 否则浮动原点随聚焦切换后, 静态光会脱离恒星。
 func _render_recursive(ox: float, oy: float, oz: float) -> void:
+	if dominant != null and not _lights.is_empty():
+		var lx: float = dominant._wx - ox
+		var ly: float = dominant._wy - oy
+		var lz: float = dominant._wz - oz
+		for l in _lights:
+			(l as Node3D).global_position = Vector3(lx, ly, lz)
 	for c in members:
 		if c.body == null:
 			continue
@@ -169,11 +193,54 @@ func _render_recursive(ox: float, oy: float, oz: float) -> void:
 		sub._render_recursive(ox, oy, oz)
 
 
+# SOI 球跟随各自子系统 dominant 的渲染位置(世界 double − 浮动原点)。
+func _update_soi(ox: float, oy: float, oz: float) -> void:
+	if not _show_soi:
+		return
+	for i in range(_soi_spheres.size()):
+		var sub: CelestialSystem = _soi_targets[i]
+		if sub.dominant != null:
+			(_soi_spheres[i] as Node3D).global_position = Vector3(
+				sub.dominant._wx - ox, sub.dominant._wy - oy, sub.dominant._wz - oz)
+
+
 func _collect_focus(sys: CelestialSystem) -> void:
 	for c in sys.members:
 		_focus_list.append(c)
 	for sub in sys.child_systems:
 		_collect_focus(sub)
+
+
+# 递归为所有子系统建 Hill 球 mesh(挂在顶层, 位置由 _update_soi 每帧写)。
+func _build_soi_visuals() -> void:
+	_collect_soi(self)
+
+
+func _collect_soi(sys: CelestialSystem) -> void:
+	for sub in sys.child_systems:
+		if sub._hill_radius > 0.0:
+			var sph := MeshInstance3D.new()
+			sph.name = "SOI_%s" % sub.name
+			var sm := SphereMesh.new()
+			sm.radius = sub._hill_radius
+			sm.height = sub._hill_radius * 2.0
+			sph.mesh = sm
+			sph.material_override = _make_soi_material()
+			sph.visible = _show_soi
+			add_child(sph)
+			_soi_spheres.append(sph)
+			_soi_targets.append(sub)
+		_collect_soi(sub)
+
+
+func _make_soi_material() -> Material:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.3, 0.85, 1.0, 0.12)      # 淡蓝半透明
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED         # 球壳内外都可见
+	mat.no_depth_test = true                             # 透过天体也能看到(不被遮挡)
+	return mat
 
 
 func _update_camera_and_hud() -> void:
@@ -184,7 +251,7 @@ func _update_camera_and_hud() -> void:
 		orbit_camera.target = (fc as Node3D).global_position
 		orbit_camera.distance = fc.radius * 6.0
 	if _hud != null and sim != null:
-		_hud.text = "focus: %s   speed: %.1f   (TAB 聚焦  [/] 调速)\nenergy: %.3f" % [
+		_hud.text = "focus: %s   speed: %.1f   (TAB 聚焦  [/] 调速  F2 SOI)\nenergy: %.3f" % [
 			fc.name, sim_speed, sim.energy().get("total", 0.0)]
 
 
@@ -199,6 +266,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				sim_speed = min(sim_speed + 0.2, 10.0)
 			KEY_BRACKETLEFT:
 				sim_speed = max(sim_speed - 0.2, 0.0)
+			KEY_F2:
+				_show_soi = not _show_soi
+				for sph in _soi_spheres:
+					sph.visible = _show_soi
 
 
 func _build_hud() -> void:
