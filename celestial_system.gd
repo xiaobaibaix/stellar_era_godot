@@ -656,14 +656,12 @@ func _recompute_hill_recursive(sys: CelestialSystem) -> void:
 		_recompute_hill_recursive(sub)
 
 
-# 用最新的 _hill_radius 重建所有 SOI 线框球。
+# 用最新的 _hill_radius 更新现有 SOI 球的 mesh(不 free/new 节点 → 不闪烁)。
+# 只换 mesh: 半径没变的球顶点不变(视觉无变化), 变了的球才会改 → 等效"改哪个哪个变"。
 func _rebuild_soi_spheres() -> void:
-	for sph in _soi_spheres:
-		sph.queue_free()
-	_soi_spheres.clear()
-	_soi_targets.clear()
-	for t in _get_all_tops():
-		_collect_soi(t)
+	for i in range(_soi_spheres.size()):
+		var tgt: CelestialSystem = _soi_targets[i]
+		(_soi_spheres[i] as MeshInstance3D).mesh = _make_wireframe_sphere(tgt._hill_radius, 24, 12)
 
 
 func _on_radius_changed(v: float) -> void:
