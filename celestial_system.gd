@@ -352,9 +352,18 @@ func _step_recursive() -> void:
 		c._wvx = _bvx + c.body.vx
 		c._wvy = _bvy + c.body.vy
 		c._wvz = _bvz + c.body.vz
-		var wp := Vector3(c._wx, c._wy, c._wz)
-		if c._trail.is_empty() or (c._trail.back() as Vector3).distance_to(wp) > max(c.radius * 0.3, 5.0):
-			c._trail.append(wp)
+		# 拖尾存相对父级(dominant)的局部位置 → 显示绕中心的轨道形状, 非全局螺旋。
+		var ref_c: Celestial = _trail_reference(c)
+		var trx := 0.0
+		var tr_y := 0.0
+		var tr_z := 0.0
+		if ref_c != null:
+			trx = ref_c._wx
+			tr_y = ref_c._wy
+			tr_z = ref_c._wz
+		var rel := Vector3(c._wx - trx, c._wy - tr_y, c._wz - tr_z)
+		if c._trail.is_empty() or (c._trail.back() as Vector3).distance_to(rel) > max(c.radius * 0.3, 5.0):
+			c._trail.append(rel)
 			if c._trail.size() > 400:
 				c._trail.remove_at(0)
 	for sub in child_systems:
@@ -540,6 +549,7 @@ func _reparent_celestial(c: Celestial, from: CelestialSystem, to: CelestialSyste
 		from.remove_child(c)
 	if c.get_parent() == null:
 		to.add_child(c)
+	c._trail.clear()   # 参考体随 owner 变, 清空避免错位
 	print("[SOI] %s: %s -> %s" % [c.name, from.name, to.name])
 
 
@@ -646,6 +656,7 @@ func _reparent_subsystem(sub: CelestialSystem, from: CelestialSystem, to: Celest
 	# 4) 节点挂到 to(视觉位置每帧由物理驱动, 此处只为层级一致)
 	if sub.get_parent() == null:
 		to.add_child(sub)
+	_clear_trails_in(sub)   # sub 父链变 → 内部天体参考体变, 清空避免错位
 	print("[SOI-init] %s: %s -> %s (上抛到父, 受多源引力)" % [sub.name, from.name, to.name])
 
 
@@ -749,6 +760,25 @@ func _collect_celestials(sys: CelestialSystem, out: Array[Celestial]) -> void:
 		out.append(c)
 	for sub in sys.child_systems:
 		_collect_celestials(sub, out)
+
+
+# 天体 c 的拖尾参考体(它绕的中心): 从 c.owner_system 向上找第一个 dominant != c 的系统。
+# Moon→Planet, Planet(子系统主)→Star, Star(恒星系主)→群质心(null=原点)。拖尾存相对它的位置。
+func _trail_reference(c: Celestial) -> Celestial:
+	var sys: CelestialSystem = c.owner_system
+	while sys != null:
+		if sys.dominant != null and sys.dominant != c:
+			return sys.dominant
+		sys = sys.parent_system
+	return null
+
+
+# 清空 sys 子树内所有天体的拖尾(子系统移交后父链变 → 参考体变, 历史拖尾会错位)。
+func _clear_trails_in(sys: CelestialSystem) -> void:
+	for c in sys.members:
+		c._trail.clear()
+	for sub in sys.child_systems:
+		_clear_trails_in(sub)
 
 
 func _build_soi_visuals_all() -> void:
@@ -956,13 +986,22 @@ func _update_trail_mesh(ox: float, oy: float, oz: float) -> void:
 		return
 	var positions := PackedVector3Array()
 	for c in _all_celestials():
+		# trail 点相对父级(dominant), 显示时加参考当前世界位 → 拖尾跟随中心、形状是局部轨道。
+		var ref_c: Celestial = _trail_reference(c)
+		var rx := 0.0
+		var ry := 0.0
+		var rz := 0.0
+		if ref_c != null:
+			rx = ref_c._wx
+			ry = ref_c._wy
+			rz = ref_c._wz
 		var tr: Array = c._trail
 		var n: int = tr.size()
 		for i in range(n - 1):
 			var p0: Vector3 = tr[i]
 			var p1: Vector3 = tr[i + 1]
-			positions.append(Vector3(p0.x - ox, p0.y - oy, p0.z - oz))
-			positions.append(Vector3(p1.x - ox, p1.y - oy, p1.z - oz))
+			positions.append(Vector3(p0.x + rx - ox, p0.y + ry - oy, p0.z + rz - oz))
+			positions.append(Vector3(p1.x + rx - ox, p1.y + ry - oy, p1.z + rz - oz))
 	var arr_mesh := ArrayMesh.new()
 	var arrays: Array = []
 	arrays.resize(Mesh.ARRAY_MAX)
