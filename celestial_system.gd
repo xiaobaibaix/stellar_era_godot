@@ -115,6 +115,7 @@ func _ready() -> void:
 		if main_top == self:
 			_is_main_top = true
 			_build_hud()
+			call_deferred("_resolve_initial_ownership_all")
 			call_deferred("_collect_focus_all")
 			call_deferred("_build_soi_visuals_all")
 			call_deferred("_build_orbit_visuals_all")
@@ -493,6 +494,99 @@ func _after_reparent() -> void:
 	_recompute_hill_all()
 	_rebuild_soi_spheres()
 	_compute_predictions()
+
+
+# ===================== 初始化归属分流 =====================
+# 所有 _init_physics 完成后(子节点先 _ready → child_proxy/_hill_radius 已建), 按 Hill 归属
+# 把"在父 dominant 的 Hill 外"的子系统上抛到父 sim。上抛后该子系统在父 sim 里受多源引力
+# (双星 → P-type 绕双星整体 / 混沌 / 临时捕获), 而非错误地只绕原 dominant。
+# 解决"编辑器里是孩子但运行时 SOI 外 → 该受合力"的物理正确性(一次性, 仅初始化)。
+func _resolve_initial_ownership_all() -> void:
+	for t in _get_all_tops():
+		_propagate_bases(t)
+	var moves: Array = []
+	for t in _get_all_tops():
+		_collect_initial_moves(t, moves)
+	for m in moves:
+		var sub: CelestialSystem = m["sub"]
+		var from_sys: CelestialSystem = m["from"]
+		var to_sys: CelestialSystem = m["to"]
+		_reparent_subsystem(sub, from_sys, to_sys)
+	if not moves.is_empty():
+		_recompute_hill_all()
+		_rebuild_soi_spheres()
+		_compute_predictions()
+
+
+# 收集需上抛的子系统(不修改树, 避免迭代中改 child_systems)。
+# 判定: 有 dominant 且非顶层的系统, 其子系统到 dominant 距离 > 本系统 Hill → 上抛到父。
+func _collect_initial_moves(sys: CelestialSystem, moves: Array) -> void:
+	if sys.dominant != null and sys.parent_system != null and sys._hill_radius > 0.0 and sys.dominant.body != null:
+		for sub in sys.child_systems:
+			if not sys.child_proxy.has(sub):
+				continue
+			var pb: Body = sys.child_proxy[sub]
+			var db: Body = sys.dominant.body
+			var dx: float = pb.px - db.px
+			var dy: float = pb.py - db.py
+			var dz: float = pb.pz - db.pz
+			var sdist: float = sqrt(dx * dx + dy * dy + dz * dz)
+			if sdist > sys._hill_radius:
+				moves.append({"sub": sub, "from": sys, "to": sys.parent_system})
+	for sub in sys.child_systems:
+		_collect_initial_moves(sub, moves)
+
+
+# 初始化时(第一帧 _step_recursive 之前)沿链传播基座位/速一次, 使上抛换算世界位速可用。
+func _propagate_bases(sys: CelestialSystem) -> void:
+	for sub in sys.child_systems:
+		if not sys.child_proxy.has(sub):
+			continue
+		var pb: Body = sys.child_proxy[sub]
+		sub._bcx = sys._bcx + pb.px
+		sub._bcy = sys._bcy + pb.py
+		sub._bcz = sys._bcz + pb.pz
+		sub._bvx = sys._bvx + pb.vx
+		sub._bvy = sys._bvy + pb.vy
+		sub._bvz = sys._bvz + pb.vz
+		_propagate_bases(sub)
+
+
+# 把子系统 sub 从 from 移交到 to: 摘旧 proxy(世界位速保存), 在 to 用局部坐标建新 proxy。
+# 与 _reparent_celestial(叶子天体) 对应, 区别是操作 child_systems/child_proxy。子系统内部
+# (dominant/卫星)作为子树原样跟随 —— sub._bcx 由 to._step_recursive 传播, 内部相对不变。
+func _reparent_subsystem(sub: CelestialSystem, from: CelestialSystem, to: CelestialSystem) -> void:
+	if not from.child_proxy.has(sub):
+		return
+	var old_proxy: Body = from.child_proxy[sub]
+	# 1) 世界位/速(from._bcx/_bvx 已由 _propagate_bases 传播)
+	var wx: float = from._bcx + old_proxy.px
+	var wy: float = from._bcy + old_proxy.py
+	var wz: float = from._bcz + old_proxy.pz
+	var vx: float = from._bvx + old_proxy.vx
+	var vy: float = from._bvy + old_proxy.vy
+	var vz: float = from._bvz + old_proxy.vz
+	# 2) 从 from 摘除(child_proxy + sim body + child_systems + 场景树)
+	from.child_proxy.erase(sub)
+	from.sim.bodies.erase(old_proxy)
+	from.child_systems.erase(sub)
+	if sub.get_parent() == from:
+		from.remove_child(sub)
+	# 3) 在 to 里用局部坐标(世界 − to 基座位/速)建新 proxy
+	#    改唯一名: 两个星系的同名子系统都上抛到群时, 避免节点名冲突(Godot 会自动改成 @Node3D@N)。
+	sub.name = sub.name + "_" + from.name
+	var nb := Body.new(sub.name, float(sub.get_total_mass()))
+	nb.type = "system"
+	nb.set_pos(wx - to._bcx, wy - to._bcy, wz - to._bcz)
+	nb.set_vel(vx - to._bvx, vy - to._bvy, vz - to._bvz)
+	to.sim.add(nb)
+	to.child_proxy[sub] = nb
+	to.child_systems.append(sub)
+	sub.parent_system = to
+	# 4) 节点挂到 to(视觉位置每帧由物理驱动, 此处只为层级一致)
+	if sub.get_parent() == null:
+		to.add_child(sub)
+	print("[SOI-init] %s: %s -> %s (上抛到父, 受多源引力)" % [sub.name, from.name, to.name])
 
 
 func _dist3(ax: float, ay: float, az: float, bx: float, by: float, bz: float) -> float:
