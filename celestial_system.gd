@@ -597,6 +597,73 @@ func _on_mass_changed(v: float) -> void:
 		fc.mass = v
 		if fc.body != null:
 			fc.body.mass = v          # 同步到 sim → 立刻影响引力(其他天体受力变化)
+		_recompute_after_mass_change(fc)
+
+
+# 改 mass 后: 沿 owner 链向上更新子系统质点 mass + 重算所有 Hill + 重建 SOI 球。
+# 注意: 改一个天体的 mass, 它【自己】的轨道不变(物理: 加速度与自身质量无关);
+#       变的是 别人受它的引力 + 它作为子系统 dominant 时该子系统的总质量(→父sim里质点mass)。
+func _recompute_after_mass_change(fc: Celestial) -> void:
+	# fc 所属系统的总质量变了 → 它在父 sim 里的质点(proxy)mass 要更新, 一直递归到顶层
+	var sys: CelestialSystem = fc.owner_system
+	while sys != null:
+		var parent: CelestialSystem = sys.parent_system
+		if parent != null and parent.child_proxy.has(sys):
+			var proxy: Body = parent.child_proxy[sys]
+			proxy.mass = float(sys.get_total_mass())
+		sys = parent
+	_recompute_hill_all()
+	_rebuild_soi_spheres()
+
+
+func _recompute_hill_all() -> void:
+	for t in _get_all_tops():
+		_recompute_hill_recursive(t)
+
+
+# 重算每个系统的引力作用范围(子系统=Hill球 用当前 sim 距离; 顶层=系统边界)。
+func _recompute_hill_recursive(sys: CelestialSystem) -> void:
+	if sys.parent_system != null and sys.dominant != null:
+		var parent: CelestialSystem = sys.parent_system
+		if parent.dominant != null and parent.dominant.body != null and parent.child_proxy.has(sys):
+			var proxy: Body = parent.child_proxy[sys]
+			var dx: float = proxy.px - parent.dominant.body.px
+			var dy: float = proxy.py - parent.dominant.body.py
+			var dz: float = proxy.pz - parent.dominant.body.pz
+			var sdist: float = sqrt(dx * dx + dy * dy + dz * dz)
+			if sdist > 0.0:
+				var m: float = float(sys.get_total_mass())
+				sys._hill_radius = sdist * pow(m / (3.0 * parent.dominant.mass), 1.0 / 3.0)
+	elif sys.dominant != null and sys.dominant.body != null:
+		# 顶层系统边界 = 最远成员/子系统到 dominant 的距离 × 1.5
+		var max_d: float = 0.0
+		for c in sys.members:
+			if c == sys.dominant or c.body == null:
+				continue
+			var dx: float = c.body.px - sys.dominant.body.px
+			var dy: float = c.body.py - sys.dominant.body.py
+			var dz: float = c.body.pz - sys.dominant.body.pz
+			max_d = max(max_d, sqrt(dx * dx + dy * dy + dz * dz))
+		for sub in sys.child_systems:
+			if sys.child_proxy.has(sub):
+				var proxy: Body = sys.child_proxy[sub]
+				var dx: float = proxy.px - sys.dominant.body.px
+				var dy: float = proxy.py - sys.dominant.body.py
+				var dz: float = proxy.pz - sys.dominant.body.pz
+				max_d = max(max_d, sqrt(dx * dx + dy * dy + dz * dz))
+		sys._hill_radius = max_d * 1.5
+	for sub in sys.child_systems:
+		_recompute_hill_recursive(sub)
+
+
+# 用最新的 _hill_radius 重建所有 SOI 线框球。
+func _rebuild_soi_spheres() -> void:
+	for sph in _soi_spheres:
+		sph.queue_free()
+	_soi_spheres.clear()
+	_soi_targets.clear()
+	for t in _get_all_tops():
+		_collect_soi(t)
 
 
 func _on_radius_changed(v: float) -> void:
