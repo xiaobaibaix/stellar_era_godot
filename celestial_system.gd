@@ -237,8 +237,12 @@ func _init_physics() -> void:
 	elif not child_systems.is_empty():
 		# 顶层"星系群": 无 dominant, 各 child_system 作质点 N 体互绕(互相制约; 双星 = N=2 特例)。
 		_init_cluster_physics()
+	# 每层 sim 都归零总动量 → 质心在局部原点静止(世界运动由 _bcx 沿父链传播)。
+	# 旧版只顶层归零, 子层(恒星系/行星系)sim 残留 add_orbiting 切向速度带来的质心动量,
+	# dominant(中心天体)被线性反推 → sim_speed 高时每帧漂移×sim_speed 放大, 长时间累积
+	# 整个子层飞散(看到的现象: 行星/卫星被越甩越远)。群层因是顶层本就归零, 故双星互绕正常。
+	sim.zero_momentum()
 	if parent_system == null:
-		sim.zero_momentum()
 		_hill_radius = _compute_top_boundary()
 
 
@@ -534,6 +538,12 @@ func _resolve_desired_owner_sub(sub: CelestialSystem) -> CelestialSystem:
 	var cur: CelestialSystem = sub.parent_system
 	if cur == null or not cur.child_proxy.has(sub):
 		return null
+	# 有 dominant 的恒星系在顶层群(无 dominant)里是平等 N 体成员(双星/聚星), 互不捕获 → 归属群。
+	# 否则测"P(=sub.dominant 位)在兄弟恒星系 SOI 内"时, P 恰好落在该兄弟的 dominant(摄动源)上,
+	# _max_perturbation_ratio 因 dp2≈0 跳过该源 → η 被低估为 0 → 误判深度在内 → 把第二个恒星系
+	# reparent 进第一个。捕获只针对无 dominant 的 rogue 子系统(飞进某星 Hill 被收为行星系)。
+	if sub.dominant != null and cur.dominant == null:
+		return cur
 	var pb: Body = cur.child_proxy[sub]
 	var px: float = cur._bcx + pb.px
 	var py: float = cur._bcy + pb.py
@@ -654,9 +664,12 @@ func _resolve_initial_ownership_all() -> void:
 # 判定: 有 dominant 且非顶层的系统, 其子系统到 dominant 距离 > 本系统 Hill → 上抛到父。
 func _collect_initial_moves(sys: CelestialSystem, moves: Array) -> void:
 	if sys.dominant != null and sys.parent_system != null and sys._hill_radius > 0.0 and sys.dominant.body != null:
-		# 与 _escaped_from 一致: 逃逸目标是单成员空群(无 dominant, sys.hill≈0 无意义) → 不上抛。
+		# 父是顶层群(无 dominant) → sys 是群里的平等恒星系, 内部行星系作为封闭单元跟随,
+		# 不上抛到群层(与 _escaped_from 一致)。否则双星下 sys._hill_radius 是"群成员 Hill"
+		# (基于到群质心, ~5.9k), 小于行星轨道(~7.4k) → 行星系被误判出 Hill 搬到群层。
+		# 分层近似下群内恒星系不受伴星引力, 行星系稳定绕本星, 上抛反而错。
 		var par := sys.parent_system
-		if not (par.dominant == null and par.child_systems.size() <= 1):
+		if par.dominant != null:
 			for sub in sys.child_systems:
 				if not sys.child_proxy.has(sub):
 					continue
@@ -831,9 +844,10 @@ func _escaped_from(sys: CelestialSystem, px: float, py: float, pz: float) -> boo
 	var parent: CelestialSystem = sys.parent_system
 	if parent == null:
 		return false   # 顶层不往上抛
-	# 逃逸目标是"无 dominant 的群": 仅当群是多体(>1 子系统)才有逃逸意义(双星 Roche lobe)。
-	# 单成员退化群(如空群包单恒星系, sys.hill≈0 无意义) → 不逃逸, 子天体留原系统, 避免震荡。
-	if parent.dominant == null and parent.child_systems.size() <= 1:
+	# 父是顶层群(无 dominant) → sys 是群里的平等恒星系, 其子天体/子系统作为封闭单元跟随,
+	# 不逃逸到群层(与 _collect_initial_moves 一致)。群成员 Hill 基于到群质心, 小于恒星间 Hill,
+	# 用它判逃逸会把正常行星系误判逃逸。分层近似下群内恒星系不受伴星引力 → 不会自然逃逸。
+	if parent.dominant == null:
 		return false
 	var hill: float = sys._hill_radius
 	if is_nan(hill) or hill <= 0.0:

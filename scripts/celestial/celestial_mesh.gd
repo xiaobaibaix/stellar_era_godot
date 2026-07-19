@@ -34,5 +34,8 @@ func build(c: Celestial) -> Node3D:
 		light.name = "StarLight"
 		light.light_energy = 5.0
 		light.light_color = c.color
+		# 开阴影: 行星挡光 → 月亮进入本影锥变暗(月食)。两处 Star 处光源必须都开,
+		# 否则未开阴影的那个会用无阴影照明把月食效果冲掉。
+		light.shadow_enabled = true
 		mi.add_child(light)
 	return mi

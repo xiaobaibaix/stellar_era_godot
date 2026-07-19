@@ -133,6 +133,28 @@ edit_alpha = false
 
 [node name="CelestialSystem" parent="." unique_id=2094240379 instance=ExtResource("8_tipki")]
 
+[node name="CelestialSystem" parent="CelestialSystem" unique_id=2029073605 instance=ExtResource("8_tipki")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -21367.557, 0, 0)
+
+[node name="OmniLight3D" type="OmniLight3D" parent="CelestialSystem/CelestialSystem" unique_id=763869859]
+light_energy = 3.0
+omni_range = 20000.0
+omni_attenuation = -0.1
+
+[node name="Star" parent="CelestialSystem/CelestialSystem" unique_id=1953598633 instance=ExtResource("9_cel")]
+mass = 1000000.0
+radius = 300.0
+type = "star"
+color = Color(1, 0.85, 0.4, 1)
+is_dominant = true
+
+[node name="CelestialSystem" parent="CelestialSystem/CelestialSystem" unique_id=1785284761 instance=ExtResource("8_tipki")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2088.998, 0, -462.1526)
+
+[node name="Celestial" parent="CelestialSystem/CelestialSystem/CelestialSystem" unique_id=1605655518 instance=ExtResource("9_cel")]
+mass = 2000.0
+radius = 100.0
+
 [node name="CelestialSystem1" parent="CelestialSystem" unique_id=422503284 node_paths=PackedStringArray("orbit_camera") instance=ExtResource("8_tipki")]
 orbit_camera = NodePath("../../Camera3D")
 
@@ -149,7 +171,7 @@ omni_range = 20000.0
 omni_attenuation = -0.1
 
 [node name="PlanetSystem1" parent="CelestialSystem/CelestialSystem1" unique_id=512211728 instance=ExtResource("8_tipki")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7378.6934, 0, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3183.77, 0, 0)
 
 [node name="Planet" parent="CelestialSystem/CelestialSystem1/PlanetSystem1" unique_id=1378551634 instance=ExtResource("9_cel")]
 mass = 1000.0
@@ -158,13 +180,13 @@ color = Color(0.4, 0.6, 1, 1)
 is_dominant = true
 
 [node name="MoonSystem" parent="CelestialSystem/CelestialSystem1/PlanetSystem1" unique_id=1486014465 instance=ExtResource("8_tipki")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -299.78906, 0, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -137.64624, 0, 0)
 
 [node name="Celestial" parent="CelestialSystem/CelestialSystem1/PlanetSystem1/MoonSystem" unique_id=916681004 instance=ExtResource("9_cel")]
 radius = 25.0
 
 [node name="PlanetSystem2" parent="CelestialSystem/CelestialSystem1" unique_id=689757741 instance=ExtResource("8_tipki")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3206.5518, 0, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1808.2476, 0, 0)
 
 [node name="Planet" parent="CelestialSystem/CelestialSystem1/PlanetSystem2" unique_id=769974027 instance=ExtResource("9_cel")]
 mass = 800.0
