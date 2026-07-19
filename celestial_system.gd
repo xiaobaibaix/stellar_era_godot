@@ -514,9 +514,9 @@ func _resolve_desired_owner_sub(sub: CelestialSystem) -> CelestialSystem:
 	var px: float = cur._bcx + pb.px
 	var py: float = cur._bcy + pb.py
 	var pz: float = cur._bcz + pb.pz
+	# 上抛/捕获统一等势面 η + IN/OUT 迟滞 + NaN 防御(见 _resolve_desired_owner 注释)。
 	if cur.dominant != null and cur.parent_system != null and cur._hill_radius > 0.0:
-		var de: float = _dist3(px, py, pz, cur.dominant._wx, cur.dominant._wy, cur.dominant._wz)
-		if de > cur._hill_radius * _SOI_HYSTERESIS_OUT:
+		if _escaped_from(cur, px, py, pz):
 			return _capture_descend(cur.parent_system, px, py, pz, sub)
 	return _capture_descend(cur, px, py, pz, sub)
 
@@ -529,9 +529,10 @@ func _resolve_desired_owner(c: Celestial) -> CelestialSystem:
 	var px: float = c._wx
 	var py: float = c._wy
 	var pz: float = c._wz
+	# 上抛/捕获统一等势面 η + IN/OUT 迟滞(死区 η∈[0.9,1.1] 不翻转, 防 reparent 震荡闪烁)。
+	# _escaped_from 含 NaN 防御: 物理发散时不上抛, 斩断 NaN→翻转恶性循环。
 	if cur.parent_system != null and cur.dominant != null and cur._hill_radius > 0.0:
-		var de: float = _dist3(px, py, pz, cur.dominant._wx, cur.dominant._wy, cur.dominant._wz)
-		if de > cur._hill_radius * _SOI_HYSTERESIS_OUT:
+		if _escaped_from(cur, px, py, pz):
 			return _capture_descend(cur.parent_system, px, py, pz)
 	return _capture_descend(cur, px, py, pz)
 
@@ -548,7 +549,7 @@ func _capture_descend(start: CelestialSystem, px: float, py: float, pz: float, e
 		for sub in s.child_systems:
 			if sub == exclude or sub.dominant == null or sub._hill_radius <= 0.0:
 				continue
-			if _inside_potential_surface(sub, px, py, pz):
+			if _inside_potential_surface(sub, px, py, pz, _SOI_HYSTERESIS_IN):
 				nxt = sub
 				break
 		if nxt == null:
@@ -629,17 +630,20 @@ func _resolve_initial_ownership_all() -> void:
 # 判定: 有 dominant 且非顶层的系统, 其子系统到 dominant 距离 > 本系统 Hill → 上抛到父。
 func _collect_initial_moves(sys: CelestialSystem, moves: Array) -> void:
 	if sys.dominant != null and sys.parent_system != null and sys._hill_radius > 0.0 and sys.dominant.body != null:
-		for sub in sys.child_systems:
-			if not sys.child_proxy.has(sub):
-				continue
-			var pb: Body = sys.child_proxy[sub]
-			var db: Body = sys.dominant.body
-			var dx: float = pb.px - db.px
-			var dy: float = pb.py - db.py
-			var dz: float = pb.pz - db.pz
-			var sdist: float = sqrt(dx * dx + dy * dy + dz * dz)
-			if sdist > sys._hill_radius:
-				moves.append({"sub": sub, "from": sys, "to": sys.parent_system})
+		# 与 _escaped_from 一致: 逃逸目标是单成员空群(无 dominant, sys.hill≈0 无意义) → 不上抛。
+		var par := sys.parent_system
+		if not (par.dominant == null and par.child_systems.size() <= 1):
+			for sub in sys.child_systems:
+				if not sys.child_proxy.has(sub):
+					continue
+				var pb: Body = sys.child_proxy[sub]
+				var db: Body = sys.dominant.body
+				var dx: float = pb.px - db.px
+				var dy: float = pb.py - db.py
+				var dz: float = pb.pz - db.pz
+				var sdist: float = sqrt(dx * dx + dy * dy + dz * dz)
+				if sdist > sys._hill_radius:
+					moves.append({"sub": sub, "from": sys, "to": sys.parent_system})
 	for sub in sys.child_systems:
 		_collect_initial_moves(sub, moves)
 
@@ -777,7 +781,7 @@ func _collect_perturbers(sub: CelestialSystem, out_arr: Array[Celestial]) -> voi
 
 # 多体势面归属判定(替代写死的 Roche 椭球): P 在 sub.dominant 的 SOI 内 ⇔ max_η < 1。
 # 无其他 dominant → 退化球(Hill×IN)。签名同旧 _inside_roche_ellipse, _capture_descend 不用改逻辑。
-func _inside_potential_surface(sub: CelestialSystem, px: float, py: float, pz: float) -> bool:
+func _inside_potential_surface(sub: CelestialSystem, px: float, py: float, pz: float, eta_thresh: float = 1.0) -> bool:
 	var T: Celestial = sub.dominant
 	if T == null:
 		return false
@@ -787,9 +791,42 @@ func _inside_potential_surface(sub: CelestialSystem, px: float, py: float, pz: f
 		var dx: float = px - T._wx
 		var dy: float = py - T._wy
 		var dz: float = pz - T._wz
-		var r_in: float = sub._hill_radius * _SOI_HYSTERESIS_IN
+		var r_in: float = sub._hill_radius * eta_thresh
 		return (dx * dx + dy * dy + dz * dz) < r_in * r_in
-	return _max_perturbation_ratio(T, sources, px, py, pz) < 1.0
+	return _max_perturbation_ratio(T, sources, px, py, pz) < eta_thresh
+
+
+# P 是否已逃出 sys 引力作用区(η ≥ OUT 阈值), 用于触发上抛。
+# NaN 防御: 物理发散时 η/位置/hill 会变 NaN —— 此时视为"未逃逸"(false), 不触发 reparent,
+# 斩断 "NaN→误判上抛→reparent 速度换算出错→更多 NaN→翻转闪烁" 恶性循环。
+# (η<IN 的捕获侧 _inside_potential_surface 对 NaN 同样返回 false=不下钻, 保守安全。)
+func _escaped_from(sys: CelestialSystem, px: float, py: float, pz: float) -> bool:
+	var T: Celestial = sys.dominant
+	if T == null:
+		return false
+	var parent: CelestialSystem = sys.parent_system
+	if parent == null:
+		return false   # 顶层不往上抛
+	# 逃逸目标是"无 dominant 的群": 仅当群是多体(>1 子系统)才有逃逸意义(双星 Roche lobe)。
+	# 单成员退化群(如空群包单恒星系, sys.hill≈0 无意义) → 不逃逸, 子天体留原系统, 避免震荡。
+	if parent.dominant == null and parent.child_systems.size() <= 1:
+		return false
+	var hill: float = sys._hill_radius
+	if is_nan(hill) or hill <= 0.0:
+		return false
+	var sources: Array[Celestial] = []
+	_collect_perturbers(sys, sources)
+	if sources.is_empty():
+		var dx: float = px - T._wx
+		var dy: float = py - T._wy
+		var dz: float = pz - T._wz
+		if is_nan(dx) or is_nan(dy) or is_nan(dz):
+			return false
+		return sqrt(dx * dx + dy * dy + dz * dz) >= hill * _SOI_HYSTERESIS_OUT
+	var eta: float = _max_perturbation_ratio(T, sources, px, py, pz)
+	if is_nan(eta):
+		return false
+	return eta >= _SOI_HYSTERESIS_OUT
 
 
 # sys 的顶层系统(沿 parent_system 上溯到无父)。视觉椭球找群质心方向用。

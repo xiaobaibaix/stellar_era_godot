@@ -148,28 +148,28 @@ light_energy = 3.0
 omni_range = 20000.0
 omni_attenuation = -0.1
 
-[node name="Planet1" parent="CelestialSystem/CelestialSystem1" unique_id=512211728 instance=ExtResource("8_tipki")]
+[node name="PlanetSystem1" parent="CelestialSystem/CelestialSystem1" unique_id=512211728 instance=ExtResource("8_tipki")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6000, 0, 0)
 
-[node name="Planet" parent="CelestialSystem/CelestialSystem1/Planet1" unique_id=1378551634 instance=ExtResource("9_cel")]
+[node name="Planet" parent="CelestialSystem/CelestialSystem1/PlanetSystem1" unique_id=1378551634 instance=ExtResource("9_cel")]
 mass = 1000.0
 radius = 80.0
 color = Color(0.4, 0.6, 1, 1)
 is_dominant = true
 
-[node name="MoonSystem" parent="CelestialSystem/CelestialSystem1/Planet1" unique_id=1785284761 instance=ExtResource("8_tipki")]
+[node name="MoonSystem" parent="CelestialSystem/CelestialSystem1/PlanetSystem1" unique_id=1785284761 instance=ExtResource("8_tipki")]
 
-[node name="Moon" parent="CelestialSystem/CelestialSystem1/Planet1/MoonSystem" unique_id=607143191 instance=ExtResource("9_cel")]
+[node name="Moon" parent="CelestialSystem/CelestialSystem1/PlanetSystem1/MoonSystem" unique_id=607143191 instance=ExtResource("9_cel")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 300, 0, 0)
 mass = 5.0
 radius = 20.0
 type = "moon"
 color = Color(0.75, 0.75, 0.75, 1)
 
-[node name="Planet2" parent="CelestialSystem/CelestialSystem1" unique_id=689757741 instance=ExtResource("8_tipki")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10000, 0, 0)
+[node name="PlanetSystem2" parent="CelestialSystem/CelestialSystem1" unique_id=689757741 instance=ExtResource("8_tipki")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3206.5518, 0, 0)
 
-[node name="Planet" parent="CelestialSystem/CelestialSystem1/Planet2" unique_id=769974027 instance=ExtResource("9_cel")]
+[node name="Planet" parent="CelestialSystem/CelestialSystem1/PlanetSystem2" unique_id=769974027 instance=ExtResource("9_cel")]
 mass = 800.0
 radius = 60.0
 color = Color(0.9, 0.5, 0.3, 1)
