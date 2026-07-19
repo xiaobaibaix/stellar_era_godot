@@ -441,6 +441,10 @@ func _update_soi(ox: float, oy: float, oz: float) -> void:
 		if sph.visible:
 			sph.global_position = Vector3.ZERO
 	_soi_rebuild_counter += 1
+	# _show_soi 关闭时完全不重建(密集 η 采样是 SOI 性能大头, 关了就没理由再算)。
+	# 判定/动态 reparent(_update_dynamic_soi)与此无关, 不受影响。
+	if not _show_soi:
+		return
 	if _soi_rebuild_counter >= soi_rebuild_interval:
 		_soi_rebuild_counter = 0
 		_rebuild_soi_meshes_now()
@@ -449,10 +453,16 @@ func _update_soi(ox: float, oy: float, oz: float) -> void:
 # 立即重建所有 SOI 的等势面 mesh(限频计数器到点 / reparent 后强制刷新 共用)。
 # 顶点已烤渲染坐标(T 世界位 - 浮动原点), 节点 global_position 保持 ZERO 抵消容器场景位。
 func _rebuild_soi_meshes_now() -> void:
+	# 只为相机聚焦的天体生成 mesh(24x12 密集 η 采样开销大, 非聚焦系统跳过)。
+	# 未聚焦(fc==null, 如启动初期) → 全部生成, 保留旧行为(F2 开关后能看到东西)。
+	var fc: Celestial = _current_focus()
 	for i in range(_soi_spheres.size()):
 		var sph: MeshInstance3D = _soi_spheres[i]
 		var tgt: CelestialSystem = _soi_targets[i]
 		if not is_instance_valid(sph) or tgt == null or tgt.dominant == null:
+			continue
+		if fc != null and tgt.dominant != fc:
+			sph.mesh = null
 			continue
 		var sources: Array[Celestial] = []
 		_collect_perturbers(tgt, sources)
@@ -462,7 +472,7 @@ func _rebuild_soi_meshes_now() -> void:
 			sph.mesh = null
 			continue
 		sph.mesh = _make_potential_surface_mesh(tgt.dominant, sources,
-			global_ox, global_oy, global_oz, 8, 4, tgt._hill_radius)
+			global_ox, global_oy, global_oz, 24, 12, tgt._hill_radius)
 
 
 # ===================== 动态 SOI(Step3) =====================
