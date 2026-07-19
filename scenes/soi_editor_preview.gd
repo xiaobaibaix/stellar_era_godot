@@ -612,16 +612,35 @@ func _hill_estimate(sub: CelestialSystem, T: Celestial) -> float:
 
 # reparent 保持世界位 + owner。owner 不变 → 存盘到 main.tscn 新路径, celestial.tscn 实例关系不破坏。
 func _reparent_keep_world(c: Node3D, to: CelestialSystem) -> void:
-	# Node.reparent(new_parent, keep_global_transform=true): Godot 内置, 正确带所有子节点跟随 +
-	# 世界位保持 + 实例关系。旧的手动 remove/add 会让 celestial.tscn 实例子节点(如 Moon 嵌在
-	# MoonSystem 实例里)在跨实例 reparent 时脱落丢失。
+	# reparent 前 force_update: 确保 wp 读到已提交 transform(非 dirty), 不带瞬时旧值。
+	c.force_update_transform()
+	var wp: Vector3 = c.global_position
 	var prev_owner: Node = c.owner
 	var cur: Node = c.get_parent()
 	var from_name: String = cur.name if cur != null else "?"
-	c.reparent(to, true)
-	# owner 保持(存盘归属不变)——reparent 不改 owner, 但跨实例保险重设。
+	# reparent(to, false): local 保持, global 瞬间跳变但紧接着 c.position 立即修正(同一调用栈, gizmo 不插入读)。
+	# 不用 reparent(to, true): 实测 @tool 里 true 的 keep_global 有数值偏差 → 捕获后 global 偏离 wp > 1 →
+	# cooldown 的 distance<1 检查失效 → 连锁误判降级到恒星系 + local=偏差sp−0 跳到太阳附近(更糟)。false +
+	# c.position 精修后 global 严格=wp(误差<1, cooldown 正常保护, 不连锁降级)。瞬间跳变靠去 sel.clear() +
+	# update_gizmos 防 gizmo 捕获错锚点。
+	# 关键修复(用户洞察"坐标更新导致跳回恒星系"): reparent **前**先把 local 设成 wp - to.global, 使
+	# reparent(to,false) 完成瞬间(NOTIFICATION_PARENTED, 编辑器 gizmo 同步读取点)c.global 已 = wp。
+	# 否则 reparent(false) 默认保持旧 local, 瞬间 global = to.global + 旧local(如 MoonSystem 从 CS1
+	# local 7000 捕获到 PlanetSystem1 瞬间 = 7378+7000 = 14378), gizmo 把跳变值当新位置 -> 刚好在 Planet
+	# SOI 外 -> 连锁误判降级回恒星系 + 落太阳附近。set_notify_transform(false) 屏蔽"reparent 前设 local
+	# 时旧 parent 下 global 暂跳"的中间信号, 不让 gizmo 捕获中间态。
+	c.set_notify_transform(false)
+	c.position = wp - to.global_position
+	c.reparent(to, false)
+	c.set_notify_transform(true)
 	if prev_owner != null and _is_in_subtree(to, prev_owner):
 		c.owner = prev_owner
+	c.force_update_transform()
+	c.update_gizmos()   # 用最新 transform 刷新编辑器 3D gizmo 锚点
+	# 保持焦点: reparent 可能使 EditorSelection 丢失 c 引用 → 补回。不 clear()(会重置 gizmo 拖动锚点)。
+	var sel := EditorInterface.get_selection()
+	if sel != null and not sel.get_selected_nodes().has(c):
+		sel.add_node(c)
 	print("[SOI-edit] %s: %s -> %s" % [c.name, from_name, to.name])
 
 
