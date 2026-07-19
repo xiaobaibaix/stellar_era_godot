@@ -844,11 +844,11 @@ func _escaped_from(sys: CelestialSystem, px: float, py: float, pz: float) -> boo
 	var parent: CelestialSystem = sys.parent_system
 	if parent == null:
 		return false   # 顶层不往上抛
-	# 父是顶层群(无 dominant) → sys 是群里的平等恒星系, 其子天体/子系统作为封闭单元跟随,
-	# 不逃逸到群层(与 _collect_initial_moves 一致)。群成员 Hill 基于到群质心, 小于恒星间 Hill,
-	# 用它判逃逸会把正常行星系误判逃逸。分层近似下群内恒星系不受伴星引力 → 不会自然逃逸。
-	if parent.dominant == null:
-		return false
+	# 不对"父是群(无 dominant)"硬 return false: 行星会因自身轨道飞到兄弟恒星 SOI(不需伴星引力拉),
+	# 此时 η(=tidal_伴星/g_主星) >OUT → 正确上抛到群 → _capture_descend 从群下钻捕获到兄弟恒星系。
+	# 旧版在此硬 return false 阻断了跨恒星系捕获(行星飞进另一恒星 SOI 却不被接管 = 用户报告的 bug)。
+	# 安全性: 双星互吞由 _resolve_desired_owner_sub 的 A 守卫拦(子系统级, 不走本函数);
+	# 初始化拉出由 _collect_initial_moves 单独拦; 正常绕行行星 η~0.003 << OUT(1.1) 不会误判逃逸。
 	var hill: float = sys._hill_radius
 	if is_nan(hill) or hill <= 0.0:
 		return false

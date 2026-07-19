@@ -193,3 +193,25 @@ mass = 800.0
 radius = 60.0
 color = Color(0.9, 0.5, 0.3, 1)
 is_dominant = true
+
+[node name="CelestialSystem2" parent="CelestialSystem" unique_id=30553615 instance=ExtResource("8_tipki")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -14179.557, 0, 14741.523)
+
+[node name="OmniLight3D" type="OmniLight3D" parent="CelestialSystem/CelestialSystem2" unique_id=83245356]
+light_energy = 3.0
+omni_range = 20000.0
+omni_attenuation = -0.1
+
+[node name="Star" parent="CelestialSystem/CelestialSystem2" unique_id=1575210087 instance=ExtResource("9_cel")]
+mass = 1000000.0
+radius = 300.0
+type = "star"
+color = Color(1, 0.85, 0.4, 1)
+is_dominant = true
+
+[node name="CelestialSystem" parent="CelestialSystem/CelestialSystem2" unique_id=1040257367 instance=ExtResource("8_tipki")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2088.998, 0, -462.1526)
+
+[node name="Celestial" parent="CelestialSystem/CelestialSystem2/CelestialSystem" unique_id=1313456684 instance=ExtResource("9_cel")]
+mass = 2000.0
+radius = 100.0
