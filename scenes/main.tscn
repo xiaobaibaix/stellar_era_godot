@@ -52,72 +52,83 @@ offset_bottom = 26.0
 text = "FPS:111  patch:314  tri:110.5k  job:0"
 horizontal_alignment = 2
 
-[node name="HUDLayer" type="CanvasLayer" parent="."]
+[node name="HUDLayer" type="CanvasLayer" parent="." unique_id=1173052028]
 
-[node name="HUD" type="Label" parent="HUDLayer"]
+[node name="HUD" type="Label" parent="HUDLayer" unique_id=878069346]
 offset_left = 10.0
 offset_top = 40.0
 theme_override_font_sizes/font_size = 14
 
-[node name="EditorLayer" type="CanvasLayer" parent="."]
+[node name="EditorLayer" type="CanvasLayer" parent="." unique_id=197469049]
 
-[node name="Editor" type="PanelContainer" parent="EditorLayer"]
+[node name="Editor" type="PanelContainer" parent="EditorLayer" unique_id=2112306037]
+anchors_preset = 1
 anchor_left = 1.0
 anchor_right = 1.0
-anchor_top = 0.0
-anchor_bottom = 0.0
 offset_left = -250.0
-offset_right = -10.0
 offset_top = 60.0
+offset_right = -10.0
 offset_bottom = 60.0
 
-[node name="Margin" type="MarginContainer" parent="EditorLayer/Editor"]
+[node name="Margin" type="MarginContainer" parent="EditorLayer/Editor" unique_id=1791023343]
+layout_mode = 2
 theme_override_constants/margin_left = 8
-theme_override_constants/margin_right = 8
 theme_override_constants/margin_top = 6
+theme_override_constants/margin_right = 8
 theme_override_constants/margin_bottom = 6
 
-[node name="VBox" type="VBoxContainer" parent="EditorLayer/Editor/Margin"]
+[node name="VBox" type="VBoxContainer" parent="EditorLayer/Editor/Margin" unique_id=1927587295]
+layout_mode = 2
 theme_override_constants/separation = 4
 
-[node name="Title" type="Label" parent="EditorLayer/Editor/Margin/VBox"]
+[node name="Title" type="Label" parent="EditorLayer/Editor/Margin/VBox" unique_id=1008472164]
+layout_mode = 2
 text = "(未聚焦)"
 
-[node name="MassRow" type="HBoxContainer" parent="EditorLayer/Editor/Margin/VBox"]
+[node name="MassRow" type="HBoxContainer" parent="EditorLayer/Editor/Margin/VBox" unique_id=2123095428]
+layout_mode = 2
 theme_override_constants/separation = 6
 
-[node name="Key" type="Label" parent="EditorLayer/Editor/Margin/VBox/MassRow"]
-text = "mass"
+[node name="Key" type="Label" parent="EditorLayer/Editor/Margin/VBox/MassRow" unique_id=844551920]
 custom_minimum_size = Vector2(52, 0)
+layout_mode = 2
+text = "mass"
 
-[node name="SpinBox" type="SpinBox" parent="EditorLayer/Editor/Margin/VBox/MassRow"]
+[node name="SpinBox" type="SpinBox" parent="EditorLayer/Editor/Margin/VBox/MassRow" unique_id=1632935582]
 custom_minimum_size = Vector2(140, 0)
-min_value = 0.0
+layout_mode = 2
 max_value = 10000000.0
 step = 10.0
 
-[node name="RadiusRow" type="HBoxContainer" parent="EditorLayer/Editor/Margin/VBox"]
+[node name="RadiusRow" type="HBoxContainer" parent="EditorLayer/Editor/Margin/VBox" unique_id=819470858]
+layout_mode = 2
 theme_override_constants/separation = 6
 
-[node name="Key" type="Label" parent="EditorLayer/Editor/Margin/VBox/RadiusRow"]
-text = "radius"
+[node name="Key" type="Label" parent="EditorLayer/Editor/Margin/VBox/RadiusRow" unique_id=104592839]
 custom_minimum_size = Vector2(52, 0)
+layout_mode = 2
+text = "radius"
 
-[node name="SpinBox" type="SpinBox" parent="EditorLayer/Editor/Margin/VBox/RadiusRow"]
+[node name="SpinBox" type="SpinBox" parent="EditorLayer/Editor/Margin/VBox/RadiusRow" unique_id=1245042839]
 custom_minimum_size = Vector2(140, 0)
+layout_mode = 2
 min_value = 1.0
 max_value = 5000.0
 step = 5.0
+value = 1.0
 
-[node name="ColorRow" type="HBoxContainer" parent="EditorLayer/Editor/Margin/VBox"]
+[node name="ColorRow" type="HBoxContainer" parent="EditorLayer/Editor/Margin/VBox" unique_id=263478129]
+layout_mode = 2
 theme_override_constants/separation = 6
 
-[node name="Key" type="Label" parent="EditorLayer/Editor/Margin/VBox/ColorRow"]
-text = "color"
+[node name="Key" type="Label" parent="EditorLayer/Editor/Margin/VBox/ColorRow" unique_id=45845437]
 custom_minimum_size = Vector2(52, 0)
+layout_mode = 2
+text = "color"
 
-[node name="ColorPicker" type="ColorPickerButton" parent="EditorLayer/Editor/Margin/VBox/ColorRow"]
+[node name="ColorPicker" type="ColorPickerButton" parent="EditorLayer/Editor/Margin/VBox/ColorRow" unique_id=1078106997]
 custom_minimum_size = Vector2(140, 0)
+layout_mode = 2
 edit_alpha = false
 
 [node name="CelestialSystem" parent="." unique_id=2094240379 instance=ExtResource("8_tipki")]
@@ -126,7 +137,7 @@ edit_alpha = false
 orbit_camera = NodePath("../../Camera3D")
 
 [node name="Star" parent="CelestialSystem/CelestialSystem1" unique_id=1469884144 instance=ExtResource("9_cel")]
-mass = 1000000.0
+mass = 2000000.0
 radius = 300.0
 type = "star"
 color = Color(1, 0.85, 0.4, 1)
@@ -146,7 +157,9 @@ radius = 80.0
 color = Color(0.4, 0.6, 1, 1)
 is_dominant = true
 
-[node name="Moon" parent="CelestialSystem/CelestialSystem1/Planet1" unique_id=607143191 instance=ExtResource("9_cel")]
+[node name="MoonSystem" parent="CelestialSystem/CelestialSystem1/Planet1" unique_id=1785284761 instance=ExtResource("8_tipki")]
+
+[node name="Moon" parent="CelestialSystem/CelestialSystem1/Planet1/MoonSystem" unique_id=607143191 instance=ExtResource("9_cel")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 300, 0, 0)
 mass = 5.0
 radius = 20.0
@@ -187,7 +200,9 @@ radius = 80.0
 color = Color(0.4, 0.6, 1, 1)
 is_dominant = true
 
-[node name="Moon" parent="CelestialSystem/CelestialSystem2/Planet1" unique_id=395906955 instance=ExtResource("9_cel")]
+[node name="MoonSystem" parent="CelestialSystem/CelestialSystem2/Planet1" unique_id=884683740 instance=ExtResource("8_tipki")]
+
+[node name="Moon" parent="CelestialSystem/CelestialSystem2/Planet1/MoonSystem" unique_id=395906955 instance=ExtResource("9_cel")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 300, 0, 0)
 mass = 5.0
 radius = 20.0

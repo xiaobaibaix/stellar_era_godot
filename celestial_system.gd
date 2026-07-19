@@ -40,6 +40,9 @@ static var global_oz: float = 0.0
 ## 轨迹预测线(F3)重算间隔(帧)。解析椭圆(每条仅 192 次三角运算)极廉价 → 默认 1(每帧)
 ## = 零滞后最丝滑。天体很多时可调大省 CPU。
 @export_range(1, 60, 1) var orbit_predict_interval: int = 1
+## SOI 等势面 mesh 重建间隔(帧)。每顶点要步长扫描+二分求 η=1 半径, 比解析椭圆贵 → 默认 2。
+## 天体多/卡顿可调大; 1 = 每帧重建(最丝滑)。
+@export_range(1, 30, 1) var soi_rebuild_interval: int = 3
 
 var sim: NBodySystem
 var members: Array[Celestial] = []
@@ -79,6 +82,7 @@ var _show_soi: bool = false
 var _soi_spheres: Array[MeshInstance3D] = []
 var _soi_targets: Array[CelestialSystem] = []
 var _soi_visual: MeshInstance3D = null     # 本系统自带的 SOI 节点(预制体)
+var _soi_rebuild_counter: int = 9999       # 等势面 mesh 限频计数器(初值大→首帧强制重建一次)
 var _trails_container: Node3D = null       # 预制体 Trails 容器(代码生成的拖尾节点挂此, 和天体并列)
 var _orbits_container: Node3D = null       # 预制体 Orbits 容器(代码生成的轨道节点挂此, 和天体并列)
 
@@ -429,26 +433,27 @@ func _update_soi(ox: float, oy: float, oz: float) -> void:
 	if not _show_soi:
 		return
 	for i in range(_soi_spheres.size()):
+		_soi_spheres[i].visible = true
+		_soi_spheres[i].global_position = Vector3.ZERO
+	_soi_rebuild_counter += 1
+	if _soi_rebuild_counter >= soi_rebuild_interval:
+		_soi_rebuild_counter = 0
+		_rebuild_soi_meshes_now()
+
+
+# 立即重建所有 SOI 的等势面 mesh(限频计数器到点 / reparent 后强制刷新 共用)。
+# 顶点已烤渲染坐标(T 世界位 - 浮动原点), 节点 global_position 保持 ZERO 抵消容器场景位。
+func _rebuild_soi_meshes_now() -> void:
+	for i in range(_soi_spheres.size()):
 		var sph: MeshInstance3D = _soi_spheres[i]
 		var tgt: CelestialSystem = _soi_targets[i]
-		var r: float = tgt._hill_radius
-		if tgt.dominant != null:
-			sph.global_position = Vector3(
-				tgt.dominant._wx - ox, tgt.dominant._wy - oy, tgt.dominant._wz - oz)
-			# Roche lobe 椭球近似: 双星系统内(顶层为群)的 SOI 朝群质心(伴星方向)收尖, 反映真实
-			# 作用区"朝扰动体泪滴"形状(替代球); 单恒星系顶层用球。z 局部轴经 look_at 朝群质心。
-			var top: CelestialSystem = _get_top_of(tgt)
-			if top != null and top != tgt and top.dominant == null:
-				var center_render := Vector3(top._bcx - ox, top._bcy - oy, top._bcz - oz)
-				if sph.global_position.distance_to(center_render) > 1.0:
-					sph.look_at(center_render)
-				sph.scale = Vector3(r, r, r * 0.8)   # z(朝群质心=伴星)收尖
-			else:
-				sph.scale = Vector3(r, r, r)
-		else:
-			# 群(无 dominant): 边界框居中在群质心(=本系统基座位; zero_momentum 后质心不动)。
-			sph.global_position = Vector3(tgt._bcx - ox, tgt._bcy - oy, tgt._bcz - oz)
-			sph.scale = Vector3(r, r, r)
+		if not is_instance_valid(sph) or tgt == null or tgt.dominant == null:
+			continue
+		var sources: Array[Celestial] = []
+		_collect_perturbers(tgt, sources)
+		sph.global_position = Vector3.ZERO
+		sph.mesh = _make_potential_surface_mesh(tgt.dominant, sources,
+			global_ox, global_oy, global_oz, 8, 4, tgt._hill_radius)
 
 
 # ===================== 动态 SOI(Step3) =====================
@@ -540,7 +545,7 @@ func _capture_descend(start: CelestialSystem, px: float, py: float, pz: float, e
 		for sub in s.child_systems:
 			if sub == exclude or sub.dominant == null or sub._hill_radius <= 0.0:
 				continue
-			if _inside_roche_ellipse(sub, px, py, pz):
+			if _inside_potential_surface(sub, px, py, pz):
 				nxt = sub
 				break
 		if nxt == null:
@@ -705,32 +710,83 @@ func _dist3(ax: float, ay: float, az: float, bx: float, by: float, bz: float) ->
 # 点 (px,py,pz) 是否在 sub 的 Roche lobe 椭球作用区内(朝顶层群质心=伴星方向收尖)。
 # 群内子系统: 椭球(radial=Hill×0.8 朝质心, perp=Hill 垂直); 单恒星系顶层/无群: 退化为球(Hill)。
 # 几何上即"L1/L2 稳定区"的椭球近似(随相位转), 动力学正确 —— 区别于瞬时引力比(对双星成员错)。
-func _inside_roche_ellipse(sub: CelestialSystem, px: float, py: float, pz: float) -> bool:
-	var dx: float = px - sub.dominant._wx
-	var dy: float = py - sub.dominant._wy
-	var dz: float = pz - sub.dominant._wz
-	var r_in: float = sub._hill_radius * _SOI_HYSTERESIS_IN
-	var top: CelestialSystem = _get_top_of(sub)
-	if top == null or top == sub or top.dominant != null:
+# 多体摄动比: P 点处 max_S |tidal_S(P)| / g_T(P)。判定与视觉共用, 保证形状与归属一致。
+# tidal_S(P) = a_S(P) - a_S(T) (在 T 共动系里 S 的潮汐摄动); g_T = G·M_T / |P-T|²。
+# sources 空 → 0(退化球)。二体 → Roche lobe; 多体 → 扭曲面; q=M_S/M_T 天然进入。
+func _max_perturbation_ratio(T: Celestial, sources: Array[Celestial],
+		px: float, py: float, pz: float) -> float:
+	if sources.is_empty():
+		return 0.0
+	var rx: float = px - T._wx
+	var ry: float = py - T._wy
+	var rz: float = pz - T._wz
+	var r2: float = rx * rx + ry * ry + rz * rz
+	if r2 < 1e-6:
+		return 0.0
+	var g_t: float = G * T.mass / r2
+	if g_t <= 0.0:
+		return 0.0
+	var max_eta: float = 0.0
+	for S in sources:
+		# a_S(P): G·M_S·(S-P)/|S-P|³
+		var vpx: float = S._wx - px
+		var vpy: float = S._wy - py
+		var vpz: float = S._wz - pz
+		var dp2: float = vpx * vpx + vpy * vpy + vpz * vpz
+		if dp2 < 1e-6:
+			continue
+		var kp: float = G * S.mass / (dp2 * sqrt(dp2))
+		# a_S(T): G·M_S·(S-T)/|S-T|³
+		var vtx: float = S._wx - T._wx
+		var vty: float = S._wy - T._wy
+		var vtz: float = S._wz - T._wz
+		var dt2: float = vtx * vtx + vty * vty + vtz * vtz
+		if dt2 < 1e-6:
+			continue
+		var kt: float = G * S.mass / (dt2 * sqrt(dt2))
+		# tidal = a_S(P) - a_S(T)
+		var tax: float = kp * vpx - kt * vtx
+		var tay: float = kp * vpy - kt * vty
+		var taz: float = kp * vpz - kt * vtz
+		var eta: float = sqrt(tax * tax + tay * tay + taz * taz) / g_t
+		if eta > max_eta:
+			max_eta = eta
+	return max_eta
+
+
+# 收集 sub 的多体摄动源: 沿祖先链取同层兄弟 + 祖辈 dominant(能撼动 sub 层级的天体),
+# 不含 sub 自己的子系统(那些是 sub 的从属天体, 在 sub 的 SOI 内, 非摄动源)。
+func _collect_perturbers(sub: CelestialSystem, out_arr: Array[Celestial]) -> void:
+	var s: CelestialSystem = sub
+	while s.parent_system != null:
+		var parent: CelestialSystem = s.parent_system
+		if parent.dominant != null:
+			out_arr.append(parent.dominant)
+		for sib in parent.child_systems:
+			if sib == s:
+				continue
+			if sib.dominant != null:
+				out_arr.append(sib.dominant)
+		s = parent
+	if s.dominant != null:
+		out_arr.append(s.dominant)
+
+
+# 多体势面归属判定(替代写死的 Roche 椭球): P 在 sub.dominant 的 SOI 内 ⇔ max_η < 1。
+# 无其他 dominant → 退化球(Hill×IN)。签名同旧 _inside_roche_ellipse, _capture_descend 不用改逻辑。
+func _inside_potential_surface(sub: CelestialSystem, px: float, py: float, pz: float) -> bool:
+	var T: Celestial = sub.dominant
+	if T == null:
+		return false
+	var sources: Array[Celestial] = []
+	_collect_perturbers(sub, sources)
+	if sources.is_empty():
+		var dx: float = px - T._wx
+		var dy: float = py - T._wy
+		var dz: float = pz - T._wz
+		var r_in: float = sub._hill_radius * _SOI_HYSTERESIS_IN
 		return (dx * dx + dy * dy + dz * dz) < r_in * r_in
-	var cx: float = top._bcx - sub.dominant._wx
-	var cy: float = top._bcy - sub.dominant._wy
-	var cz: float = top._bcz - sub.dominant._wz
-	var cl: float = sqrt(cx * cx + cy * cy + cz * cz)
-	if cl < 1.0:
-		return (dx * dx + dy * dy + dz * dz) < r_in * r_in
-	cx /= cl
-	cy /= cl
-	cz /= cl
-	var radial: float = dx * cx + dy * cy + dz * cz
-	var perp_x: float = dx - radial * cx
-	var perp_y: float = dy - radial * cy
-	var perp_z: float = dz - radial * cz
-	var perp: float = sqrt(perp_x * perp_x + perp_y * perp_y + perp_z * perp_z)
-	var rad_r: float = r_in * 0.8     # 朝伴星(L1)方向收尖
-	var u: float = radial / rad_r
-	var v: float = perp / r_in
-	return u * u + v * v < 1.0
+	return _max_perturbation_ratio(T, sources, px, py, pz) < 1.0
 
 
 # sys 的顶层系统(沿 parent_system 上溯到无父)。视觉椭球找群质心方向用。
@@ -911,6 +967,165 @@ func _make_soi_material(target_sys: CelestialSystem) -> Material:
 	mat.shader = sh
 	mat.set_shader_parameter("line_color", col)
 	return mat
+
+
+# 沿单位方向 (dx,dy,dz) 从 T 出发的射线上, 求 max_η=1 的边界半径 r。
+# η 沿射线单调趋增 → 步长扫描找首个 η≥1 过零区间 → 区间内二分细化。
+# 多体 η 可能非严格单调, 故扫描而非纯二分。use_ball/sources 空 → 回退 fallback_r。
+func _soi_radius_on_ray(T: Celestial, sources: Array[Celestial], use_ball: bool,
+		fallback_r: float, r_max: float,
+		dx: float, dy: float, dz: float) -> float:
+	if use_ball:
+		return fallback_r
+	# 内联 η 计算(不调 _max_perturbation_ratio), 省 GDScript 函数调用开销(视觉路径性能关键)。
+	var twx: float = T._wx
+	var twy: float = T._wy
+	var twz: float = T._wz
+	var tm: float = T.mass
+	var n_scan: int = 10
+	var r_prev: float = 0.0
+	for k in range(1, n_scan + 1):
+		var r_cur: float = r_max * float(k) / float(n_scan)
+		var px: float = twx + dx * r_cur
+		var py: float = twy + dy * r_cur
+		var pz: float = twz + dz * r_cur
+		var g_t: float = G * tm / (r_cur * r_cur)
+		var eta_cur: float = 0.0
+		if g_t > 0.0:
+			for S in sources:
+				var vpx: float = S._wx - px
+				var vpy: float = S._wy - py
+				var vpz: float = S._wz - pz
+				var dp2: float = vpx * vpx + vpy * vpy + vpz * vpz
+				if dp2 < 1e-6:
+					continue
+				var kp: float = G * S.mass / (dp2 * sqrt(dp2))
+				var stx: float = S._wx - twx
+				var sty: float = S._wy - twy
+				var stz: float = S._wz - twz
+				var dt2: float = stx * stx + sty * sty + stz * stz
+				if dt2 < 1e-6:
+					continue
+				var kt: float = G * S.mass / (dt2 * sqrt(dt2))
+				var tax: float = kp * vpx - kt * stx
+				var tay: float = kp * vpy - kt * sty
+				var taz: float = kp * vpz - kt * stz
+				var eta: float = sqrt(tax * tax + tay * tay + taz * taz) / g_t
+				if eta > eta_cur:
+					eta_cur = eta
+		if eta_cur >= 1.0:
+			var lo: float = r_prev
+			var hi: float = r_cur
+			for _b in range(8):
+				var mid: float = 0.5 * (lo + hi)
+				var bpx: float = twx + dx * mid
+				var bpy: float = twy + dy * mid
+				var bpz: float = twz + dz * mid
+				var bg_t: float = G * tm / (mid * mid)
+				var b_eta: float = 0.0
+				if bg_t > 0.0:
+					for S in sources:
+						var bvx: float = S._wx - bpx
+						var bvy: float = S._wy - bpy
+						var bvz: float = S._wz - bpz
+						var bp2: float = bvx * bvx + bvy * bvy + bvz * bvz
+						if bp2 < 1e-6:
+							continue
+						var bkp: float = G * S.mass / (bp2 * sqrt(bp2))
+						var bstx: float = S._wx - twx
+						var bsty: float = S._wy - twy
+						var bstz: float = S._wz - twz
+						var bdt2: float = bstx * bstx + bsty * bsty + bstz * bstz
+						if bdt2 < 1e-6:
+							continue
+						var bkt: float = G * S.mass / (bdt2 * sqrt(bdt2))
+						var bax: float = bkp * bvx - bkt * bstx
+						var bay: float = bkp * bvy - bkt * bsty
+						var baz: float = bkp * bvz - bkt * bstz
+						var e_b: float = sqrt(bax * bax + bay * bay + baz * baz) / bg_t
+						if e_b > b_eta:
+							b_eta = e_b
+				if b_eta >= 1.0:
+					hi = mid
+				else:
+					lo = mid
+			return 0.5 * (lo + hi)
+		r_prev = r_cur
+	return r_max
+
+
+# 等势面线框 mesh: 球面方向(θ,φ)径向采样求 η=1 半径, 连经纬线(PRIMITIVE_LINES)。
+# 照 _make_wireframe_sphere 双循环结构, 仅顶点半径从固定 r 换成 r(θ,φ)。
+# 顶点 = (T 世界位 - 浮动原点) + r·dir。sources 空 → 退化为 Hill 球线框。
+func _make_potential_surface_mesh(T: Celestial, sources: Array[Celestial],
+		ox: float, oy: float, oz: float, n_lon: int, n_lat: int, hill: float) -> ArrayMesh:
+	var tx: float = T._wx - ox
+	var ty: float = T._wy - oy
+	var tz: float = T._wz - oz
+	var d_near2: float = 1e30
+	for S in sources:
+		var ex: float = S._wx - T._wx
+		var ey: float = S._wy - T._wy
+		var ez: float = S._wz - T._wz
+		var d2: float = ex * ex + ey * ey + ez * ez
+		if d2 < d_near2:
+			d_near2 = d2
+	# η=1 面(定义: tidal/g=1)朝源方向在 ~0.8×源距; r_max=1.5×最近源距 确保扫描覆盖到边界。
+	var r_max: float = maxf(hill, 1.0)
+	if not sources.is_empty():
+		r_max = maxf(sqrt(d_near2) * 1.5, 1.0)
+	var fallback_r: float = hill if hill > 0.0 else r_max
+	var use_ball: bool = sources.is_empty()
+	# 半径查表 rad[i][j](i=0..n_lat φ, j=0..n_lon θ): 每 (φ,θ) 只采样一次, 经纬线复用。
+	# 旧版每线段端点独立采样 → 2·((n_lat-1)·n_lon + n_lon·n_lat) 次; 查表仅 (n_lat+1)·(n_lon+1) 次。
+	var rad: Array = []
+	rad.resize(n_lat + 1)
+	for i in range(n_lat + 1):
+		var phi: float = PI * float(i) / float(n_lat)
+		var sinp: float = sin(phi)
+		var cosp: float = cos(phi)
+		var row: Array = []
+		row.resize(n_lon + 1)
+		for j in range(n_lon + 1):
+			var theta: float = TAU * float(j) / float(n_lon)
+			row[j] = _soi_radius_on_ray(T, sources, use_ball, fallback_r, r_max,
+				sinp * cos(theta), cosp, sinp * sin(theta))
+		rad[i] = row
+	var positions := PackedVector3Array()
+	# 纬线圈: 固定 φ, 连相邻 θ(避开极点 φ=0/π 退化)。
+	for i in range(1, n_lat):
+		var phi: float = PI * float(i) / float(n_lat)
+		var sinp: float = sin(phi)
+		var cosp: float = cos(phi)
+		for j in range(n_lon):
+			var t0: float = TAU * float(j) / float(n_lon)
+			var t1: float = TAU * float(j + 1) / float(n_lon)
+			var r0: float = rad[i][j]
+			var r1: float = rad[i][j + 1]
+			positions.append(Vector3(tx + sinp * cos(t0) * r0, ty + cosp * r0, tz + sinp * sin(t0) * r0))
+			positions.append(Vector3(tx + sinp * cos(t1) * r1, ty + cosp * r1, tz + sinp * sin(t1) * r1))
+	# 经线: 固定 θ, 连相邻 φ。
+	for j in range(n_lon):
+		var theta: float = TAU * float(j) / float(n_lon)
+		var ct: float = cos(theta)
+		var st: float = sin(theta)
+		for i in range(n_lat):
+			var p0: float = PI * float(i) / float(n_lat)
+			var p1: float = PI * float(i + 1) / float(n_lat)
+			var s0: float = sin(p0)
+			var c0: float = cos(p0)
+			var s1: float = sin(p1)
+			var c1: float = cos(p1)
+			var r0: float = rad[i][j]
+			var r1: float = rad[i + 1][j]
+			positions.append(Vector3(tx + s0 * ct * r0, ty + c0 * r0, tz + s0 * st * r0))
+			positions.append(Vector3(tx + s1 * ct * r1, ty + c1 * r1, tz + s1 * st * r1))
+	var arr_mesh := ArrayMesh.new()
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = positions
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arrays)
+	return arr_mesh
 
 
 func _make_wireframe_sphere(r: float, n_lon: int, n_lat: int) -> ArrayMesh:
@@ -1375,9 +1590,12 @@ func _recompute_hill_recursive(sys: CelestialSystem) -> void:
 		_recompute_hill_recursive(sub)
 
 
-# 单位球 + scale 方案后, 半径由 _update_soi 每帧随 _hill_radius 更新, 无需重建 mesh。保留空函数避免改调用点。
+# 等势面 mesh 强制刷新: reparent/初始化后立即重建所有 SOI 视觉, 不等限频计数器。
 func _rebuild_soi_spheres() -> void:
-	pass
+	if _soi_spheres.is_empty():
+		return
+	_rebuild_soi_meshes_now()
+	_soi_rebuild_counter = 0
 
 
 func _on_radius_changed(v: float) -> void:
