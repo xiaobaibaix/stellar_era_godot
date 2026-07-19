@@ -42,6 +42,10 @@ func _process(_delta: float) -> void:
 	var sys: CelestialSystem = get_parent() as CelestialSystem
 	if sys == null:
 		return
+	# 自动归属: 仅顶层系统每帧跑(避免每个系统实例重复判定)。选中并正在交互的非dominant天体
+	# 按 SOI η=1 等势面实时 reparent, 保持世界位(视觉无跳变), owner 不变(存盘到 main.tscn 新路径)。
+	if not (sys.get_parent() is CelestialSystem):
+		_try_auto_reparent(sys)
 	var parent_is_cs: bool = sys.get_parent() is CelestialSystem
 	var dom: Celestial = _dominant_of(sys)
 	var sources: Array[Celestial] = []
@@ -392,3 +396,191 @@ func _soi_radius_on_ray(T: Celestial, sources: Array[Celestial], use_ball: bool,
 			return 0.5 * (lo + hi)
 		r_prev = r_cur
 	return r_max
+
+
+# ===================== 编辑器自动归属 reparent(用户: 移动天体时实时算归属) =====================
+# 仅顶层系统的 SOIEditorPreview 每帧跑(_process 守卫)。取 EditorInterface 选中天体,
+# 按 SOI η=1 等势面判定应属系统, 与当前父不同则 reparent。
+#   - exclude 当前父: 否则 c 被"自己当 dominant 的容器"(Moon之于MoonSystem)在中心永久捕获, 无法降级。
+#   - is_dominant 天体(Star/Planet, SOI 几何中心)跳过 —— 挪它们会破坏 SOI。
+#   - cooldown: 防 η 边界抖动导致同天体高频反复 reparent。
+#   - 保持世界位 + owner: 视觉无跳变, 存盘到 main.tscn 新路径, 不破坏 celestial.tscn 实例关系。
+const _REPARENT_COOLDOWN: int = 30   # 帧(~0.5s @60fps)
+var _proc_count: int = 0
+var _last_reparent_proc: Dictionary = {}   # c.get_instance_id() -> proc_count
+
+
+func _try_auto_reparent(top: CelestialSystem) -> void:
+	_proc_count += 1
+	var sel := EditorInterface.get_selection()
+	if sel == null:
+		return
+	_sync_all_world(top)   # η 判定需全树天体世界位(_wx/_wy/_wz)
+	for node in sel.get_selected_nodes():
+		if not (node is Celestial):
+			continue
+		var c: Celestial = node as Celestial
+		if c.is_dominant:
+			continue   # dominant 是 SOI 中心, 不挪
+		var cur: Node = c.get_parent()
+		if not (cur is CelestialSystem):
+			continue
+		if not _is_in_subtree(c, top):
+			continue   # 选中天体不在本顶层树(用户选了别的场景)
+		var cid: int = c.get_instance_id()
+		if _last_reparent_proc.has(cid) and _proc_count - int(_last_reparent_proc[cid]) < _REPARENT_COOLDOWN:
+			continue   # cooldown 内不重复
+		var p: Vector3 = c.global_position
+		# c 当 dominant 的"私有容器"(如 Moon 之于 MoonSystem)永远 exclude —— c 在自己中心 η=0 会被
+		# 永久自捕获, 无法降级或被别处捕获。无论 c 当前挂在哪, 这个容器都不该捕获 c。
+		var self_sys: CelestialSystem = _find_owning_dominant_system(top, c)
+		var desired: CelestialSystem = _capture_descend_edit(top, p.x, p.y, p.z, self_sys)
+		if desired == null or desired == cur:
+			continue
+		_reparent_keep_world(c, desired)
+		_last_reparent_proc[cid] = _proc_count
+
+
+# 找 c 当 dominant 的系统(c 的"私有容器", 如 Moon 之于 MoonSystem)。永远 exclude —— 否则 c 在
+# 自己中心 η=0 被永久捕获。遍历 top 子树所有 CelestialSystem。
+func _find_owning_dominant_system(root: Node, c: Celestial) -> CelestialSystem:
+	if root is CelestialSystem and _dominant_of(root as CelestialSystem) == c:
+		return root as CelestialSystem
+	for ch in root.get_children():
+		var found: CelestialSystem = _find_owning_dominant_system(ch, c)
+		if found != null:
+			return found
+	return null
+
+
+# 从 start 向下找包含 (px,py,pz) 的最深子系统(复刻 _capture_descend, exclude 当前父防自捕获)。
+func _capture_descend_edit(start: CelestialSystem, px: float, py: float, pz: float,
+		exclude: CelestialSystem) -> CelestialSystem:
+	var s: CelestialSystem = start
+	while true:
+		var nxt: CelestialSystem = null
+		for ch in s.get_children():
+			if not (ch is CelestialSystem) or ch == exclude:
+				continue
+			var sub: CelestialSystem = ch as CelestialSystem
+			if _dominant_of(sub) == null:
+				continue
+			if _inside_potential_surface_edit(sub, px, py, pz, 1.0):
+				nxt = sub
+				break
+		if nxt == null:
+			return s
+		s = nxt
+	return s   # 不可达; 满足 GDScript 全路径返回
+
+
+# 复刻 _inside_potential_surface: sources 空→退化 Hill 估计球(η_thresh 缩放); 否则 η<eta_thresh。
+func _inside_potential_surface_edit(sub: CelestialSystem, px: float, py: float, pz: float,
+		eta_thresh: float) -> bool:
+	var T: Celestial = _dominant_of(sub)
+	if T == null:
+		return false
+	var g: float = sub.G
+	var sources: Array[Celestial] = []
+	_collect_perturbers_edit(sub, sources)
+	if sources.is_empty():
+		var dx: float = px - T._wx
+		var dy: float = py - T._wy
+		var dz: float = pz - T._wz
+		var hill_est: float = _hill_estimate(sub, T)
+		var r_in: float = hill_est * eta_thresh
+		return (dx * dx + dy * dy + dz * dz) < r_in * r_in
+	return _max_eta_edit(T, sources, px, py, pz, g) < eta_thresh
+
+
+# 复刻 _max_perturbation_ratio(用 T/sources 的 _wx/_wy/_wz, 传参 g = sub.G)。
+func _max_eta_edit(T: Celestial, sources: Array, px: float, py: float, pz: float, g: float) -> float:
+	if sources.is_empty():
+		return 0.0
+	var rx: float = px - T._wx
+	var ry: float = py - T._wy
+	var rz: float = pz - T._wz
+	var r2: float = rx * rx + ry * ry + rz * rz
+	if r2 < 1e-6:
+		return 0.0
+	var g_t: float = g * T.mass / r2
+	if g_t <= 0.0:
+		return 0.0
+	var max_eta: float = 0.0
+	for S in sources:
+		var vpx: float = S._wx - px
+		var vpy: float = S._wy - py
+		var vpz: float = S._wz - pz
+		var dp2: float = vpx * vpx + vpy * vpy + vpz * vpz
+		if dp2 < 1e-6:
+			continue
+		var kp: float = g * S.mass / (dp2 * sqrt(dp2))
+		var vtx: float = S._wx - T._wx
+		var vty: float = S._wy - T._wy
+		var vtz: float = S._wz - T._wz
+		var dt2: float = vtx * vtx + vty * vty + vtz * vtz
+		if dt2 < 1e-6:
+			continue
+		var kt: float = g * S.mass / (dt2 * sqrt(dt2))
+		var tax: float = kp * vpx - kt * vtx
+		var tay: float = kp * vpy - kt * vty
+		var taz: float = kp * vpz - kt * vtz
+		var eta: float = sqrt(tax * tax + tay * tay + taz * taz) / g_t
+		if eta > max_eta:
+			max_eta = eta
+	return max_eta
+
+
+# Hill 估计(编辑器无运行时 _hill_radius): dominant 到最近摄动源距离 × 0.5(L1 量级近似)。
+# 无摄动源(单星顶层) → 返回大值, 该层总能容纳, 靠下层 SOI 捕获细分。
+func _hill_estimate(sub: CelestialSystem, T: Celestial) -> float:
+	var sources: Array[Celestial] = []
+	_collect_perturbers_edit(sub, sources)
+	if sources.is_empty():
+		return 1e12
+	var nearest: float = 1e30
+	for S in sources:
+		var dx: float = S._wx - T._wx
+		var dy: float = S._wy - T._wy
+		var dz: float = S._wz - T._wz
+		var d: float = sqrt(dx * dx + dy * dy + dz * dz)
+		if d < nearest:
+			nearest = d
+	return nearest * 0.5
+
+
+# reparent 保持世界位 + owner。owner 不变 → 存盘到 main.tscn 新路径, celestial.tscn 实例关系不破坏。
+func _reparent_keep_world(c: Celestial, to: CelestialSystem) -> void:
+	var wp: Vector3 = c.global_position
+	var prev_owner: Node = c.owner
+	var cur: Node = c.get_parent()
+	var from_name: String = cur.name if cur != null else "?"
+	if cur != null:
+		cur.remove_child(c)
+	to.add_child(c)
+	if prev_owner != null and _is_in_subtree(to, prev_owner):
+		c.owner = prev_owner
+	c.global_position = wp
+	print("[SOI-edit] %s: %s -> %s" % [c.name, from_name, to.name])
+
+
+# 同步 top 子树所有 Celestial 的 _wx/_wy/_wz = global_position(η 判定输入)。
+func _sync_all_world(top: CelestialSystem) -> void:
+	_walk_sync(top)
+
+
+func _walk_sync(n: Node) -> void:
+	if n is Celestial:
+		_sync_world(n as Celestial)
+	for ch in n.get_children():
+		_walk_sync(ch)
+
+
+# node 是否在 ancestor 子树内(沿 parent 上溯)。
+func _is_in_subtree(node: Node, ancestor: Node) -> bool:
+	var n: Node = node
+	while n != null:
+		if n == ancestor:
+			return true
+		n = n.get_parent()
+	return false
