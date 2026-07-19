@@ -433,11 +433,13 @@ func _render_recursive(ox: float, oy: float, oz: float) -> void:
 
 
 func _update_soi(ox: float, oy: float, oz: float) -> void:
-	if not _show_soi:
-		return
+	# visible = 全局开关 且 该 SOI 有外部摄动源(mesh 非空)。
+	# 无源(如单恒星系的恒星, SOI 无穷大)→ mesh=null → 永远隐藏, 不画无意义的"无穷大"圈。
 	for i in range(_soi_spheres.size()):
-		_soi_spheres[i].visible = true
-		_soi_spheres[i].global_position = Vector3.ZERO
+		var sph: MeshInstance3D = _soi_spheres[i]
+		sph.visible = _show_soi and sph.mesh != null
+		if sph.visible:
+			sph.global_position = Vector3.ZERO
 	_soi_rebuild_counter += 1
 	if _soi_rebuild_counter >= soi_rebuild_interval:
 		_soi_rebuild_counter = 0
@@ -455,6 +457,10 @@ func _rebuild_soi_meshes_now() -> void:
 		var sources: Array[Celestial] = []
 		_collect_perturbers(tgt, sources)
 		sph.global_position = Vector3.ZERO
+		if sources.is_empty():
+			# 无外部摄动源(孤立恒星系的恒星) → SOI 理论无穷大, 无有意义边界 → 不画。
+			sph.mesh = null
+			continue
 		sph.mesh = _make_potential_surface_mesh(tgt.dominant, sources,
 			global_ox, global_oy, global_oz, 8, 4, tgt._hill_radius)
 
@@ -1423,7 +1429,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_F2:
 				_show_soi = not _show_soi
 				for sph in _soi_spheres:
-					sph.visible = _show_soi
+					sph.visible = _show_soi and sph.mesh != null
 			KEY_F3:
 				_show_orbit = not _show_orbit
 				for ring in _orbit_rings:

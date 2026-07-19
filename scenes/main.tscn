@@ -158,9 +158,9 @@ color = Color(0.4, 0.6, 1, 1)
 is_dominant = true
 
 [node name="MoonSystem" parent="CelestialSystem/CelestialSystem1/PlanetSystem1" unique_id=1785284761 instance=ExtResource("8_tipki")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 209.53174, 0, 0)
 
 [node name="Moon" parent="CelestialSystem/CelestialSystem1/PlanetSystem1/MoonSystem" unique_id=607143191 instance=ExtResource("9_cel")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 300, 0, 0)
 mass = 5.0
 radius = 20.0
 type = "moon"
