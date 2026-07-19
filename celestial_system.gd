@@ -33,7 +33,7 @@ static var global_oz: float = 0.0
 @export var softening: float = 10.0
 @export_range(0.0, 2.0, 0.01) var dt_fixed: float = 0.5
 @export_range(1, 8, 1) var substeps: int = 2
-@export_range(0.0, 10.0, 0.1) var sim_speed: float = 1.0
+@export_range(0.0, 30.0, 0.1) var sim_speed: float = 1.0
 
 @export_group("仅顶层")
 @export var orbit_camera: OrbitCamera
@@ -104,6 +104,8 @@ var _editor_title: Label = null
 var _mass_spin: SpinBox = null
 var _radius_spin: SpinBox = null
 var _color_pick: ColorPickerButton = null
+var _speed_slider: HSlider = null
+var _speed_value_label: Label = null
 var _editor_syncing: bool = false
 
 var _clicking: bool = false
@@ -167,6 +169,10 @@ func _acquire_ui() -> void:
 		_radius_spin.value_changed.connect(_on_radius_changed)
 	if _color_pick != null:
 		_color_pick.color_changed.connect(_on_color_changed)
+	var vbox: Container = editor.get_node_or_null("Margin/VBox") as Container
+	if vbox != null:
+		_speed_slider = _add_prop_slider(vbox, "speed", 0.0, 30.0, 0.1, _on_speed_changed)
+	_sync_speed_slider()
 	_sync_editor_from_focus()
 
 
@@ -354,7 +360,7 @@ func _physics_process(_delta: float) -> void:
 func _frame() -> void:
 	var tops: Array[CelestialSystem] = _get_all_tops()
 	for t in tops:
-		t._step_recursive()
+		t._step_recursive(dt_fixed * sim_speed)
 	# 每帧重算 Hill: SOI 随轨道位置动态变化(圆轨道不变; 椭圆/多体/rogue 子系统随 sdist 变)。
 	_recompute_hill_all()
 	if not _focus_list.is_empty():
@@ -378,8 +384,10 @@ func _frame() -> void:
 	_update_camera_and_hud()
 
 
-func _step_recursive() -> void:
-	var dt := dt_fixed * sim_speed
+func _step_recursive(dt: float) -> void:
+	# dt 由顶层(main_top)按 dt_fixed*sim_speed 算一次, 沿递归传下去 → 时间流速是全局因子,
+	# 整棵树所有层级天体统一加减速。(旧版每层用自己的 sim_speed, 而滑块只改顶层 group,
+	# 子系统 CS1/Planet/Moon 的 sim_speed 全是默认 1.0 → 拖滑块行星不动 = "没起作用"。)
 	var nsub: int = max(substeps, 1)
 	for _i in range(nsub):
 		sim.step(dt / float(nsub))
@@ -414,7 +422,7 @@ func _step_recursive() -> void:
 		sub._bvx = _bvx + pb.vx
 		sub._bvy = _bvy + pb.vy
 		sub._bvz = _bvz + pb.vz
-		sub._step_recursive()
+		sub._step_recursive(dt)
 
 
 func _render_recursive(ox: float, oy: float, oz: float) -> void:
@@ -1433,9 +1441,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_TAB:
 				focus_idx = (focus_idx + 1) % max(_focus_list.size(), 1)
 			KEY_BRACKETRIGHT:
-				sim_speed = min(sim_speed + 0.2, 10.0)
+				sim_speed = min(sim_speed + 0.2, 30.0)
+				_sync_speed_slider()
 			KEY_BRACKETLEFT:
 				sim_speed = max(sim_speed - 0.2, 0.0)
+				_sync_speed_slider()
 			KEY_F2:
 				_show_soi = not _show_soi
 				for sph in _soi_spheres:
@@ -1518,6 +1528,8 @@ func _build_celestial_editor() -> void:
 	_mass_spin = _add_prop_spin(vbox, "mass", 0.0, 10000000.0, 10.0, _on_mass_changed)
 	_radius_spin = _add_prop_spin(vbox, "radius", 1.0, 5000.0, 5.0, _on_radius_changed)
 	_color_pick = _add_prop_color(vbox, "color", _on_color_changed)
+	_speed_slider = _add_prop_slider(vbox, "speed", 0.0, 10.0, 0.1, _on_speed_changed)
+	_sync_speed_slider()
 	_sync_editor_from_focus()
 
 
@@ -1554,6 +1566,32 @@ func _add_prop_color(parent: Control, label_text: String, callback: Callable) ->
 	cp.color_changed.connect(callback)
 	row.add_child(cp)
 	return cp
+
+
+func _add_prop_slider(parent: Control, label_text: String, minv: float, maxv: float, step: float, callback: Callable) -> HSlider:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	parent.add_child(row)
+	var l := Label.new()
+	l.text = label_text
+	l.custom_minimum_size = Vector2(52, 0)
+	row.add_child(l)
+	var slider := HSlider.new()
+	slider.min_value = minv
+	slider.max_value = maxv
+	slider.step = step
+	slider.value = sim_speed
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	slider.custom_minimum_size = Vector2(90, 0)
+	slider.value_changed.connect(callback)
+	row.add_child(slider)
+	# 数值显示: 拖动时实时反馈当前 sim_speed, 确认滑块生效(也方便精确调)。
+	_speed_value_label = Label.new()
+	_speed_value_label.text = "%.1f" % sim_speed
+	_speed_value_label.custom_minimum_size = Vector2(38, 0)
+	_speed_value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	row.add_child(_speed_value_label)
+	return slider
 
 
 func _current_focus() -> Celestial:
@@ -1676,6 +1714,25 @@ func _on_color_changed(c: Color) -> void:
 	var fc: Celestial = _current_focus()
 	if fc != null:
 		fc.color = c
+
+
+func _on_speed_changed(v: float) -> void:
+	if _editor_syncing:
+		return
+	sim_speed = clampf(v, 0.0, 30.0)
+	if _speed_value_label != null:
+		_speed_value_label.text = "%.1f" % sim_speed
+
+
+# 键盘 [/] 改 sim_speed 后, 把滑块显示同步过来(双向)。
+func _sync_speed_slider() -> void:
+	if _speed_slider == null:
+		return
+	_editor_syncing = true
+	_speed_slider.value = sim_speed
+	_editor_syncing = false
+	if _speed_value_label != null:
+		_speed_value_label.text = "%.1f" % sim_speed
 
 
 func _build_hud() -> void:
