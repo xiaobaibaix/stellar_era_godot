@@ -1,7 +1,7 @@
 [gd_scene format=3 uid="uid://dvvumqb10vtc8"]
 
 [ext_resource type="Script" uid="uid://wtc1vb7c6gl" path="res://celestial_system.gd" id="1_a48o5"]
-[ext_resource type="Script" path="res://scenes/soi_editor_preview.gd" id="2_soiprev"]
+[ext_resource type="Script" uid="uid://cfvcnwn7ts6n6" path="res://scenes/soi_editor_preview.gd" id="2_soiprev"]
 
 [node name="CelestialSystem" type="Node3D" unique_id=1785284761]
 script = ExtResource("1_a48o5")

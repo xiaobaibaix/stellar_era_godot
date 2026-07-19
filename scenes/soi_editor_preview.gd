@@ -408,37 +408,91 @@ func _soi_radius_on_ray(T: Celestial, sources: Array[Celestial], use_ball: bool,
 const _REPARENT_COOLDOWN: int = 30   # 帧(~0.5s @60fps)
 var _proc_count: int = 0
 var _last_reparent_proc: Dictionary = {}   # c.get_instance_id() -> proc_count
+var _last_reparent_pos: Dictionary = {}   # c.get_instance_id() -> Vector3 上次 reparent 基准位(防静止抖动)
+@export var _diag_proc: int = 0   # 诊断(读两次看递增): _process 计数, 不增=@tool没在编辑器跑
+@export var _diag_sel: int = 0   # 诊断: 上帧选中的非dominant Celestial 数(0=没选/选了MoonSystem或dominant)
+@export var _diag_last: String = ""   # 诊断: "Moon:A->B" / "stable@A" / "cooldown" / "nosel" / "Moon:not in top"
 
 
 func _try_auto_reparent(top: CelestialSystem) -> void:
 	_proc_count += 1
+	_diag_proc += 1
 	var sel := EditorInterface.get_selection()
 	if sel == null:
+		_diag_sel = 0
+		_diag_last = "nosel(null)"
 		return
+	var sel_nodes = sel.get_selected_nodes()
 	_sync_all_world(top)   # η 判定需全树天体世界位(_wx/_wy/_wz)
-	for node in sel.get_selected_nodes():
-		if not (node is Celestial):
-			continue
-		var c: Celestial = node as Celestial
-		if c.is_dominant:
-			continue   # dominant 是 SOI 中心, 不挪
-		var cur: Node = c.get_parent()
-		if not (cur is CelestialSystem):
-			continue
-		if not _is_in_subtree(c, top):
-			continue   # 选中天体不在本顶层树(用户选了别的场景)
-		var cid: int = c.get_instance_id()
-		if _last_reparent_proc.has(cid) and _proc_count - int(_last_reparent_proc[cid]) < _REPARENT_COOLDOWN:
-			continue   # cooldown 内不重复
-		var p: Vector3 = c.global_position
-		# c 当 dominant 的"私有容器"(如 Moon 之于 MoonSystem)永远 exclude —— c 在自己中心 η=0 会被
-		# 永久自捕获, 无法降级或被别处捕获。无论 c 当前挂在哪, 这个容器都不该捕获 c。
-		var self_sys: CelestialSystem = _find_owning_dominant_system(top, c)
-		var desired: CelestialSystem = _capture_descend_edit(top, p.x, p.y, p.z, self_sys)
-		if desired == null or desired == cur:
-			continue
-		_reparent_keep_world(c, desired)
-		_last_reparent_proc[cid] = _proc_count
+	_diag_sel = 0
+	if sel_nodes.is_empty():
+		_diag_last = "nosel"
+	for node in sel_nodes:
+		if node is Celestial:
+			var c: Celestial = node as Celestial
+			# 中心天体(dominant)固定不挪 —— 移动卫星系统 = 移动容器(MoonSystem), 不是掏出中心天体。
+			# is_dominant(Star/Planet)或 fallback 当 dominant(Moon之于MoonSystem)都算。否则用户手动
+			# 拖 Moon 到 MoonSystem 整理结构时, @tool 会立即 reparent 覆盖(Moon 被判归 CS1 弹走)。
+			if c.is_dominant:
+				continue
+			var self_sys: CelestialSystem = _find_owning_dominant_system(top, c)
+			if self_sys != null:
+				_diag_last = "%s: dom of %s (中心天体, 固定)" % [c.name, self_sys.name]
+				continue
+			_diag_sel += 1
+			var cur: Node = c.get_parent()
+			if not (cur is CelestialSystem):
+				_diag_last = "%s: cur not CS" % c.name
+				continue
+			if not _is_in_subtree(c, top):
+				_diag_last = "%s: not in top" % c.name
+				continue
+			var cid: int = c.get_instance_id()
+			var p: Vector3 = c.global_position
+			if _last_reparent_proc.has(cid):
+				var last_pos: Vector3 = _last_reparent_pos[cid]
+				if p.distance_to(last_pos) < 1.0 and _proc_count - int(_last_reparent_proc[cid]) < _REPARENT_COOLDOWN:
+					_diag_last = "%s: cooldown" % c.name
+					continue
+			# c 是游离天体(不当任何系统 dominant), 按 SOI 归属 reparent。
+			var desired: CelestialSystem = _capture_descend_edit(top, p.x, p.y, p.z, null)
+			if desired == null or desired == cur:
+				_diag_last = "%s: stable@%s" % [c.name, cur.name]
+				continue
+			_diag_last = "%s: %s->%s" % [c.name, cur.name, desired.name]
+			_reparent_keep_world(c, desired)
+			_last_reparent_proc[cid] = _proc_count
+			_last_reparent_pos[cid] = p
+		elif node is CelestialSystem:
+			# 选中"系统容器"(如 MoonSystem, 内含 Moon 当 dominant): 整个系统按 SOI 归属 reparent。
+			# 对应运行时 _reparent_subsystem。用户架构: 卫星=容器, 月球是容器中心。exclude 自己防自捕获。
+			var sub: CelestialSystem = node as CelestialSystem
+			var scur: Node = sub.get_parent()
+			if not (scur is CelestialSystem) or scur == top:
+				_diag_last = "%s: sub top" % sub.name
+				continue   # 顶层/直接挂顶层群的不 reparent
+			if not _is_in_subtree(sub, top):
+				_diag_last = "%s: not in top" % sub.name
+				continue
+			if _dominant_of(sub) == null:
+				_diag_last = "%s: no dom" % sub.name
+				continue   # 空群(无dominant)无归属意义
+			_diag_sel += 1
+			var scid: int = sub.get_instance_id()
+			var sp: Vector3 = sub.global_position
+			if _last_reparent_proc.has(scid):
+				var slast: Vector3 = _last_reparent_pos[scid]
+				if sp.distance_to(slast) < 1.0 and _proc_count - int(_last_reparent_proc[scid]) < _REPARENT_COOLDOWN:
+					_diag_last = "%s: cooldown" % sub.name
+					continue
+			var sdesired: CelestialSystem = _capture_descend_edit(top, sp.x, sp.y, sp.z, sub)
+			if sdesired == null or sdesired == scur:
+				_diag_last = "%s: stable@%s" % [sub.name, scur.name]
+				continue
+			_diag_last = "%s: %s->%s" % [sub.name, scur.name, sdesired.name]
+			_reparent_keep_world(sub, sdesired)
+			_last_reparent_proc[scid] = _proc_count
+			_last_reparent_pos[scid] = sp
 
 
 # 找 c 当 dominant 的系统(c 的"私有容器", 如 Moon 之于 MoonSystem)。永远 exclude —— 否则 c 在
@@ -484,9 +538,10 @@ func _inside_potential_surface_edit(sub: CelestialSystem, px: float, py: float, 
 	var sources: Array[Celestial] = []
 	_collect_perturbers_edit(sub, sources)
 	if sources.is_empty():
-		var dx: float = px - T._wx
-		var dy: float = py - T._wy
-		var dz: float = pz - T._wz
+		var Tp := T.global_position
+		var dx: float = px - Tp.x
+		var dy: float = py - Tp.y
+		var dz: float = pz - Tp.z
 		var hill_est: float = _hill_estimate(sub, T)
 		var r_in: float = hill_est * eta_thresh
 		return (dx * dx + dy * dy + dz * dz) < r_in * r_in
@@ -497,9 +552,12 @@ func _inside_potential_surface_edit(sub: CelestialSystem, px: float, py: float, 
 func _max_eta_edit(T: Celestial, sources: Array, px: float, py: float, pz: float, g: float) -> float:
 	if sources.is_empty():
 		return 0.0
-	var rx: float = px - T._wx
-	var ry: float = py - T._wy
-	var rz: float = pz - T._wz
+	# 直接用 global_position(不依赖 _wx —— 后者经 _walk_sync 的 `is Celestial` 同步, 脚本类检查在 @tool
+	# 对实例化节点不可靠, 会漏同步导致 η≈0 误判)。
+	var Tp := T.global_position
+	var rx: float = px - Tp.x
+	var ry: float = py - Tp.y
+	var rz: float = pz - Tp.z
 	var r2: float = rx * rx + ry * ry + rz * rz
 	if r2 < 1e-6:
 		return 0.0
@@ -508,16 +566,17 @@ func _max_eta_edit(T: Celestial, sources: Array, px: float, py: float, pz: float
 		return 0.0
 	var max_eta: float = 0.0
 	for S in sources:
-		var vpx: float = S._wx - px
-		var vpy: float = S._wy - py
-		var vpz: float = S._wz - pz
+		var Sp: Vector3 = S.global_position
+		var vpx: float = Sp.x - px
+		var vpy: float = Sp.y - py
+		var vpz: float = Sp.z - pz
 		var dp2: float = vpx * vpx + vpy * vpy + vpz * vpz
 		if dp2 < 1e-6:
 			continue
 		var kp: float = g * S.mass / (dp2 * sqrt(dp2))
-		var vtx: float = S._wx - T._wx
-		var vty: float = S._wy - T._wy
-		var vtz: float = S._wz - T._wz
+		var vtx: float = Sp.x - Tp.x
+		var vty: float = Sp.y - Tp.y
+		var vtz: float = Sp.z - Tp.z
 		var dt2: float = vtx * vtx + vty * vty + vtz * vtz
 		if dt2 < 1e-6:
 			continue
@@ -538,11 +597,13 @@ func _hill_estimate(sub: CelestialSystem, T: Celestial) -> float:
 	_collect_perturbers_edit(sub, sources)
 	if sources.is_empty():
 		return 1e12
+	var Tp := T.global_position
 	var nearest: float = 1e30
 	for S in sources:
-		var dx: float = S._wx - T._wx
-		var dy: float = S._wy - T._wy
-		var dz: float = S._wz - T._wz
+		var Sp: Vector3 = S.global_position
+		var dx: float = Sp.x - Tp.x
+		var dy: float = Sp.y - Tp.y
+		var dz: float = Sp.z - Tp.z
 		var d: float = sqrt(dx * dx + dy * dy + dz * dz)
 		if d < nearest:
 			nearest = d
@@ -550,17 +611,17 @@ func _hill_estimate(sub: CelestialSystem, T: Celestial) -> float:
 
 
 # reparent 保持世界位 + owner。owner 不变 → 存盘到 main.tscn 新路径, celestial.tscn 实例关系不破坏。
-func _reparent_keep_world(c: Celestial, to: CelestialSystem) -> void:
-	var wp: Vector3 = c.global_position
+func _reparent_keep_world(c: Node3D, to: CelestialSystem) -> void:
+	# Node.reparent(new_parent, keep_global_transform=true): Godot 内置, 正确带所有子节点跟随 +
+	# 世界位保持 + 实例关系。旧的手动 remove/add 会让 celestial.tscn 实例子节点(如 Moon 嵌在
+	# MoonSystem 实例里)在跨实例 reparent 时脱落丢失。
 	var prev_owner: Node = c.owner
 	var cur: Node = c.get_parent()
 	var from_name: String = cur.name if cur != null else "?"
-	if cur != null:
-		cur.remove_child(c)
-	to.add_child(c)
+	c.reparent(to, true)
+	# owner 保持(存盘归属不变)——reparent 不改 owner, 但跨实例保险重设。
 	if prev_owner != null and _is_in_subtree(to, prev_owner):
 		c.owner = prev_owner
-	c.global_position = wp
 	print("[SOI-edit] %s: %s -> %s" % [c.name, from_name, to.name])
 
 
