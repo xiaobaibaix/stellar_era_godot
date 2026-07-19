@@ -105,7 +105,7 @@ var _mass_spin: SpinBox = null
 var _radius_spin: SpinBox = null
 var _color_pick: ColorPickerButton = null
 var _speed_slider: HSlider = null
-var _speed_value_label: Label = null
+var _speed_spin: SpinBox = null
 var _editor_syncing: bool = false
 
 var _clicking: bool = false
@@ -171,8 +171,8 @@ func _acquire_ui() -> void:
 		_color_pick.color_changed.connect(_on_color_changed)
 	var vbox: Container = editor.get_node_or_null("Margin/VBox") as Container
 	if vbox != null:
-		_speed_slider = _add_prop_slider(vbox, "speed", 0.0, 30.0, 0.1, _on_speed_changed)
-	_sync_speed_slider()
+		_speed_slider = _add_prop_slider(vbox, "speed", 0.0, 30.0, 0.01, _on_speed_changed)
+	_sync_speed_controls()
 	_sync_editor_from_focus()
 
 
@@ -1442,10 +1442,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				focus_idx = (focus_idx + 1) % max(_focus_list.size(), 1)
 			KEY_BRACKETRIGHT:
 				sim_speed = min(sim_speed + 0.2, 30.0)
-				_sync_speed_slider()
+				_sync_speed_controls()
 			KEY_BRACKETLEFT:
 				sim_speed = max(sim_speed - 0.2, 0.0)
-				_sync_speed_slider()
+				_sync_speed_controls()
 			KEY_F2:
 				_show_soi = not _show_soi
 				for sph in _soi_spheres:
@@ -1529,7 +1529,7 @@ func _build_celestial_editor() -> void:
 	_radius_spin = _add_prop_spin(vbox, "radius", 1.0, 5000.0, 5.0, _on_radius_changed)
 	_color_pick = _add_prop_color(vbox, "color", _on_color_changed)
 	_speed_slider = _add_prop_slider(vbox, "speed", 0.0, 10.0, 0.1, _on_speed_changed)
-	_sync_speed_slider()
+	_sync_speed_controls()
 	_sync_editor_from_focus()
 
 
@@ -1576,21 +1576,28 @@ func _add_prop_slider(parent: Control, label_text: String, minv: float, maxv: fl
 	l.text = label_text
 	l.custom_minimum_size = Vector2(52, 0)
 	row.add_child(l)
+	# 滑块: 粗调(拖动)。
 	var slider := HSlider.new()
 	slider.min_value = minv
 	slider.max_value = maxv
 	slider.step = step
 	slider.value = sim_speed
 	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	slider.custom_minimum_size = Vector2(90, 0)
+	slider.custom_minimum_size = Vector2(80, 0)
 	slider.value_changed.connect(callback)
 	row.add_child(slider)
-	# 数值显示: 拖动时实时反馈当前 sim_speed, 确认滑块生效(也方便精确调)。
-	_speed_value_label = Label.new()
-	_speed_value_label.text = "%.1f" % sim_speed
-	_speed_value_label.custom_minimum_size = Vector2(38, 0)
-	_speed_value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	row.add_child(_speed_value_label)
+	# 数值框: 精调(可键盘输入, 两位小数)。与滑块/键盘三方双向联动
+	# (经 _on_speed_changed 设值 + _sync_speed_controls 回写, _editor_syncing 防循环)。
+	var spin := SpinBox.new()
+	spin.min_value = minv
+	spin.max_value = maxv
+	spin.step = step
+	spin.value = sim_speed
+	spin.custom_minimum_size = Vector2(78, 0)
+	spin.suffix = "x"
+	spin.value_changed.connect(callback)
+	row.add_child(spin)
+	_speed_spin = spin
 	return slider
 
 
@@ -1720,19 +1727,18 @@ func _on_speed_changed(v: float) -> void:
 	if _editor_syncing:
 		return
 	sim_speed = clampf(v, 0.0, 30.0)
-	if _speed_value_label != null:
-		_speed_value_label.text = "%.1f" % sim_speed
+	_sync_speed_controls()
 
 
-# 键盘 [/] 改 sim_speed 后, 把滑块显示同步过来(双向)。
-func _sync_speed_slider() -> void:
-	if _speed_slider == null:
-		return
+# 滑块/数值框/键盘 三方同步到当前 sim_speed(键盘 [/] 改 sim_speed 后也调)。
+# _editor_syncing 屏蔽联动控件的 value_changed 回调, 防互相触发死循环。
+func _sync_speed_controls() -> void:
 	_editor_syncing = true
-	_speed_slider.value = sim_speed
+	if _speed_slider != null:
+		_speed_slider.value = sim_speed
+	if _speed_spin != null:
+		_speed_spin.value = sim_speed
 	_editor_syncing = false
-	if _speed_value_label != null:
-		_speed_value_label.text = "%.1f" % sim_speed
 
 
 func _build_hud() -> void:
