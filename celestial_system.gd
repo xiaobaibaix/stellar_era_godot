@@ -43,6 +43,9 @@ static var global_oz: float = 0.0
 ## SOI 等势面 mesh 重建间隔(帧)。每顶点要步长扫描+二分求 η=1 半径, 比解析椭圆贵 → 默认 2。
 ## 天体多/卡顿可调大; 1 = 每帧重建(最丝滑)。
 @export_range(1, 30, 1) var soi_rebuild_interval: int = 3
+## 远处天体在屏幕上只剩几个像素点不到 → 点击半径随相机距离动态扩大,
+## 保证碰撞球在屏幕上至少占 pick_min_pixels 像素(相机越远, 世界半径越大)。
+@export_range(2, 64, 1) var pick_min_pixels: int = 12
 
 var sim: NBodySystem
 var members: Array[Celestial] = []
@@ -1406,6 +1409,14 @@ func _pick_focus(mouse_pos: Vector2) -> void:
 		var c: Celestial = _focus_list[i]
 		var center: Vector3 = (c as Node3D).global_position
 		var R: float = max(c.radius * 1.5, 50.0)
+		# 相机越远 → 天体在屏幕上越小 → 点击半径随距离动态扩大,
+		# 让碰撞球在屏幕上至少占 pick_min_pixels 像素(屏幕角半径 → 世界半径)。
+		# 屏幕高 vp_h 像素对应 fov 竖直视场, 故每像素 ≈ fov/vp_h 弧度,
+		# 世界半径 ≈ 相机距离 × tan(半视场) × 2 × (像素占比)。
+		var dist_cam: float = center.distance_to(origin)
+		var vp_h: float = maxf(get_viewport().get_visible_rect().size.y, 1.0)
+		var r_screen: float = dist_cam * tan(deg_to_rad(orbit_camera.fov) * 0.5) * 2.0 * (float(pick_min_pixels) / vp_h)
+		R = maxf(R, r_screen)
 		var oc: Vector3 = origin - center
 		var bb: float = oc.dot(rdir)
 		var cc: float = oc.dot(oc) - R * R
