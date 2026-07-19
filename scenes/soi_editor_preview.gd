@@ -1,13 +1,18 @@
 @tool
 class_name SOIEditorPreview
 extends MeshInstance3D
-## 编辑器内 SOI 等势面预览: 挂在预制体 celestial_system.tscn 的 SOI 节点上(仅借宿, 自身 mesh 不动)。
-## 实际渲染到一个 INTERNAL_MODE_BACK 临时子节点(挂在本系统下) → 不进场景存盘、不污染 git diff。
-## 用场景树里的位置/质量算本系统 SOI 边界并实时显示, 方便放置子天体时直观看到引力作用范围。
-## 摄动源收集复刻运行时 _collect_perturbers; mesh 数学复刻 _make_potential_surface_mesh/_soi_radius_on_ray
-## (必须本地复制: celestial_system.gd 非 @tool, 编辑器里其实例是 placeholder, 方法调用会失败;
-##  仅 bare G 换成传参 g, 由 sys.G 读出)。保证编辑器看到的形状 = 运行时形状(同一等势面 η=1)。
-## 运行时由 celestial_system.gd 接管 SOI; 本脚本 is_editor_hint() 守卫, 运行时 _process 直接返回。
+## 编辑器内 SOI 等势面 + 轨道预览: 挂在 celestial_system.tscn 的 SOI 节点上(仅借宿, 自身 mesh 不动)。
+## 实际渲染到 owner=null 临时子节点(挂在本系统下) → 不进场景存盘、不污染 git diff。
+##
+## SOI: 多体引力 η=1 等势面(复刻 _make_potential_surface_mesh/_soi_radius_on_ray)。
+##   无 is_dominant 子节点时 → 取质量最大的 Celestial 当 dominant(用户: "月球也要画, 就算没有也要画")。
+##   顶层(parent 非 CelestialSystem) / 无外部摄动源 → 不画(无穷大, 同运行时 _build_soi_visuals_all 守卫)。
+## Orbit: 绕 dominant 的初始圆轨道。运行时无速度数据 → 用 add_orbiting 的圆速度(v=√(G·M_dom/dist),
+##   moon 倾角 0.25)从场景树位置复刻, 画整圆(= 运行时 osculating 椭圆的初始态)。
+##   每个 member/child_system 绕本系统 dominant 各一个圆。月球轨迹 = PlanetSystem1 下 MoonSystem(sub)绕 Planet 的圆。
+##
+## 运行时由 celestial_system.gd 接管; is_editor_hint() 守卫, 运行时 _process 直接 return + 清预览。
+## celestial_system.gd 非 @tool → 其实例是 placeholder, 方法调用失败 → SOI 数学须本地复制(bare G→传参 sys.G)。
 
 const _PREVIEW_SHADER := """
 shader_type spatial;
@@ -22,71 +27,102 @@ void fragment() {
 }
 """
 
+const _ORBIT_SEG: int = 64
+
 var _last_sig: String = ""
-var _preview: MeshInstance3D = null
+var _soi_preview: MeshInstance3D = null
+var _orbit_preview: MeshInstance3D = null
 
 
 func _process(_delta: float) -> void:
 	if not Engine.is_editor_hint():
 		# 运行时: 清掉可能残留的预览子节点(理论不会被存盘加载, 双保险), 交给 celestial_system.gd。
-		_clear_preview()
+		_clear_previews()
 		return
 	var sys: CelestialSystem = get_parent() as CelestialSystem
 	if sys == null:
 		return
-	# 顶层系统(parent 非 CelestialSystem)SOI 无穷大, 不画(同运行时 _build_soi_visuals_all 的守卫)。
-	if not (sys.get_parent() is CelestialSystem):
-		_clear_preview()
-		_last_sig = ""
-		return
+	var parent_is_cs: bool = sys.get_parent() is CelestialSystem
 	var dom: Celestial = _dominant_of(sys)
-	if dom == null:
-		_clear_preview()
-		_last_sig = ""
-		return
-	# 摄动源 = 沿祖先链的祖辈 dominant + 同层兄弟 dominant(复刻 _collect_perturbers, 用场景树)。
 	var sources: Array[Celestial] = []
-	_collect_perturbers_edit(sys, sources)
-	# 位置/质量未变则跳过重建(编辑器空闲时近乎零开销, 仅在拖动天体时重算)。
+	if parent_is_cs:
+		_collect_perturbers_edit(sys, sources)
+	# 位置/质量/G 未变则跳过重建(编辑器空闲时近乎零开销)。
 	var sig := _signature(sys, dom, sources)
 	if sig == _last_sig:
 		return
 	_last_sig = sig
-	if sources.is_empty():
-		# 无外部摄动(如孤立子系统) → SOI 无穷大, 不画。
-		_clear_preview()
-		return
-	# 同步编辑器世界位到 _wx(_soi_radius_on_ray 读 T._wx/sources._wx; 运行时由 _step 重设, 不影响)。
-	_sync_world(dom)
-	for s in sources:
-		_sync_world(s)
-	var pv: MeshInstance3D = _ensure_preview(sys)
-	# mesh 原点取系统世界位 → 顶点为系统局部坐标; 预览节点(系下局部 0)随之, 拖动系统时 mesh 跟随。
-	var so: Vector3 = sys.global_position
-	pv.mesh = _make_potential_surface_mesh(dom, sources, so.x, so.y, so.z, 24, 12, 0.0, sys.G)
+
+	# --- SOI: 仅非顶层 + 有 dominant + 有外部摄动源 才画 ---
+	if parent_is_cs and dom != null and not sources.is_empty():
+		_sync_world(dom)
+		for s in sources:
+			_sync_world(s)
+		var pv: MeshInstance3D = _ensure_soi(sys)
+		var so: Vector3 = sys.global_position
+		pv.mesh = _make_potential_surface_mesh(dom, sources, so.x, so.y, so.z, 24, 12, 0.0, sys.G)
+	else:
+		_clear_soi()
+
+	# --- Orbit: 有 dominant + 有绕轨天体 才画(顶层恒星系的行星轨道也画) ---
+	if dom != null:
+		var omesh: ArrayMesh = _make_orbit_mesh(sys, dom)
+		if omesh != null:
+			var ov: MeshInstance3D = _ensure_orbit(sys)
+			ov.mesh = omesh
+		else:
+			_clear_orbit()
+	else:
+		_clear_orbit()
 
 
-# 临时预览节点: owner=null → 不随场景存盘(纯编辑器预览; 运行时不加载, celestial_system.gd 接管 SOI)。
-func _ensure_preview(sys: CelestialSystem) -> MeshInstance3D:
-	if _preview != null and is_instance_valid(_preview):
-		return _preview
+# ===== 预览节点管理(owner=null → 不存盘) =====
+
+func _ensure_soi(sys: CelestialSystem) -> MeshInstance3D:
+	if _soi_preview != null and is_instance_valid(_soi_preview):
+		return _soi_preview
 	var pv := MeshInstance3D.new()
 	pv.name = "__SOIPreview__"
-	pv.material_override = _make_preview_material()
+	pv.material_override = _make_soi_material()
 	sys.add_child(pv)
 	pv.owner = null
-	_preview = pv
+	_soi_preview = pv
 	return pv
 
 
-func _clear_preview() -> void:
-	if _preview != null and is_instance_valid(_preview):
-		_preview.queue_free()
-	_preview = null
+func _ensure_orbit(sys: CelestialSystem) -> MeshInstance3D:
+	if _orbit_preview != null and is_instance_valid(_orbit_preview):
+		return _orbit_preview
+	var pv := MeshInstance3D.new()
+	pv.name = "__OrbitPreview__"
+	pv.material_override = _make_orbit_material()
+	sys.add_child(pv)
+	pv.owner = null
+	_orbit_preview = pv
+	return pv
 
 
-# 非顶层系统用蓝色(同运行时 _make_soi_material 的 child 色; 顶层不画, 不到这里)。
-func _make_preview_material() -> Material:
+func _clear_previews() -> void:
+	_clear_soi()
+	_clear_orbit()
+
+
+func _clear_soi() -> void:
+	if _soi_preview != null and is_instance_valid(_soi_preview):
+		_soi_preview.queue_free()
+	_soi_preview = null
+
+
+func _clear_orbit() -> void:
+	if _orbit_preview != null and is_instance_valid(_orbit_preview):
+		_orbit_preview.queue_free()
+	_orbit_preview = null
+
+
+# ===== 材质 =====
+
+# 非顶层系统 SOI 用蓝色(同运行时 _make_soi_material 的 child 色)。
+func _make_soi_material() -> Material:
 	var mat := ShaderMaterial.new()
 	var sh := Shader.new()
 	sh.code = _PREVIEW_SHADER
@@ -95,12 +131,29 @@ func _make_preview_material() -> Material:
 	return mat
 
 
-# 本系统主导体 = 子里首个 is_dominant 的 Celestial(同运行时 _collect 的判定)。
+# 轨道用淡蓝灰(同运行时 _make_orbit_material)。
+func _make_orbit_material() -> Material:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.6, 0.65, 0.8, 0.5)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.no_depth_test = true
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return mat
+
+
+# ===== 系统 / 摄动源 / 签名 =====
+
+# 本系统主导体: 优先 is_dominant; 都没有 → 质量最大的 Celestial(用户要"月球也画", 运行时 _init_physics 同款 fallback)。
 func _dominant_of(sys: CelestialSystem) -> Celestial:
+	var best: Celestial = null
 	for c in sys.get_children():
-		if c is Celestial and c.is_dominant:
-			return c
-	return null
+		if c is Celestial:
+			if c.is_dominant:
+				return c
+			if best == null or c.mass > best.mass:
+				best = c
+	return best
 
 
 # 编辑器版摄动源收集: 复刻 _collect_perturbers(celestial_system.gd:772-785), 用场景树代替运行时字段。
@@ -130,17 +183,63 @@ func _sync_world(c: Celestial) -> void:
 	c._wz = gp.z
 
 
+# 签名覆盖 SOI(dom+sources) 与 Orbit(本系统所有天体位置) 的全部输入 + G。任一变化才重建。
 func _signature(sys: CelestialSystem, dom: Celestial, sources: Array) -> String:
-	var sp: Vector3 = sys.global_position
-	var dp: Vector3 = dom.global_position
-	var s := "sys:%.3f,%.3f,%.3f|dom:%.3f,%.3f,%.3f:%.3f" % [sp.x, sp.y, sp.z, dp.x, dp.y, dp.z, dom.mass]
-	for c in sources:
-		var cp: Vector3 = c.global_position
-		s += "|s:%.3f,%.3f,%.3f:%.3f" % [cp.x, cp.y, cp.z, c.mass]
+	var s := "G:%.4f" % sys.G
+	if dom != null:
+		s += "|dom:%.3f,%.3f,%.3f:%.3f" % [dom.position.x, dom.position.y, dom.position.z, dom.mass]
+	for c in sys.get_children():
+		if c is Celestial:
+			s += "|c:%.3f,%.3f,%.3f:%.3f:%d:%s" % [c.position.x, c.position.y, c.position.z, c.mass, int(c.is_dominant), c.type]
+		elif c is CelestialSystem:
+			s += "|cs:%.3f,%.3f,%.3f" % [c.position.x, c.position.y, c.position.z]
+	for src in sources:
+		var gp: Vector3 = src.global_position
+		s += "|src:%.3f,%.3f,%.3f:%.3f" % [gp.x, gp.y, gp.z, src.mass]
 	return s
 
 
-# ===== 以下两函数为 celestial_system.gd 的 _make_potential_surface_mesh / _soi_radius_on_ray 逐字副本 =====
+# ===== 轨道: 绕 dominant 的初始圆(add_orbiting 圆速度 + 倾角, 整圆采样) =====
+
+func _make_orbit_mesh(sys: CelestialSystem, dom: Celestial) -> ArrayMesh:
+	var dom_local: Vector3 = dom.position
+	var positions := PackedVector3Array()
+	for c in sys.get_children():
+		if c is Celestial:
+			if c == dom:
+				continue
+			_append_circle(positions, dom_local, c.position, 0.25 if c.type == "moon" else 0.0)
+		elif c is CelestialSystem:
+			# 子系统质点 inclination=0(_init_physics 对 sub 不传 inclination)。
+			_append_circle(positions, dom_local, c.position, 0.0)
+	if positions.is_empty():
+		return null
+	var arr_mesh := ArrayMesh.new()
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = positions
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arrays)
+	return arr_mesh
+
+
+# 圆轨道平面 = xz 平面绕 x 轴倾斜 inc(add_orbiting 的 inclination 旋转)。
+# 基: pHat=(1,0,0); qHat=(0,−sin·inc, cos·inc)。点 = dom_local + dist·(cos·pHat + sin·qHat)。
+func _append_circle(positions: PackedVector3Array, dom_local: Vector3, body_local: Vector3, inc: float) -> void:
+	var rel: Vector3 = body_local - dom_local
+	var dist: float = rel.length()
+	if dist < 1.0:
+		dist = 2000.0
+	var qy: float = -sin(inc)
+	var qz: float = cos(inc)
+	var n: int = _ORBIT_SEG
+	for i in range(n):
+		var t0: float = (float(i) / float(n)) * TAU
+		var t1: float = (float(i + 1) / float(n)) * TAU
+		positions.append(dom_local + dist * Vector3(cos(t0), sin(t0) * qy, sin(t0) * qz))
+		positions.append(dom_local + dist * Vector3(cos(t1), sin(t1) * qy, sin(t1) * qz))
+
+
+# ===== SOI: celestial_system.gd 的 _make_potential_surface_mesh / _soi_radius_on_ray 逐字副本 =====
 # (仅 bare G → 传参 g)。改其一务必同步另一处。
 
 func _make_potential_surface_mesh(T: Celestial, sources: Array[Celestial],
