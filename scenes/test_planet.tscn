@@ -4,6 +4,8 @@
 [ext_resource type="PackedScene" uid="uid://nuulebu1sk8m" path="res://scenes/planet.tscn" id="1_wovwi"]
 [ext_resource type="Script" uid="uid://7boxikbjeden" path="res://scripts/core/planet_params.gd" id="2_cptss"]
 [ext_resource type="Script" uid="uid://c18n2n3tlwx8e" path="res://scripts/render/atmosphere_compositor.gd" id="2_hisq8"]
+[ext_resource type="PackedScene" uid="uid://m7jxxg83yibb" path="res://scenes/player.tscn" id="5_216rf"]
+[ext_resource type="Script" path="res://scripts/core/camera_focus.gd" id="7_cfocus"]
 
 [sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_b6b10"]
 panorama = ExtResource("1_cptss")
@@ -34,8 +36,6 @@ resource_local_to_scene = true
 script = ExtResource("2_cptss")
 radius = 326.0
 showInset = false
-showClouds = false
-showGodrays = false
 
 [node name="TestPlanet" type="Node" unique_id=233593354]
 
@@ -43,9 +43,21 @@ showGodrays = false
 environment = SubResource("Environment_216rf")
 compositor = SubResource("Compositor_216rf")
 
-[node name="Planet" parent="." unique_id=1923769825 node_paths=PackedStringArray("camera") instance=ExtResource("1_wovwi")]
+[node name="Planet" parent="." unique_id=1923769825 node_paths=PackedStringArray("camera", "sun_lights") instance=ExtResource("1_wovwi")]
 params = SubResource("Resource_4qwjy")
 camera = NodePath("../Camera3D")
+sun_lights = [null, NodePath("../OmniLight3D")]
+
+[node name="Player" parent="Planet" unique_id=818653580 instance=ExtResource("5_216rf")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 536.36707, 0)
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=39806466]
 transform = Transform3D(-4.371139e-08, 0, 1, 0, 1, 0, -1, 0, -4.371139e-08, 730.059, 0, 0)
+script = ExtResource("7_cfocus")
+planet_path = NodePath("../Planet")
+player_path = NodePath("../Planet/Player")
+
+[node name="OmniLight3D" type="OmniLight3D" parent="." unique_id=237984670]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 824.80164)
+omni_range = 4096.0
+omni_attenuation = 0.0
