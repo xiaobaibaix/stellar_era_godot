@@ -1006,7 +1006,8 @@ func _update_sun() -> void:
 			_ocean_mat.set_shader_parameter("u_sun_atten", _sun_attens[0])
 		_ocean_mat.set_shader_parameter("u_sun_count", _sun_count)
 		# 额外槽位 1..N-1 → 数组(对齐 ocean shader 的 u_sun_dirs_add[3] 等)
-		if _ocean_mat.shader != null and _ocean_mat.shader.has_param("u_sun_dirs_add"):
+		# Godot 4 的 Shader 类没有 has_param; ocean.gdshader 已声明这些 uniform, 直接推即可。
+		if _ocean_mat.shader != null:
 			var extras_dirs: PackedVector3Array = PackedVector3Array()
 			var extras_pos: PackedVector3Array = PackedVector3Array()
 			var extras_loc: PackedFloat32Array = PackedFloat32Array()

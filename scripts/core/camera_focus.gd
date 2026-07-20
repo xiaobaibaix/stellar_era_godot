@@ -66,7 +66,8 @@ var _pending_focus: int = -1
 func _ready() -> void:
 	if force_windowed:
 		# project.godot 全局 mode=3(全屏); test_planet 调试要普通窗口, 这里覆盖。
-		get_window().mode = Window.MODE_WINDOWED
+		# 用 DisplayServer(主窗口 API) 比 Window.mode setter 更稳(macOS 全屏 Space 切换有边角 case)。
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
 	if planet_path != NodePath():
 		_planet = get_node_or_null(planet_path)
 	if player_path != NodePath():
