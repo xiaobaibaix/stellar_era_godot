@@ -1,6 +1,18 @@
 [gd_scene format=3 uid="uid://d10xidui4gp48"]
 
 [ext_resource type="Script" uid="uid://dnnul8mcivjeu" path="res://scenes/celestial.gd" id="1_xj23i"]
+[ext_resource type="PackedScene" uid="uid://nuulebu1sk8m" path="res://scenes/planet.tscn" id="2_qt1jr"]
+[ext_resource type="Script" uid="uid://7boxikbjeden" path="res://scripts/core/planet_params.gd" id="3_71tfa"]
+
+[sub_resource type="Resource" id="Resource_1tet4"]
+resource_local_to_scene = true
+script = ExtResource("3_71tfa")
+radius = 326.0
 
 [node name="Celestial" type="Node3D" unique_id=916681004]
 script = ExtResource("1_xj23i")
+
+[node name="Planet" type="Node3D" parent="." unique_id=634634378]
+
+[node name="Planet" parent="Planet" unique_id=1923769825 instance=ExtResource("2_qt1jr")]
+params = SubResource("Resource_1tet4")

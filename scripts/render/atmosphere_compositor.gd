@@ -281,6 +281,10 @@ func _build_frame_ubo(f: Dictionary, cam_pos: Vector3, inv_proj: Projection, cam
 	# sun_dir
 	var sd: Vector3 = f.get("sun_dir", Vector3(0.739, 0.443, 0.515))
 	b.append(sd.x); b.append(sd.y); b.append(sd.z); b.append(0.0)
+	# sun_pos: 近场点光源 xyz=世界位置, w=sun_is_local(1=近场用位置反推方向, 0=无穷远用 sun_dir)
+	var sp: Vector3 = f.get("sun_pos", Vector3.ZERO)
+	var is_local: float = float(f.get("sun_is_local", 0.0))
+	b.append(sp.x); b.append(sp.y); b.append(sp.z); b.append(is_local)
 	# planet_center
 	var pc: Vector3 = f.get("planet_center", Vector3.ZERO)
 	b.append(pc.x); b.append(pc.y); b.append(pc.z); b.append(0.0)
@@ -414,14 +418,18 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 
 
 # 体积光两步: 1) copy color→lit 快照; 2) godray lit→color 径向累积。
-# sun_uv: 太阳(sun_dir 方向极远点)投影到屏幕的 uv; sun_vis: 相机朝向·太阳方向的 smoothstep(太阳在背后=0)。
+# sun_uv: 太阳投影到屏幕的 uv; sun_vis: 相机朝向·太阳方向的 smoothstep(太阳在背后=0)。
+# 近场点光源: 用真实世界位置投影; 无穷远平行光: 用 cam_pos + sun_dir*1e7(模拟极远点)。
 func _dispatch_godray(f: Dictionary, rsd, cam_xform: Transform3D, cam_pos: Vector3, color_image: RID, size: Vector2i, xg: int, yg: int) -> void:
 	var sd: Vector3 = f.get("sun_dir", Vector3(0.739, 0.443, 0.515))
+	var is_local: float = float(f.get("sun_is_local", 0.0))
 	# world→clip = proj * view; cam_xform 是 camera→world → 视图矩阵 view(world→camera) = 其逆。
 	var view_t: Transform3D = cam_xform.affine_inverse()
 	var proj: Projection = rsd.get_cam_projection()
 	var world_to_clip: Projection = proj * Projection(view_t)
-	var sun_world: Vector3 = cam_pos + sd * 1.0e7
+	var sun_world: Vector3 = cam_pos + sd * 1.0e7   # 默认: 无穷远平行光
+	if is_local >= 0.5:
+		sun_world = f.get("sun_pos", sun_world)   # 近场: 真实位置
 	var clip: Vector4 = world_to_clip * Vector4(sun_world.x, sun_world.y, sun_world.z, 1.0)
 	var sun_uv := Vector2(0.5, 0.5)
 	if absf(clip.w) > 1e-6:

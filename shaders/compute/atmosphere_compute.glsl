@@ -17,7 +17,8 @@ layout(set = 0, binding = 0, std140) uniform FrameData {
 	mat4 inv_proj;             // 投影逆矩阵(NDC → 相机本地/视图空间)
 	mat4 cam_xform;            // 相机世界变换(视图空间 → 世界)
 	vec4 cam_pos_time;         // xyz=相机世界位, w=时间(云飘动)
-	vec4 sun_dir;              // xyz=太阳方向(归一化)
+	vec4 sun_dir;              // xyz=太阳方向(无穷远平行光, 归一化), w=0
+	vec4 sun_pos;              // xyz=太阳世界位置(近场点光源), w=sun_is_local (1=近场, 0=无穷远)
 	vec4 planet_center;        // xyz=行星中心(世界)
 	vec4 radii;                // rground, ratmo, cbottom, ctop
 	vec4 scatter_r_m;          // rgb=瑞利散射系数, a=米氏散射系数
@@ -71,9 +72,20 @@ vec3 densityAt(vec3 p) {
 	return vec3(dR, dM, dO);
 }
 
+// 点 p 处指向太阳的单位方向。
+// 无穷远平行光(fd.sun_pos.w<0.5): 用 fd.sun_dir, 整个星球方向恒定 → 晨昏线是大圆(半个球)。
+// 近场点光源(fd.sun_pos.w>=0.5): 用 normalize(sun_pos - p), 方向随 p 变 →
+// 晨昏线缩成球冠(从光到星球的切线决定), 光越近球冠越小。物理正确, 视觉与地形实照亮范围一致。
+vec3 sun_dir_at(vec3 p) {
+	if (fd.sun_pos.w >= 0.5) {
+		return normalize(fd.sun_pos.xyz - p);
+	}
+	return normalize(fd.sun_dir.xyz);
+}
+
 // 向阳方向光学深度(realtime; M3 会换成 LUT)。被行星挡住则提前停。
 vec3 opticalDepthToSun(vec3 p) {
-	vec3 dir = normalize(fd.sun_dir.xyz);
+	vec3 dir = sun_dir_at(p);   // 近场点光源: 方向随 p 变(光走直线, 单次 march 内 dir 恒定)
 	vec2 h = raySphere(p, dir, fd.planet_center.xyz, fd.radii.y);
 	float tMax = max(h.y, 0.0);
 	float dt = tMax / max(int(fd.sun_exp_twilight.w), 1);   // steps(太阳方向)
@@ -92,7 +104,7 @@ vec3 opticalDepthToSun(vec3 p) {
 float planetShadow(vec3 p) {
 	vec3 q = p - fd.planet_center.xyz;
 	float r = max(length(q), 1e-4);
-	float sinElev = dot(q / r, normalize(fd.sun_dir.xyz));
+	float sinElev = dot(q / r, sun_dir_at(p));              // 近场: p 处真实太阳方向
 	float dip = sqrt(max(1.0 - (fd.radii.x * fd.radii.x) / (r * r), 0.0)) * fd.sun_exp_twilight.z;
 	float soft = max(fd.mie_params.w * 0.25, 1e-3);         // shadowSoftness
 	return smoothstep(-soft, soft, sinElev + dip);
@@ -156,9 +168,10 @@ float lightMarch(vec3 pos) {
 	float st = (fd.radii.w - fd.radii.z) / max(int(fd.counts.z), 1);  // cloudLightSteps
 	float sum = 0.0;
 	vec3 q = pos;
+	vec3 sdir = sun_dir_at(pos);   // 光走直线, 整条 march 方向恒定
 	for (int i = 0; i < 12; i++) {
 		if (i >= int(fd.counts.z)) break;
-		q += normalize(fd.sun_dir.xyz) * st;
+		q += sdir * st;
 		sum += cloudDensity(q, false) * st;
 	}
 	return exp(-sum * fd.cloud_a.y * fd.cloud_b.y);         // cdensity * absorb
@@ -166,12 +179,12 @@ float lightMarch(vec3 pos) {
 
 float dayFactor(vec3 pos) {
 	vec3 up = normalize(pos - fd.planet_center.xyz);
-	return smoothstep(-0.12, 0.12, dot(up, normalize(fd.sun_dir.xyz)));
+	return smoothstep(-0.12, 0.12, dot(up, sun_dir_at(pos)));
 }
 
 // 地面点的云影
 float cloudShadow(vec3 gp) {
-	vec3 sd = normalize(fd.sun_dir.xyz);
+	vec3 sd = sun_dir_at(gp);
 	vec2 o = raySphere(gp, sd, fd.planet_center.xyz, fd.radii.w);
 	vec2 inr = raySphere(gp, sd, fd.planet_center.xyz, fd.radii.z);
 	float s0 = max(inr.y, 0.0);
@@ -258,17 +271,20 @@ void main() {
 		float jitter = mix(0.5, hash12(uv * vec2(1920.0, 1080.0) + fract(fd.cam_pos_time.w)), fd.ozone_dither.w);
 		float t = tNear + stepU * jitter;
 
-		float mu = dot(rd, normalize(fd.sun_dir.xyz));
-		float phaseR = (3.0 / (16.0 * PI)) * (1.0 + mu * mu);
-		float g2 = fd.mie_params.x;                                   // mieG
-		float phaseM = (1.0 - g2) * (1.0 + mu * mu) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g2 * mu, 1e-4), 1.5));
-		float cphase = clouds ? (0.4 + fd.cloud_b.z * cloudPhase(mu)) : 0.0;  // silver
+		float g2 = fd.mie_params.x;                                   // mieG (循环不变, 提前算)
 
 		for (int i = 0; i < 512; i++) {
 			if (t >= tFar) break;
 			float jit = (hash12(uv * vec2(1920.0, 1080.0) + vec2(float(i) * 7.31, float(i) * 3.17)) - 0.5) * stepU * 0.25 * fd.ozone_dither.w;
 			vec3 p = ro + rd * (t + jit);
 			float ds = min(stepU, tFar - t);
+
+			// 太阳方向 + 散射相位: 近场点光源时随 p 变化, 必须在循环内重算(无穷远平行光时退化为常数)。
+			vec3 sdir = sun_dir_at(p);
+			float mu = dot(rd, sdir);
+			float phaseR = (3.0 / (16.0 * PI)) * (1.0 + mu * mu);
+			float phaseM = (1.0 - g2) * (1.0 + mu * mu) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g2 * mu, 1e-4), 1.5));
+			float cphase = clouds ? (0.4 + fd.cloud_b.z * cloudPhase(mu)) : 0.0;  // silver
 
 			// 大气: 密度×ds → 消光 sigA
 			vec3 dens = densityAt(p) * ds;
@@ -283,7 +299,7 @@ void main() {
 					float sunT = lightMarch(p);
 					// 晨昏线位移 cterminator: 正值→sunUp 有效值变小→day/amb 更早归零, 云的明暗分界线向阳侧移动(更贴近晨昏线);
 					// 负值→分界线向背阳侧延伸。默认 0 = 原行为。
-					float sunUp = dot(normalize(p - fd.planet_center.xyz), normalize(fd.sun_dir.xyz)) - fd.cloud_c.y;
+					float sunUp = dot(normalize(p - fd.planet_center.xyz), sdir) - fd.cloud_c.y;
 					float day = smoothstep(-0.12, 0.12, sunUp);
 					float amb = smoothstep(-0.4, 0.15, sunUp);
 					float powder = mix(1.0, 1.0 - exp(-dcl * fd.cloud_a.y * 2.0), fd.cloud_b.w);
@@ -301,7 +317,7 @@ void main() {
 				if (pc.lut_on > 0.5) {
 					// 透射率 LUT(M3): 球对称 → od 只取决于(r, 太阳天顶余弦 mu)。移植 web sampling。
 					float rr = length(p - fd.planet_center.xyz);
-					float mus = dot(normalize(p - fd.planet_center.xyz), normalize(fd.sun_dir.xyz));
+					float mus = dot(normalize(p - fd.planet_center.xyz), sdir);
 					vec2 luv = vec2(mus * 0.5 + 0.5, clamp((rr - fd.radii.x) / max(fd.radii.y - fd.radii.x, 1e-4), 0.0, 1.0));
 					odSun = texture(lut_tex, luv).rgb;
 				} else {

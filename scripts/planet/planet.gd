@@ -15,8 +15,12 @@ extends Node3D
 ## LOD 距离判定的聚焦目标(用它的位置算细分距离); 留空则用 camera。
 ## 跟随角色模式下设为 Player, 让细分围绕角色而非相机; 视锥剔除仍用渲染相机。
 @export var lod_target: Node3D
-## 太阳光(可选): _update_sun 会把它的 -Z 对齐 sun_dir, 让地形光照方向与大气/海洋一致。
-@export var sun_light: DirectionalLight3D
+## 太阳光(可选):
+## - DirectionalLight3D: _update_sun 把它的 -Z 对齐 sun_dir(平行光跟随大气太阳方向)。
+## - OmniLight3D: _update_sun 从它的位置反推 sun_dir(点光源位置驱动大气/海洋太阳方向);
+##   编辑器里拖动光源, 大气/海洋高光实时跟随(每帧检测位置变化)。
+## 两种都让地形光照方向与大气/海洋的 u_sun_dir 一致。
+@export var sun_light: Light3D
 var terrain: Terrain
 var roots: Array = []  # Array[QNode]
 var _V: Array = []  # 12 个单位顶点(Vector3)
@@ -70,6 +74,7 @@ var _stride_used: int = 0
 var _remaining_splits: int = 0  # 本 LOD pass 剩余分裂预算(移植 web splitBudget)
 var _lod_dirty: int = 3         # >0 需跑 select_lod; 移动/相机变换/有在途 job 时置 3, 空闲逐拍递减到 0 后短路
 var _last_cam_xform: Transform3D = Transform3D()  # 上次渲染相机变换(检测原地转视角 → 更新视锥剔除)
+var _last_sun_light_pos: Vector3 = Vector3(INF, INF, INF)  # 上次 OmniLight3D 位置(检测拖动 → 重算 sun_dir)
 
 
 # 作为预制体节点: 进树即自动构建; _process 自动取场景活动相机驱动 LOD。
@@ -134,6 +139,13 @@ func _process(_delta: float) -> void:
 	# 信号连接保险(运行时用)
 	if params != null and params.has_signal("param_changed") and not params.is_connected("param_changed", _on_param_changed):
 		params.connect("param_changed", _on_param_changed)
+	# OmniLight3D 当太阳时: 检测光源位置变化 → 重算 sun_dir(编辑器拖光源, 大气/海洋高光实时跟随)。
+	# DirectionalLight3D 不需要, 它的方向由 params 通过 look_at 强制对齐。
+	if sun_light is OmniLight3D:
+		var cur_pos: Vector3 = sun_light.global_position
+		if not cur_pos.is_equal_approx(_last_sun_light_pos):
+			_last_sun_light_pos = cur_pos
+			_update_sun()
 	# 参数指纹轮询(编辑器+运行时统一): 每 15 帧检测参数变化 → rebuild。
 	# @tool 下 local_to_scene 副本的 param_changed 信号不可靠, 改用轮询(参照 planet_node.gd)。
 	_param_tick += 1
@@ -753,9 +765,18 @@ func _push_compositor_frame() -> void:
 	var ozo_ratio := Vector3(0.35, 1.0, 0.045)
 	var ground_r: float = R + p.seaLevel * p.maxHeight
 	_atmo_compositor.enabled = p.showAtmosphere   # 关 = 跳过整条后处理(含云)
+	# sun_pos / sun_is_local: 点光源近场时, 大气晨昏线按真实球冠几何(angular radius = acos(R/d))收缩;
+	# 方向光/无光源 → 推到无穷远, sun_dir 视为常数方向(等价于原本“半边亮”的行为)。
+	var sun_world_pos: Vector3 = global_position + _sun_dir * 1.0e9
+	var sun_is_local: float = 0.0
+	if sun_light is OmniLight3D:
+		sun_world_pos = sun_light.global_position
+		sun_is_local = 1.0
 	_atmo_compositor.set_frame_data({
 		"time": Time.get_ticks_msec() / 1000.0,
 		"sun_dir": _sun_dir,
+		"sun_pos": sun_world_pos,
+		"sun_is_local": sun_is_local,
 		"planet_center": global_position,
 		"rground": ground_r,
 		"ratmo": R * p.atmoScale,
@@ -810,18 +831,27 @@ func _apply_ocean_uniforms() -> void:
 	_ocean_mat.set_shader_parameter("u_spec_strength", p.oceanSpecStrength)
 
 
-# 由 sunElevation/sunAzimuth 算 planet-local sun_dir; push 到两 shader + 旋转 sun_light(-Z 对齐)。
+# sun_dir 来源:
+# - sun_light 是 OmniLight3D: 从光源位置反推(点光源驱动, 用户拖光源 → 大气/海洋跟随)。
+# - sun_light 是 DirectionalLight3D / 留空: 从 sunElevation/sunAzimuth 算 planet-local sun_dir。
+# 然后 push 到两 shader; DirectionalLight3D 会被 look_at(-Z 对齐) 跟随 sun_dir。
 func _update_sun() -> void:
 	if params == null:
 		return
-	var el: float = deg_to_rad(params.sunElevation)
-	var az: float = deg_to_rad(params.sunAzimuth)
-	_sun_dir = Vector3(cos(el) * cos(az), sin(el), cos(el) * sin(az)).normalized()
+	if sun_light is OmniLight3D:
+		var offset: Vector3 = sun_light.global_position - global_position
+		if offset.length_squared() > 1e-8:
+			_sun_dir = offset.normalized()
+		# 光源恰好在 planet_center(罕见) → 保留上次 _sun_dir, 避免除零
+	else:
+		var el: float = deg_to_rad(params.sunElevation)
+		var az: float = deg_to_rad(params.sunAzimuth)
+		_sun_dir = Vector3(cos(el) * cos(az), sin(el), cos(el) * sin(az)).normalized()
 	if material != null:
 		material.set_shader_parameter("u_sun_dir", _sun_dir)
 	if _ocean_mat != null:
 		_ocean_mat.set_shader_parameter("u_sun_dir", _sun_dir)
-	if sun_light != null:
+	if sun_light is DirectionalLight3D:
 		# 光沿 -Z 传播; -Z = -sun_dir → 光从太阳方向射向行星, dot(N,sun_dir)>0 的面被照亮
 		sun_light.look_at(sun_light.global_position - _sun_dir, Vector3.UP)
 
