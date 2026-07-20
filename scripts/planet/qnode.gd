@@ -1,11 +1,11 @@
 # gdlint: disable=variable-name, max-line-length, private-access
 ## 四叉树 LOD 节点(纯数据, RefCounted)。mesh 即单元架构: 不再持有 MeshInstance3D,
-## 全场只有一个 _terrain_mesh(挂在 Planet 的 BodyMesh 下); 本节点只缓存几何(_surfaces)
-## + 渲染状态(render_state), Planet._rebuild_merged_mesh 收集所有「自身渲染 + mesh 就绪」
-## 的节点, 把它们的 _surfaces 拼成单个 ArrayMesh。
+## 全场 20 个 _root_meshes(每个 icosahedron 根面一个); 本节点只缓存几何(_surfaces)
+## + 渲染状态(render_state) + root_index(所属根面)。每根独立 dirty → Planet._rebuild_root_mesh
+## 只重建该根的可见叶, 每叶一个 surface(本地索引, 无偏移循环)。
 ##
 ## render_state: 0=不渲染(被剔除/隐藏), 1=渲染自身 mesh(叶 或 子未就绪时的 fallback),
-##               2=渲染子(递归)。状态翻转 → planet._mesh_dirty → 帧末统一重建合并 mesh,
+##               2=渲染子(递归)。状态翻转 → planet._mark_root_dirty(根) → 帧末只重建该根 mesh,
 ##               把「每个 split/merge/完成事件立即 set_mesh」的尖刺摊到一帧一次。
 ##
 ## LOD 选择(移植 web 版):
@@ -21,6 +21,7 @@ var A: Vector3
 var B: Vector3
 var C: Vector3
 var level: int
+var root_index: int = 0   # 所属根面(0..19); _split 继承 → dirty/重建精确到根
 
 var children: Variant = null  # null=叶, Array[4]=已分裂
 var render_state: int = 0     # 0/1/2 见上; 替代旧 mesh_inst.visible
@@ -67,11 +68,11 @@ func setup(p, a: Vector3, b: Vector3, c: Vector3, lvl: int) -> void:
 	horizon_sin_alpha = sqrt(maxf(0.0, 1.0 - min_cos * min_cos))
 
 
-# 渲染状态翻转 → 置 planet._mesh_dirty(帧末统一重建合并 mesh)。
+# 渲染状态翻转 → 置【所属根】dirty(帧末只重建该根的 mesh, 不动其它 19 个根)。
 func _set_state(s: int) -> void:
 	if render_state != s:
 		render_state = s
-		planet._mesh_dirty = true
+		planet._mark_root_dirty(root_index)
 
 
 # 存 Planet._gen_surface_list 生成好的 surface 列表(重建合并 mesh 时复用, 避免重算)。
@@ -184,9 +185,10 @@ func _split() -> void:
 	for i in range(4):
 		var child := QNode.new()
 		child.setup(planet, tris[i][0], tris[i][1], tris[i][2], level + 1)
+		child.root_index = root_index   # 子继承父的根面归属 → dirty 精确到根
 		children.append(child)
 	planet._tree_changed = true   # 通知 Planet 本 pass 发生结构变化 → 保持 select_lod 继续跑到稳定
-	planet._mesh_dirty = true
+	planet._mark_root_dirty(root_index)
 
 
 # 合并(移植 planet.js QNode._merge): 置空 children(RefCounted 自动释放)。滞回死区保证不会立刻再分裂 → 无 churn。
@@ -195,7 +197,7 @@ func _merge() -> void:
 		c.dispose()
 	children = null
 	planet._tree_changed = true   # 通知 Planet 本 pass 发生结构变化 → 保持 select_lod 继续跑到稳定
-	planet._mesh_dirty = true
+	planet._mark_root_dirty(root_index)
 
 
 # 销毁前清理: 取消 pending + 递归子树(RefCounted 引用释放即自动回收, 无需 queue_free)。

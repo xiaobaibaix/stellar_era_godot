@@ -1,8 +1,8 @@
 # gdlint: disable=variable-name, max-line-length
 ## 行星: 正二十面体 + 三角形四叉树 LOD + fBm 噪声位移(移植 src/planet.js)。
 ## patch 网格在 WorkerThreadPool 异步生成; skirt 仅作加载过渡兜底。
-## 容器架构: 每片 patch = 一个 qnode.tscn 实例(Qnode 容器 + 子 MeshInstance3D),
-## 代码只填充子 MeshInstance3D 的 mesh 资源; 所有 Qnode 挂 BodyMesh 下。
+## 渲染架构: 20 个稳定 MeshInstance3D(每个 icosahedron 根面一个, 挂 BodyMesh 下, 永不销毁);
+## QNode=RefCounted 纯数据, 每根独立 dirty → 帧末只重建 churn 的根, 每叶一个 surface(本地索引)。
 ## @tool: 让编辑器 3D 视口也能渲染, 并跟随编辑器相机做 LOD 细分。
 @tool
 class_name Planet
@@ -57,6 +57,7 @@ var _sun_ranges: Array[float] = []        # OmniLight3D.omni_range; 方向光填
 var _sun_attens: Array[float] = []        # OmniLight3D.omni_attenuation; 方向光填 0.0
 var _sun_count: int = 0
 const MAX_SUNS: int = 4
+const ROOT_COUNT: int = 20  # icosahedron 根面数(固定); 每根一个稳定 MeshInstance3D
 
 var _gen: int = 0
 var _pool: PatchWorkerPool
@@ -68,8 +69,12 @@ var _cam_pos: Vector3 = Vector3(1e9, 1e9, 1e9)
 var _cam_moved: bool = true
 var _wire: bool = false
 var _body_mesh: Node3D  # 地形渲染节点的父容器(BodyMesh)
-var _terrain_mesh: MeshInstance3D  # 全场唯一地形 mesh 节点(mesh 即单元架构)
-var _mesh_dirty: bool = true  # 合并 mesh 需重建(split/merge/渲染状态翻转/worker 完成时置 true)
+# 20 个稳定 MeshInstance3D(每个 icosahedron 根面一个, _ready 建一次永不销毁 → 节点层零 churn)。
+# 每根独立 ArrayMesh + 独立 dirty → 飞行时只重建 churn 的那几个根, 其余可见根零成本。
+var _root_meshes: Array = []      # Array[MeshInstance3D], 长度 = ROOT_COUNT = 20
+var _root_dirty: PackedInt32Array  # 每根 dirty 标志(0/1); 帧末只对 ==1 的根调 _rebuild_root_mesh
+var _root_patches: PackedInt32Array  # 每根可见 patch 数(stats 聚合用)
+var _root_tris: PackedInt32Array     # 每根三角数(stats 聚合用)
 var _last_params_hash: int = 0  # 参数指纹(轮询检测变化触发 rebuild, 绕过 @tool 信号不可靠)
 var _last_visual_hash: int = 0  # 视觉指纹(atmo*/sun*/show*): 变化只推 shader uniform, 不重建地形
 var _last_lod_hash: int = 0     # LOD 细分指纹(split*/maxLevel/...): 变化重跑 select_lod, 不重建地形
@@ -116,7 +121,7 @@ func _ready() -> void:
 			_body_mesh = Node3D.new()
 			_body_mesh.name = "BodyMesh"
 			add_child(_body_mesh, false, Node.INTERNAL_MODE_BACK)
-	_ensure_terrain_mesh()  # 全场唯一地形 MeshInstance3D(mesh 即单元架构)
+	_ensure_root_meshes()  # 20 个根面 MeshInstance3D(每根一个, 稳定不销毁)
 	if material == null:
 		var tsh := load("res://shaders/terrain.gdshader")
 		material = ShaderMaterial.new()
@@ -196,11 +201,22 @@ func _process(_delta: float) -> void:
 	if cam != null:
 		# 大气壳挂 Planet 下(随节点移动), 不再跟随相机 → 编辑器视口相机也能看到(不依赖 snap)。
 		update(cam)
-	# mesh 即单元: 任何 worker 完成/渲染状态翻转/split/merge 都置 _mesh_dirty → 帧末统一重建合并 mesh。
+	# mesh 即单元(每根独立): 任何 worker 完成/渲染状态翻转/split/merge 都置【对应根】dirty →
+	# 帧末只重建 dirty 的根, 不动其它可见根(飞行时 churn 只在镜头附近 2~4 个根, 其余零成本)。
 	# 与 LOD tick(每 3 帧)解耦: 本帧没跑 select_lod 时, 有 patch 就绪也立即合并显示。
-	if _mesh_dirty:
-		_rebuild_merged_mesh()
-		_mesh_dirty = false
+	var rc := mini(roots.size(), _root_dirty.size())
+	for i in range(rc):
+		if _root_dirty[i] == 1:
+			_rebuild_root_mesh(i)
+			_root_dirty[i] = 0
+	# 聚合 stats(ROOT_COUNT 次加法, 可忽略)。每根的 patches/tris 在 _rebuild_root_mesh 里更新。
+	var tp := 0
+	var tt := 0
+	for i in range(_root_patches.size()):
+		tp += _root_patches[i]
+		tt += _root_tris[i]
+	stats.patches = tp
+	stats.triangles = tt
 
 
 # 参数指纹: 任一关键参数变化 → 哈希变 → _process 轮询到就 rebuild。绕过信号不可靠。
@@ -416,9 +432,11 @@ func _build_roots() -> void:
 		[4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
 	]
 	roots = []
-	for f in _faces:
+	for fi in range(_faces.size()):
+		var f: Array = _faces[fi]
 		var r := QNode.new()
 		r.setup(self, _V[f[0]], _V[f[1]], _V[f[2]], 0)
+		r.root_index = fi   # 记所属根面 → dirty/重建精确到根
 		var data := PatchBuilder.build_patch_arrays(
 			r.A, r.B, r.C, params.patchResolution, params.radius,
 			params.maxHeight, terrain, [1, 1, 1])
@@ -427,7 +445,7 @@ func _build_roots() -> void:
 		r.render_state = 1  # 根默认可见(基础球壳), 首帧即可合并显示; select_lod 运行后接管细分/剔除
 		r.built_key = "1,1,1"
 		roots.append(r)
-	_mesh_dirty = true  # 首帧合并出基础球壳
+	_mark_all_roots_dirty()  # 首帧每根都重建出基础球壳
 
 
 func _root_containing(p: Vector3) -> Array:
@@ -536,20 +554,29 @@ func _gen_surface_list(data: Dictionary, wire: bool) -> Array:
 	return out
 
 
-# 全场唯一地形 MeshInstance3D: 挂 BodyMesh 下, 不写回 .tscn(set_owner null + INTERNAL)。
-# 位移/裙边在顶点 shader → AABB 不含 → 给足 extra_cull_margin 防整壳被误剔(可见性由 select_lod 手动剔除兜底)。
-func _ensure_terrain_mesh() -> void:
-	if _terrain_mesh != null and is_instance_valid(_terrain_mesh):
-		return
+# 20 个根面 MeshInstance3D: 每个 icosahedron 根面一个, _ready 建一次永不销毁(节点层零 churn)。
+# 挂 BodyMesh 下, 不写回 .tscn(set_owner null + INTERNAL)。位移/裙边在顶点 shader → AABB 不含 →
+# 给足 extra_cull_margin 防整壳被误剔(可见性由 select_lod 手动剔除兜底)。
+func _ensure_root_meshes() -> void:
 	if _body_mesh == null:
 		return
-	_terrain_mesh = _body_mesh.get_node_or_null("TerrainMesh")
-	if _terrain_mesh == null:
-		_terrain_mesh = MeshInstance3D.new()
-		_terrain_mesh.name = "TerrainMesh"
-		_body_mesh.add_child(_terrain_mesh, false, Node.INTERNAL_MODE_BACK)
-		_terrain_mesh.set_owner(null)  # 防 @tool 编辑器把运行时节点写进场景文件
-	_terrain_mesh.extra_cull_margin = params.radius * 4.0 + params.maxHeight * 3.0 + 1.0
+	# 复用已存在的 RootMesh0..N(防 @tool 重载重复建); 不够 ROOT_COUNT 则补齐。
+	while _root_meshes.size() < ROOT_COUNT:
+		var i := _root_meshes.size()
+		var mi := MeshInstance3D.new()
+		mi.name = "RootMesh%d" % i
+		_body_mesh.add_child(mi, false, Node.INTERNAL_MODE_BACK)
+		mi.set_owner(null)  # 防 @tool 编辑器把运行时节点写进场景文件
+		mi.extra_cull_margin = params.radius * 4.0 + params.maxHeight * 3.0 + 1.0
+		_root_meshes.append(mi)
+	# dirty/统计数组对齐 ROOT_COUNT; 新建/扩容 → 全标脏, 首帧全重建
+	if _root_dirty.size() != ROOT_COUNT:
+		_root_dirty.resize(ROOT_COUNT)
+		_root_dirty.fill(1)
+	if _root_patches.size() != ROOT_COUNT:
+		_root_patches.resize(ROOT_COUNT)
+	if _root_tris.size() != ROOT_COUNT:
+		_root_tris.resize(ROOT_COUNT)
 
 
 # 收集 render_state==1 且 mesh_ready 的节点(叶 或 兜底内部节点); state==2 递归子; state==0 跳过整子树。
@@ -565,80 +592,67 @@ func _collect_visible_leaves(node: QNode, out: Array) -> void:
 			_collect_visible_leaves(c, out)
 
 
-# 帧末合并重建: 把所有 visible+mesh_ready 叶子的 _surfaces 拼成单个 ArrayMesh 挂到 _terrain_mesh。
-# 同帧内多次脏只重建一次 → 消除 per-event set_mesh 尖刺。
-func _rebuild_merged_mesh() -> void:
-	if _terrain_mesh == null or not is_instance_valid(_terrain_mesh):
-		_ensure_terrain_mesh()
-		if _terrain_mesh == null:
-			return
-	stats.patches = 0
-	stats.triangles = 0
+# 标记单个根 dirty(状态翻转/split/merge/worker 完成时调)。帧末只重建 dirty 根。
+func _mark_root_dirty(idx: int) -> void:
+	if idx >= 0 and idx < _root_dirty.size():
+		_root_dirty[idx] = 1
+
+
+# 标记所有根 dirty(首帧 / wireframe 切换 / rebuild 后)。
+func _mark_all_roots_dirty() -> void:
+	for i in range(_root_dirty.size()):
+		_root_dirty[i] = 1
+
+
+# 重建【单个根】的 ArrayMesh: 只收集该根的可见叶, 每叶一个 surface(本地索引, 无偏移循环)。
+# 只在 _root_dirty[i]==1 时调 → 飞行时只 churn 的几个根花成本, 其余可见根零成本。
+func _rebuild_root_mesh(i: int) -> void:
+	if i < 0 or i >= _root_meshes.size():
+		_root_patches[i] = 0
+		_root_tris[i] = 0
+		return
+	var mi: MeshInstance3D = _root_meshes[i]
+	if mi == null or not is_instance_valid(mi):
+		return
 	var leaves: Array = []
-	for r in roots:
-		_collect_visible_leaves(r, leaves)
+	if i < roots.size():
+		_collect_visible_leaves(roots[i], leaves)
 	var am := ArrayMesh.new()
+	var rp := 0
+	var rt := 0
 	if _wire:
-		# 线框: 先加所有叶的实心遮挡面(surface 0..fill-1), 再加所有叶的亮线段(surface fill..end)。
+		# 线框: 先加所有叶的实心遮挡面(surface 0..fill-1), 再加所有叶的亮线段。
 		# 前 fill 个配 _wire_fill_mat, 其后配 _wire_line_mat。
 		var fill := 0
 		for q in leaves:
 			if q._surfaces.size() >= 1:
 				var s0: Dictionary = q._surfaces[0]
 				am.add_surface_from_arrays(int(s0.prim), s0.arrays)
-				stats.patches += 1
-				stats.triangles += q.tri_count
+				rp += 1
+				rt += q.tri_count
 				fill += 1
 		for q in leaves:
 			if q._surfaces.size() >= 2:
 				var s1: Dictionary = q._surfaces[1]
 				am.add_surface_from_arrays(int(s1.prim), s1.arrays)
-		_terrain_mesh.mesh = am
-		_terrain_mesh.material_override = null
-		for i in range(am.get_surface_count()):
-			_terrain_mesh.set_surface_override_material(i, _wire_fill_mat if i < fill else _wire_line_mat)
+		mi.mesh = am
+		mi.material_override = null
+		for s in range(am.get_surface_count()):
+			mi.set_surface_override_material(s, _wire_fill_mat if s < fill else _wire_line_mat)
 	else:
-		# 非 wire(Phase B): 所有可见叶拼成【单个】 TRIANGLES surface → 1 draw call。
-		# verts/norms/cols 用 append_array(C 级 memcpy, 快); indices 须按累积顶点数偏移 →
-		# 先统计总索引数一次性 resize(避免 append 多次重分配), 再循环写入。直接读 _patch_data。
-		var big_v := PackedVector3Array()
-		var big_n := PackedVector3Array()
-		var big_c := PackedColorArray()
-		var total_idx := 0
+		# 非 wire: 每叶一个 TRIANGLES surface(本地索引, 无偏移循环)→ 彻底去掉 GDScript 索引循环热点。
 		for q in leaves:
-			var idx0: PackedInt32Array = q._patch_data.indices
-			total_idx += idx0.size()
-		var big_i := PackedInt32Array()
-		big_i.resize(total_idx)
-		var w := 0
-		var offset := 0
-		for q in leaves:
-			var data: Dictionary = q._patch_data
-			var v: PackedVector3Array = data.verts
-			var n: PackedVector3Array = data.norms
-			var c: PackedColorArray = data.cols
-			var idx: PackedInt32Array = data.indices
-			big_v.append_array(v)
-			big_n.append_array(n)
-			big_c.append_array(c)
-			var vs: int = v.size()
-			for i in range(idx.size()):
-				big_i[w] = idx[i] + offset
-				w += 1
-			offset += vs
-			stats.patches += 1
-			stats.triangles += q.tri_count
-		var surf := []
-		surf.resize(Mesh.ARRAY_MAX)
-		surf[Mesh.ARRAY_VERTEX] = big_v
-		surf[Mesh.ARRAY_NORMAL] = big_n
-		surf[Mesh.ARRAY_COLOR] = big_c
-		surf[Mesh.ARRAY_INDEX] = big_i
-		am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, surf)
-		_terrain_mesh.mesh = am
-		_terrain_mesh.material_override = material
-		for i in range(am.get_surface_count()):
-			_terrain_mesh.set_surface_override_material(i, null)
+			if q._surfaces.size() >= 1:
+				var s0: Dictionary = q._surfaces[0]
+				am.add_surface_from_arrays(int(s0.prim), s0.arrays)
+				rp += 1
+				rt += q.tri_count
+		mi.mesh = am
+		mi.material_override = material
+		for s in range(am.get_surface_count()):
+			mi.set_surface_override_material(s, null)
+	_root_patches[i] = rp
+	_root_tris[i] = rt
 
 
 # ---- Worker 请求调度 ----
@@ -687,7 +701,7 @@ func _on_mesh_job(job_id: int, data: Dictionary) -> void:
 		node._patch_data = data
 		node.set_surfaces(_gen_surface_list(data, _wire), int(data.tris))
 		node.built_key = node.req_key
-		_mesh_dirty = true        # 帧末统一合并(不再 per-event set_mesh → 消尖刺)
+		_mark_root_dirty(node.root_index)  # 帧末只重建该根(不再 per-event set_mesh → 消尖刺)
 		_mark_lod_dirty()         # 让 select_lod 尽快重评(子就绪 → fallback 切递归子)
 
 
@@ -1118,9 +1132,9 @@ func set_wireframe(on: bool) -> void:
 	_wire = on
 	# 线框模式: 每个 patch 用"深色实心面(写深度, 挡背面)+ 亮线段(只测深度)"双 surface(见 _gen_surface_list)。
 	# → 背面/远侧线被前方实心面的深度剔除, 只看到朝向相机的可见线。
-	# 合并 mesh 重建时按 surface 索引配 _wire_fill_mat / _wire_line_mat(见 _rebuild_merged_mesh)。
+	# 每根重建时按 surface 索引配 _wire_fill_mat / _wire_line_mat(见 _rebuild_root_mesh)。
 	_refresh_all_surfaces()
-	_mesh_dirty = true
+	_mark_all_roots_dirty()  # wire 切换 → 所有根重刷 surface 配色
 
 
 # 切换 wireframe 时, 用缓存的 _patch_data 重算所有节点的 _surfaces(新 _wire); 帧末合并重建时生效。
