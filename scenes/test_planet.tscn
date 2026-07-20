@@ -5,7 +5,7 @@
 [ext_resource type="Script" uid="uid://7boxikbjeden" path="res://scripts/core/planet_params.gd" id="2_cptss"]
 [ext_resource type="Script" uid="uid://c18n2n3tlwx8e" path="res://scripts/render/atmosphere_compositor.gd" id="2_hisq8"]
 [ext_resource type="PackedScene" uid="uid://m7jxxg83yibb" path="res://scenes/player.tscn" id="5_216rf"]
-[ext_resource type="Script" path="res://scripts/core/camera_focus.gd" id="7_cfocus"]
+[ext_resource type="Script" uid="uid://l46qfqye6qnc" path="res://scripts/core/camera_focus.gd" id="7_cfocus"]
 
 [sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_b6b10"]
 panorama = ExtResource("1_cptss")
@@ -19,7 +19,7 @@ sky = SubResource("Sky_hisq8")
 tonemap_mode = 4
 glow_enabled = true
 
-[sub_resource type="CompositorEffect" id="CompositorEffect_hisq8"]
+[sub_resource type="CompositorEffect" id="CompositorEffect_4qwjy"]
 resource_local_to_scene = false
 resource_name = ""
 enabled = true
@@ -28,10 +28,10 @@ needs_motion_vectors = false
 needs_normal_roughness = false
 script = ExtResource("2_hisq8")
 
-[sub_resource type="Compositor" id="Compositor_216rf"]
-compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_hisq8")])
+[sub_resource type="Compositor" id="Compositor_mf1ej"]
+compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_4qwjy")])
 
-[sub_resource type="Resource" id="Resource_4qwjy"]
+[sub_resource type="Resource" id="Resource_cef0k"]
 resource_local_to_scene = true
 script = ExtResource("2_cptss")
 radius = 326.0
@@ -41,10 +41,10 @@ showInset = false
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=2107573917]
 environment = SubResource("Environment_216rf")
-compositor = SubResource("Compositor_216rf")
+compositor = SubResource("Compositor_mf1ej")
 
 [node name="Planet" parent="." unique_id=1923769825 node_paths=PackedStringArray("camera", "sun_lights") instance=ExtResource("1_wovwi")]
-params = SubResource("Resource_4qwjy")
+params = SubResource("Resource_cef0k")
 camera = NodePath("../Camera3D")
 sun_lights = [null, NodePath("../OmniLight3D")]
 

@@ -45,6 +45,11 @@ enum Focus { PLANET, PLAYER }
 ## PLAYER 焦点下, 相机到行星中心 > 大气壳半径 × 此倍率 → 自动切回 PLANET。
 @export var auto_switch_ratio: float = 1.5
 
+@export_group("Window")
+## _ready 时把窗口拉回普通窗口模式(覆盖 project.godot 的全局 mode=3 全屏)。
+## test_planet 调试用: 不全屏; 其他场景用本脚本时可在 Inspector 关掉。
+@export var force_windowed: bool = true
+
 var _target_yaw: float
 var _target_pitch: float
 var _target_distance: float
@@ -59,6 +64,9 @@ var _pending_focus: int = -1
 
 
 func _ready() -> void:
+	if force_windowed:
+		# project.godot 全局 mode=3(全屏); test_planet 调试要普通窗口, 这里覆盖。
+		get_window().mode = Window.MODE_WINDOWED
 	if planet_path != NodePath():
 		_planet = get_node_or_null(planet_path)
 	if player_path != NodePath():
