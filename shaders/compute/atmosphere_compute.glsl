@@ -317,6 +317,12 @@ void main() {
 			// 大气: 密度×ds → 消光 sigA (per-pixel, 与太阳数无关)
 			vec3 dens = densityAt(p) * ds;
 			vec3 sigA = fd.scatter_r_m.xyz * dens.x + fd.ozone_dither.xyz * dens.z + vec3(fd.scatter_r_m.w * 1.1 * dens.y);
+			// 无太阳时把消光去色: 否则瑞利逐通道差 (蓝>绿>红) 让 T.b<T.g<T.r, 暗部偏暖,
+			// 加上 AgX tonemap 把暗部推紫 → 大气壳呈一条怪紫色环。去色后大气只剩"中性灰暗化"。
+			if (int(fd.sun_metas.x) <= 0) {
+				float s = (sigA.r + sigA.g + sigA.b) / 3.0;
+				sigA = vec3(s);
+			}
 
 			// 云消光 (per-pixel; 与太阳数无关, 内散射源 srcC 在太阳循环里累加)
 			float sigC = 0.0;
