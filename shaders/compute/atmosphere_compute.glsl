@@ -21,6 +21,7 @@ layout(set = 0, binding = 0, std140) uniform FrameData {
 	vec4 cam_pos_time;         // xyz=相机世界位, w=时间(云飘动)
 	vec4 sun_dirs[MAX_SUNS];   // 每个太阳: xyz=方向(无穷远平行光, 归一化), w=is_local(1=近场点光源)
 	vec4 sun_poss[MAX_SUNS];   // 每个太阳: xyz=世界位置(近场有效), w=is_active(1=本槽位有太阳)
+	vec4 sun_range_atten[MAX_SUNS];   // 每个太阳: x=omni_range(<=0 视为不衰减), y=omni_attenuation(Godot 公式 1+a), zw 备用
 	vec4 sun_metas;            // x=有效太阳数 sun_count, y/z/w 备用
 	vec4 planet_center;        // xyz=行星中心(世界)
 	vec4 radii;                // rground, ratmo, cbottom, ctop
@@ -78,6 +79,21 @@ vec3 densityAt(vec3 p) {
 // 第 i 个太阳是否有效(槽位 is_active 且索引 < sun_count)。
 bool sun_active(int i) {
 	return i < int(fd.sun_metas.x) && fd.sun_poss[i].w >= 0.5;
+}
+
+// 点 p 处第 i 个太阳的能量衰减(对齐 Godot OmniLight3D):
+//   atten = pow(max(0, 1-(d/range)²), 1+attenuation)
+// 方向光(is_local<0.5)/range<=0 → 不衰减返回 1。逐像素计算 → 边缘自然渐暗。
+// 上一版的"光照范围外仍然亮" bug 就是因为缺这个, 大气永远满强度; 地形这边 Godot 自动按公式衰减。
+float sun_atten_for(vec3 p, int i) {
+	if (fd.sun_dirs[i].w < 0.5) return 1.0;   // 方向光
+	float range = fd.sun_range_atten[i].x;
+	if (range < 1e-4) return 1.0;             // range=0 视为不衰减(防御)
+	float d = length(fd.sun_poss[i].xyz - p);
+	float nd = d / range;
+	if (nd >= 1.0) return 0.0;
+	float a = fd.sun_range_atten[i].y;
+	return pow(max(0.0, 1.0 - nd * nd), 1.0 + a);
 }
 
 // 点 p 处指向第 i 个太阳的单位方向。
@@ -263,13 +279,15 @@ void main() {
 	if (valid) {
 		bool clouds = fd.counts.w > 0.5;
 
-		// 命中自身地表 + 云开 → 白天侧云影, 压暗背景(自身地形)。多太阳: 按 dayFactor 加权平均云影。
+		// 命中自身地表 + 云开 → 白天侧云影, 压暗背景(自身地形)。多太阳: 按 dayFactor × 距离衰减 加权平均云影。
 		if (clouds && fd.cloud_c.x > 0.0 && hitGround && length(hitPos - fd.planet_center.xyz) < fd.radii.w) {
 			float shSum = 0.0;
 			float wSum = 0.0;
 			for (int s = 0; s < MAX_SUNS; s++) {
 				if (!sun_active(s)) break;
-				float day = dayFactor(hitPos, s);
+				float atten = sun_atten_for(hitPos, s);
+				if (atten <= 1e-4) continue;
+				float day = dayFactor(hitPos, s) * atten;
 				if (day > 0.01) {
 					shSum += day * cloudShadow(hitPos, s);
 					wSum += day;
@@ -314,12 +332,15 @@ void main() {
 			vec3 src = vec3(0.0);
 			for (int s = 0; s < MAX_SUNS; s++) {
 				if (!sun_active(s)) break;
+				// OmniLight3D 逐像素能量衰减(对齐 Godot 公式); 方向光 → 1.0
+				float atten = sun_atten_for(p, s);
+				if (atten <= 1e-4) continue;   // 此像素在此太阳光照范围外 → 不参与累加
 				vec3 sdir = sun_dir_for(p, s);
 				float mu = dot(rd, sdir);
 				float phaseR = (3.0 / (16.0 * PI)) * (1.0 + mu * mu);
 				float phaseM = (1.0 - g2) * (1.0 + mu * mu) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g2 * mu, 1e-4), 1.5));
 
-				// 大气内散射: 太阳→p 透射(透射率 LUT 查表 / 回退实时 march) × 行星软遮挡 × 散射×相位×密度
+				// 大气内散射: 太阳→p 透射 × 行星软遮挡 × 散射×相位×密度 × 距离衰减
 				float shadow = planetShadow(p, s);
 				if (shadow > 0.0) {
 					vec3 odSun;
@@ -333,7 +354,7 @@ void main() {
 						odSun = opticalDepthToSun(p, s);   // 回退: 实时向太阳 march
 					}
 					vec3 Tsun = exp(-(fd.scatter_r_m.xyz * odSun.x + vec3(fd.scatter_r_m.w * 1.1) * odSun.y + fd.ozone_dither.xyz * odSun.z)) * shadow;
-					src += fd.sun_exp_twilight.x * Tsun * (fd.scatter_r_m.xyz * phaseR * dens.x + vec3(fd.scatter_r_m.w * phaseM) * dens.y);
+					src += fd.sun_exp_twilight.x * Tsun * atten * (fd.scatter_r_m.xyz * phaseR * dens.x + vec3(fd.scatter_r_m.w * phaseM) * dens.y);
 				}
 
 				// 云内散射(每太阳各算一次自阴影 + 晨昏线)
@@ -347,7 +368,7 @@ void main() {
 					float amb = smoothstep(-0.4, 0.15, sunUp);
 					float powder = mix(1.0, 1.0 - exp(-dcl * fd.cloud_a.y * 2.0), fd.cloud_b.w);
 					vec3 lit = vec3(1.7, 1.6, 1.5) * (sunT * day * cphase * powder) + vec3(0.28, 0.34, 0.45) * amb;
-					src += sigC * lit;
+					src += sigC * lit * atten;
 				}
 			}
 

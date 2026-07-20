@@ -278,12 +278,14 @@ func _build_frame_ubo(f: Dictionary, cam_pos: Vector3, inv_proj: Projection, cam
 	b.append(bo.x); b.append(bo.y); b.append(bo.z); b.append(1.0)
 	# cam_pos_time
 	b.append(cam_pos.x); b.append(cam_pos.y); b.append(cam_pos.z); b.append(f.get("time", 0.0))
-	# 多太阳: sun_dirs[4](xyz=方向, w=is_local) + sun_poss[4](xyz=位置, w=is_active) + sun_metas(x=count)
+	# 多太阳: sun_dirs[4](xyz=方向, w=is_local) + sun_poss[4](xyz=位置, w=is_active) + sun_range_atten[4](x=range, y=atten) + sun_metas(x=count)
 	# 单太阳旧接口兼容: 若没传 sun_dirs 数组, 就把 sun_dir/sun_pos/sun_is_local 当成 [0]。
 	var default_dir: Vector3 = f.get("sun_dir", Vector3(0.739, 0.443, 0.515))
 	var dirs_arr: Array = f.get("sun_dirs", [default_dir])
 	var poss_arr: Array = f.get("sun_positions", [Vector3.ZERO])
 	var locs_arr: Array = f.get("sun_is_locals", [float(f.get("sun_is_local", 0.0))])
+	var ranges_arr: Array = f.get("sun_ranges", [1.0e9])      # 方向光默认无穷大 range → 不衰减
+	var attens_arr: Array = f.get("sun_attens", [0.0])
 	var sun_count: int = int(f.get("sun_count", dirs_arr.size()))
 	sun_count = clampi(sun_count, 0, 4)
 	for i in range(4):
@@ -294,6 +296,10 @@ func _build_frame_ubo(f: Dictionary, cam_pos: Vector3, inv_proj: Projection, cam
 		var p: Vector3 = poss_arr[i] if i < poss_arr.size() else Vector3.ZERO
 		var ac: float = 1.0 if i < sun_count else 0.0
 		b.append(p.x); b.append(p.y); b.append(p.z); b.append(ac)
+	for i in range(4):
+		var rg: float = float(ranges_arr[i]) if i < ranges_arr.size() else 1.0e9
+		var at: float = float(attens_arr[i]) if i < attens_arr.size() else 0.0
+		b.append(rg); b.append(at); b.append(0.0); b.append(0.0)
 	# sun_metas: x=count
 	b.append(float(sun_count)); b.append(0.0); b.append(0.0); b.append(0.0)
 	# planet_center
