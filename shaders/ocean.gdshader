@@ -73,9 +73,10 @@ void fragment() {
 
 	// 多太阳累加 Lambert 漫反射 + Blinn-Phong 高光。每个太阳各算一次 (仅向阳侧)。
 	// 点光源按 Godot omni 衰减公式逐像素衰减, 与 Forward+ 地形光照同步。
+	// u_sun_count=0(场景无任何有效光源) → cnt=0 → 海洋只剩环境光(u_ambient), 不再被任何太阳照亮。
 	float diff_sum = 0.0;
 	float spec_sum = 0.0;
-	int cnt = max(1, u_sun_count);
+	int cnt = max(0, u_sun_count);
 	for (int i = 0; i < 4; i++) {
 		if (i >= cnt) break;
 		float atten = sun_atten_at_idx(i);

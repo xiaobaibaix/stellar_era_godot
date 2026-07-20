@@ -924,17 +924,17 @@ func _update_sun() -> void:
 			continue   # omni_range=0 = 关掉
 		filtered.append(l)
 	var cnt: int = mini(filtered.size(), MAX_SUNS)
-	# 没有挂光源 → 退回单太阳遗留路径(sunElevation/Azimuth → 一个无穷远太阳)
+	# 没有挂光源 → 大气进入"无太阳"态: _sun_count=0, shader 里 sun_active() 全 false → 只有消光没有散射,
+	# 大气壳呈暗色(背景被 T 压暗), 不再有晨昏线/蓝色辉光。用户加任意 Light3D 才会重新亮。
+	# (旧版曾用 params.sunElevation/Azimuth 注入"虚构太阳"做向后兼容, 但这让"删光所有光源后大气还亮"
+	# 这个直观期望失败 → 移除。如果确实想要"无 Light3D 也有太阳", 挂一个 DirectionalLight3D 即可。)
 	if cnt == 0:
-		var el: float = deg_to_rad(params.sunElevation)
-		var az: float = deg_to_rad(params.sunAzimuth)
-		_sun_dir = Vector3(cos(el) * cos(az), sin(el), cos(el) * sin(az)).normalized()
-		_sun_dirs = [_sun_dir]
-		_sun_positions = [global_position + _sun_dir * 1.0e9]
-		_sun_is_locals = [0.0]
-		_sun_ranges = [1.0e9]
-		_sun_attens = [0.0]
-		_sun_count = 1
+		_sun_dirs.clear()
+		_sun_positions.clear()
+		_sun_is_locals.clear()
+		_sun_ranges.clear()
+		_sun_attens.clear()
+		_sun_count = 0
 	else:
 		_sun_dirs.clear()
 		_sun_positions.clear()
