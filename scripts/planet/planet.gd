@@ -67,8 +67,9 @@ var _next_job: int = 0
 var _cam_pos: Vector3 = Vector3(1e9, 1e9, 1e9)
 var _cam_moved: bool = true
 var _wire: bool = false
-var _body_mesh: Node3D  # 所有 Qnode 的容器节点(BodyMesh)
-var _qnode_scene: PackedScene  # qnode.tscn 预制体
+var _body_mesh: Node3D  # 地形渲染节点的父容器(BodyMesh)
+var _terrain_mesh: MeshInstance3D  # 全场唯一地形 mesh 节点(mesh 即单元架构)
+var _mesh_dirty: bool = true  # 合并 mesh 需重建(split/merge/渲染状态翻转/worker 完成时置 true)
 var _last_params_hash: int = 0  # 参数指纹(轮询检测变化触发 rebuild, 绕过 @tool 信号不可靠)
 var _last_visual_hash: int = 0  # 视觉指纹(atmo*/sun*/show*): 变化只推 shader uniform, 不重建地形
 var _last_lod_hash: int = 0     # LOD 细分指纹(split*/maxLevel/...): 变化重跑 select_lod, 不重建地形
@@ -108,8 +109,6 @@ func _ready() -> void:
 		params.connect("param_changed", _on_param_changed)
 	if _pool == null:
 		_pool = PatchWorkerPool.instance()
-	if _qnode_scene == null:
-		_qnode_scene = load("res://scenes/qnode.tscn")
 	if _body_mesh == null:
 		# 优先用场景里手动建的 BodyMesh(编辑器可见); 没有则代码建一个(internal)
 		_body_mesh = get_node_or_null("BodyMesh")
@@ -117,6 +116,7 @@ func _ready() -> void:
 			_body_mesh = Node3D.new()
 			_body_mesh.name = "BodyMesh"
 			add_child(_body_mesh, false, Node.INTERNAL_MODE_BACK)
+	_ensure_terrain_mesh()  # 全场唯一地形 MeshInstance3D(mesh 即单元架构)
 	if material == null:
 		var tsh := load("res://shaders/terrain.gdshader")
 		material = ShaderMaterial.new()
@@ -196,6 +196,11 @@ func _process(_delta: float) -> void:
 	if cam != null:
 		# 大气壳挂 Planet 下(随节点移动), 不再跟随相机 → 编辑器视口相机也能看到(不依赖 snap)。
 		update(cam)
+	# mesh 即单元: 任何 worker 完成/渲染状态翻转/split/merge 都置 _mesh_dirty → 帧末统一重建合并 mesh。
+	# 与 LOD tick(每 3 帧)解耦: 本帧没跑 select_lod 时, 有 patch 就绪也立即合并显示。
+	if _mesh_dirty:
+		_rebuild_merged_mesh()
+		_mesh_dirty = false
 
 
 # 参数指纹: 任一关键参数变化 → 哈希变 → _process 轮询到就 rebuild。绕过信号不可靠。
@@ -331,7 +336,7 @@ func _log_ready() -> void:
 		f.store_line("roots=%d body=%s mat=%s" % [roots.size(), _body_mesh != null, material != null])
 		if not roots.is_empty():
 			var r0 = roots[0]
-			f.store_line("r0 mesh=%s vis=%s" % [r0.mesh_inst.mesh != null, r0.mesh_inst.visible])
+			f.store_line("r0 ready=%s state=%d" % [r0.mesh_ready, r0.render_state])
 		f.close()
 
 
@@ -411,23 +416,18 @@ func _build_roots() -> void:
 		[4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
 	]
 	roots = []
-	var ri := 0
 	for f in _faces:
-		var r: QNode = _qnode_scene.instantiate()
-		r.name = "Qnode%d" % (ri + 1)  # 根: Qnode1..Qnode20
-		_body_mesh.add_child(r)  # 普通 add_child: 场景树显示原名(不带 @)
-		r.set_owner(null)  # 防 @tool 编辑器把运行时节点写进场景文件
-		r.setup(self, _V[f[0]], _V[f[1]], _V[f[2]], 0, _qnode_scene)
+		var r := QNode.new()
+		r.setup(self, _V[f[0]], _V[f[1]], _V[f[2]], 0)
 		var data := PatchBuilder.build_patch_arrays(
 			r.A, r.B, r.C, params.patchResolution, params.radius,
 			params.maxHeight, terrain, [1, 1, 1])
 		r._patch_data = data
-		r.set_mesh(_gen_array_mesh(data), int(data.tris))
-		_apply_node_materials(r)
-		r.mesh_inst.visible = true  # 根 patch 默认可见(基础球壳); select_lod 运行后接管细分/剔除
+		r.set_surfaces(_gen_surface_list(data, _wire), int(data.tris))
+		r.render_state = 1  # 根默认可见(基础球壳), 首帧即可合并显示; select_lod 运行后接管细分/剔除
 		r.built_key = "1,1,1"
 		roots.append(r)
-		ri += 1
+	_mesh_dirty = true  # 首帧合并出基础球壳
 
 
 func _root_containing(p: Vector3) -> Array:
@@ -490,21 +490,17 @@ func target_level_at(p: Vector3) -> int:
 
 
 # ---- 网格 ----
-# worker 输出扁平 PackedFloat32Array(xyz 交错, 与 three.js BufferGeometry 对齐);
-# Godot 的 ArrayMesh 需要 PackedVector3Array / PackedColorArray, 主线程转换
-# (patch 顶点 ~160, 开销可忽略)。只生成 ArrayMesh 资源, 由 QNode.set_mesh 填进去。
-func _gen_array_mesh(data: Dictionary) -> ArrayMesh:
-	# worker 输出索引网格: 唯一顶点 PackedVector3Array/PackedColorArray + indices(PackedInt32Array)。
-	# flat→Vector3 转换已在 worker 线程做掉; 主线程只需把数组连同 ARRAY_INDEX 交给 ArrayMesh。
+# 由 _patch_data 生成 surface 列表(缓存到 QNode._surfaces, 合并重建时复用, 避免每次重算)。
+# 非 wire: 1 个三角面 surface; wire: 2 个(实心遮挡面 + 亮线段)。每项 = {prim, arrays, tris}。
+func _gen_surface_list(data: Dictionary, wire: bool) -> Array:
 	var verts: PackedVector3Array = data.verts
 	var norms: PackedVector3Array = data.norms
 	var cols: PackedColorArray = data.cols
 	var indices: PackedInt32Array = data.indices
 	var tris: int = data.tris
-	var am := ArrayMesh.new()
-	if _wire:
-		# 线框双 surface: surface0 实心遮挡面(索引三角, 深色 CULL_BACK 写深度, 略内缩避免 z-fight);
-		# surface1 线段(亮、只测深度)。线段索引由三角索引 (a,b,c)→(a,b,b,c,c,a) 展开。
+	var out: Array = []
+	if wire:
+		# 线框双 surface: 实心遮挡面(深色 CULL_BACK 写深度, 略内缩避免 z-fight) + 亮线段(只测深度)。
 		var verts_fill := PackedVector3Array()
 		verts_fill.resize(verts.size())
 		for i in range(verts.size()):
@@ -513,24 +509,21 @@ func _gen_array_mesh(data: Dictionary) -> ArrayMesh:
 		surf_f.resize(Mesh.ARRAY_MAX)
 		surf_f[Mesh.ARRAY_VERTEX] = verts_fill
 		surf_f[Mesh.ARRAY_INDEX] = indices
-		am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, surf_f)
-
+		out.append({"prim": Mesh.PRIMITIVE_TRIANGLES, "arrays": surf_f, "tris": tris})
+		# 线段索引由三角索引 (a,b,c)→(a,b,b,c,c,a) 展开
 		var line_idx := PackedInt32Array()
 		for t in range(tris):
 			var a: int = indices[t * 3]
 			var b: int = indices[t * 3 + 1]
 			var c: int = indices[t * 3 + 2]
-			line_idx.append(a)
-			line_idx.append(b)
-			line_idx.append(b)
-			line_idx.append(c)
-			line_idx.append(c)
-			line_idx.append(a)
+			line_idx.append(a); line_idx.append(b)
+			line_idx.append(b); line_idx.append(c)
+			line_idx.append(c); line_idx.append(a)
 		var surf_l := []
 		surf_l.resize(Mesh.ARRAY_MAX)
 		surf_l[Mesh.ARRAY_VERTEX] = verts
 		surf_l[Mesh.ARRAY_INDEX] = line_idx
-		am.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, surf_l)
+		out.append({"prim": Mesh.PRIMITIVE_LINES, "arrays": surf_l, "tris": tris})
 	else:
 		# 索引三角面: ARRAY_INDEX 复用共享顶点(顶点数约为非索引的 1/5)
 		var surf := []
@@ -539,15 +532,89 @@ func _gen_array_mesh(data: Dictionary) -> ArrayMesh:
 		surf[Mesh.ARRAY_NORMAL] = norms
 		surf[Mesh.ARRAY_COLOR] = cols
 		surf[Mesh.ARRAY_INDEX] = indices
-		am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, surf)
-	return am
+		out.append({"prim": Mesh.PRIMITIVE_TRIANGLES, "arrays": surf, "tris": tris})
+	return out
+
+
+# 全场唯一地形 MeshInstance3D: 挂 BodyMesh 下, 不写回 .tscn(set_owner null + INTERNAL)。
+# 位移/裙边在顶点 shader → AABB 不含 → 给足 extra_cull_margin 防整壳被误剔(可见性由 select_lod 手动剔除兜底)。
+func _ensure_terrain_mesh() -> void:
+	if _terrain_mesh != null and is_instance_valid(_terrain_mesh):
+		return
+	if _body_mesh == null:
+		return
+	_terrain_mesh = _body_mesh.get_node_or_null("TerrainMesh")
+	if _terrain_mesh == null:
+		_terrain_mesh = MeshInstance3D.new()
+		_terrain_mesh.name = "TerrainMesh"
+		_body_mesh.add_child(_terrain_mesh, false, Node.INTERNAL_MODE_BACK)
+		_terrain_mesh.set_owner(null)  # 防 @tool 编辑器把运行时节点写进场景文件
+	_terrain_mesh.extra_cull_margin = params.radius * 4.0 + params.maxHeight * 3.0 + 1.0
+
+
+# 收集 render_state==1 且 mesh_ready 的节点(叶 或 兜底内部节点); state==2 递归子; state==0 跳过整子树。
+func _collect_visible_leaves(node: QNode, out: Array) -> void:
+	if node.render_state == 0:
+		return
+	if node.render_state == 1:
+		if node.mesh_ready:
+			out.append(node)
+		return  # 自身渲染模式: 不递归(子被隐藏)
+	if node.children != null:
+		for c in node.children:
+			_collect_visible_leaves(c, out)
+
+
+# 帧末合并重建: 把所有 visible+mesh_ready 叶子的 _surfaces 拼成单个 ArrayMesh 挂到 _terrain_mesh。
+# 同帧内多次脏只重建一次 → 消除 per-event set_mesh 尖刺。
+func _rebuild_merged_mesh() -> void:
+	if _terrain_mesh == null or not is_instance_valid(_terrain_mesh):
+		_ensure_terrain_mesh()
+		if _terrain_mesh == null:
+			return
+	stats.patches = 0
+	stats.triangles = 0
+	var leaves: Array = []
+	for r in roots:
+		_collect_visible_leaves(r, leaves)
+	var am := ArrayMesh.new()
+	if _wire:
+		# 线框: 先加所有叶的实心遮挡面(surface 0..fill-1), 再加所有叶的亮线段(surface fill..end)。
+		# 前 fill 个配 _wire_fill_mat, 其后配 _wire_line_mat。
+		var fill := 0
+		for q in leaves:
+			if q._surfaces.size() >= 1:
+				var s0: Dictionary = q._surfaces[0]
+				am.add_surface_from_arrays(int(s0.prim), s0.arrays)
+				stats.patches += 1
+				stats.triangles += q.tri_count
+				fill += 1
+		for q in leaves:
+			if q._surfaces.size() >= 2:
+				var s1: Dictionary = q._surfaces[1]
+				am.add_surface_from_arrays(int(s1.prim), s1.arrays)
+		_terrain_mesh.mesh = am
+		_terrain_mesh.material_override = null
+		for i in range(am.get_surface_count()):
+			_terrain_mesh.set_surface_override_material(i, _wire_fill_mat if i < fill else _wire_line_mat)
+	else:
+		for q in leaves:
+			for s in q._surfaces:
+				var sd: Dictionary = s
+				am.add_surface_from_arrays(int(sd.prim), sd.arrays)
+			stats.patches += 1
+			stats.triangles += q.tri_count
+		_terrain_mesh.mesh = am
+		_terrain_mesh.material_override = material
+		for i in range(am.get_surface_count()):
+			_terrain_mesh.set_surface_override_material(i, null)
 
 
 # ---- Worker 请求调度 ----
 func request_mesh(node: QNode, strides: Array, key: String, is_prefetch: bool = false) -> void:
 	if node.pending:
 		return
-	if node.mesh_inst.mesh != null and node.built_key == key:
+	if node.mesh_ready and node.built_key == key:
 		return
 	# inflight 上限: 防止靠近/高细分时一次堆上百个 job → 完成回调挤爆主线程造成卡顿。
 	# 前景(显示必需)上限高(24)、优先; 预取上限低(8)。超限就让位, 下个 select_lod 再补。
@@ -576,8 +643,8 @@ func request_mesh(node: QNode, strides: Array, key: String, is_prefetch: bool = 
 
 
 func _on_mesh_job(job_id: int, data: Dictionary) -> void:
-	# 先取 Variant 再校验: 直接赋给 typed var 时, 若 _jobs 里是已 queue_free 的节点,
-	# Godot 在赋值阶段就报 "assign invalid previously freed instance"(is_instance_valid 没机会跑)。
+	# RefCounted 节点: _jobs 持引用使其在 merge 后仍存活(但被 dispose → cancelled=true)。
+	# 用 Variant 接住再校验, 避开 freed 实例赋值报错。
 	var raw: Variant = _jobs.get(job_id, null)
 	_jobs.erase(job_id)
 	_pending -= 1
@@ -586,12 +653,11 @@ func _on_mesh_job(job_id: int, data: Dictionary) -> void:
 	var node: QNode = raw
 	node.pending = false
 	if not node.cancelled and int(data.gen) == _gen:
-		var was_visible := node.mesh_inst.visible
 		node._patch_data = data
-		node.set_mesh(_gen_array_mesh(data), int(data.tris))
-		_apply_node_materials(node)
-		node.mesh_inst.visible = was_visible
+		node.set_surfaces(_gen_surface_list(data, _wire), int(data.tris))
 		node.built_key = node.req_key
+		_mesh_dirty = true        # 帧末统一合并(不再 per-event set_mesh → 消尖刺)
+		_mark_lod_dirty()         # 让 select_lod 尽快重评(子就绪 → fallback 切递归子)
 
 
 # 每 LOD pass 的 compute_strides 配额: 超过 STRIDE_BUDGET 次返回 false → 调用方跳过(等下个 pass)。
@@ -610,12 +676,6 @@ func split_budget_ok() -> bool:
 		_remaining_splits -= 1
 		return true
 	return false
-
-
-func count_node(node: QNode) -> void:
-	stats.patches += 1
-	if node.mesh_inst.mesh != null:
-		stats.triangles += int(node.mesh_inst.get_meta("triangles", 0))
 
 
 func update(cam: Camera3D) -> void:
@@ -650,8 +710,6 @@ func update(cam: Camera3D) -> void:
 	# 运行时照常剔除。cull 经 select_lod/_render_interior 递归传到整棵四叉树。
 	var cull: bool = not Engine.is_editor_hint()
 	_prefetch_this_frame = 0
-	stats.patches = 0
-	stats.triangles = 0
 	_stride_used = 0
 	_remaining_splits = params.splitBudget  # 每 LOD pass 重置分裂预算(移植 web splitBudget)
 	_tree_changed = false   # 本 pass 结构变化标记(select_lod 内 split/merge 置 true)
@@ -673,8 +731,7 @@ func rebuild() -> void:
 	_jobs.clear()  # 丢弃所有 pending job(回调时 is_instance_valid 也会拦)
 	for r in roots:
 		r.dispose()
-		r.queue_free()
-	roots.clear()
+	roots.clear()  # RefCounted: 引用释放即自动回收, 无需 queue_free
 	_cam_moved = true
 	_cam_pos = Vector3(1e9, 1e9, 1e9)
 	_lod_dirty = 3   # 重建后强制下几拍 select_lod 必跑 → 立即按相机距离重新细分(取代旧的间接 moved 触发)
@@ -1028,42 +1085,25 @@ func _update_sun() -> void:
 
 func set_wireframe(on: bool) -> void:
 	_wire = on
-	# 线框模式: 每个 patch 用"深色实心面(写深度, 挡背面)+ 亮线段(只测深度)"双 surface(见 _gen_array_mesh)。
+	# 线框模式: 每个 patch 用"深色实心面(写深度, 挡背面)+ 亮线段(只测深度)"双 surface(见 _gen_surface_list)。
 	# → 背面/远侧线被前方实心面的深度剔除, 只看到朝向相机的可见线。
-	# 不再依赖失效的 material.wireframe, 也不再改共享 material(实心面/线段各有独立材质)。
-	# _refresh_subtree 重建 mesh 后会顺带调 _apply_node_materials 配材质。
-	_refresh_all_meshes()
+	# 合并 mesh 重建时按 surface 索引配 _wire_fill_mat / _wire_line_mat(见 _rebuild_merged_mesh)。
+	_refresh_all_surfaces()
+	_mesh_dirty = true
 
 
-# 按 _wire 给节点配材质: 线框=surface0 实心遮挡面 + surface1 亮线段; 非线框=单 material_override(顶点色着色)。
-func _apply_node_materials(node: QNode) -> void:
-	if node.mesh_inst == null or node.mesh_inst.mesh == null:
-		return
-	if _wire:
-		node.mesh_inst.material_override = null
-		node.mesh_inst.set_surface_override_material(0, _wire_fill_mat)
-		if node.mesh_inst.mesh.get_surface_count() > 1:
-			node.mesh_inst.set_surface_override_material(1, _wire_line_mat)
-	else:
-		node.mesh_inst.material_override = material
-		for i in range(node.mesh_inst.mesh.get_surface_count()):
-			node.mesh_inst.set_surface_override_material(i, null)
-
-
-# 切换 wireframe 时, 遍历所有 patch(含已分裂子树 + 合并缓存), 用缓存的 _patch_data 重建 ArrayMesh
-func _refresh_all_meshes() -> void:
+# 切换 wireframe 时, 用缓存的 _patch_data 重算所有节点的 _surfaces(新 _wire); 帧末合并重建时生效。
+func _refresh_all_surfaces() -> void:
 	for r in roots:
-		_refresh_subtree(r)
+		_refresh_subtree_surfaces(r)
 
 
-func _refresh_subtree(node: QNode) -> void:
-	if node.mesh_inst != null and node.mesh_inst.mesh != null and not node._patch_data.is_empty():
-		var tri: int = int(node.mesh_inst.get_meta("triangles", 0))
-		node.set_mesh(_gen_array_mesh(node._patch_data), tri)
-		_apply_node_materials(node)
+func _refresh_subtree_surfaces(node: QNode) -> void:
+	if node.mesh_ready and not node._patch_data.is_empty():
+		node._surfaces = _gen_surface_list(node._patch_data, _wire)
 	if node.children != null:
 		for c in node.children:
-			_refresh_subtree(c)
+			_refresh_subtree_surfaces(c)
 
 
 # 地形参数快照(传给 worker 线程, 避免跨线程读 PlanetParams)
