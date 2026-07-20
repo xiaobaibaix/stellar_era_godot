@@ -278,13 +278,24 @@ func _build_frame_ubo(f: Dictionary, cam_pos: Vector3, inv_proj: Projection, cam
 	b.append(bo.x); b.append(bo.y); b.append(bo.z); b.append(1.0)
 	# cam_pos_time
 	b.append(cam_pos.x); b.append(cam_pos.y); b.append(cam_pos.z); b.append(f.get("time", 0.0))
-	# sun_dir
-	var sd: Vector3 = f.get("sun_dir", Vector3(0.739, 0.443, 0.515))
-	b.append(sd.x); b.append(sd.y); b.append(sd.z); b.append(0.0)
-	# sun_pos: 近场点光源 xyz=世界位置, w=sun_is_local(1=近场用位置反推方向, 0=无穷远用 sun_dir)
-	var sp: Vector3 = f.get("sun_pos", Vector3.ZERO)
-	var is_local: float = float(f.get("sun_is_local", 0.0))
-	b.append(sp.x); b.append(sp.y); b.append(sp.z); b.append(is_local)
+	# 多太阳: sun_dirs[4](xyz=方向, w=is_local) + sun_poss[4](xyz=位置, w=is_active) + sun_metas(x=count)
+	# 单太阳旧接口兼容: 若没传 sun_dirs 数组, 就把 sun_dir/sun_pos/sun_is_local 当成 [0]。
+	var default_dir: Vector3 = f.get("sun_dir", Vector3(0.739, 0.443, 0.515))
+	var dirs_arr: Array = f.get("sun_dirs", [default_dir])
+	var poss_arr: Array = f.get("sun_positions", [Vector3.ZERO])
+	var locs_arr: Array = f.get("sun_is_locals", [float(f.get("sun_is_local", 0.0))])
+	var sun_count: int = int(f.get("sun_count", dirs_arr.size()))
+	sun_count = clampi(sun_count, 0, 4)
+	for i in range(4):
+		var d: Vector3 = dirs_arr[i] if i < dirs_arr.size() else Vector3(0.739, 0.443, 0.515)
+		var lc: float = float(locs_arr[i]) if i < locs_arr.size() else 0.0
+		b.append(d.x); b.append(d.y); b.append(d.z); b.append(lc)
+	for i in range(4):
+		var p: Vector3 = poss_arr[i] if i < poss_arr.size() else Vector3.ZERO
+		var ac: float = 1.0 if i < sun_count else 0.0
+		b.append(p.x); b.append(p.y); b.append(p.z); b.append(ac)
+	# sun_metas: x=count
+	b.append(float(sun_count)); b.append(0.0); b.append(0.0); b.append(0.0)
 	# planet_center
 	var pc: Vector3 = f.get("planet_center", Vector3.ZERO)
 	b.append(pc.x); b.append(pc.y); b.append(pc.z); b.append(0.0)
@@ -419,17 +430,27 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 
 # 体积光两步: 1) copy color→lit 快照; 2) godray lit→color 径向累积。
 # sun_uv: 太阳投影到屏幕的 uv; sun_vis: 相机朝向·太阳方向的 smoothstep(太阳在背后=0)。
+# 多太阳时: 选第一个有效太阳做 godray(主光), 其余太阳的径向束暂不复刻(避免 godray 重复绘制过曝)。
 # 近场点光源: 用真实世界位置投影; 无穷远平行光: 用 cam_pos + sun_dir*1e7(模拟极远点)。
 func _dispatch_godray(f: Dictionary, rsd, cam_xform: Transform3D, cam_pos: Vector3, color_image: RID, size: Vector2i, xg: int, yg: int) -> void:
-	var sd: Vector3 = f.get("sun_dir", Vector3(0.739, 0.443, 0.515))
-	var is_local: float = float(f.get("sun_is_local", 0.0))
+	var default_dir: Vector3 = f.get("sun_dir", Vector3(0.739, 0.443, 0.515))
+	var dirs_arr: Array = f.get("sun_dirs", [default_dir])
+	var poss_arr: Array = f.get("sun_positions", [Vector3.ZERO])
+	var locs_arr: Array = f.get("sun_is_locals", [float(f.get("sun_is_local", 0.0))])
+	var sun_count: int = clampi(int(f.get("sun_count", dirs_arr.size())), 0, 4)
+	if sun_count == 0:
+		return
+	# 选第一个有效槽位当 godray 源
+	var sd: Vector3 = dirs_arr[0] if not dirs_arr.is_empty() else default_dir
+	var is_local: float = float(locs_arr[0]) if not locs_arr.is_empty() else 0.0
+	var sp: Vector3 = poss_arr[0] if not poss_arr.is_empty() else Vector3.ZERO
 	# world→clip = proj * view; cam_xform 是 camera→world → 视图矩阵 view(world→camera) = 其逆。
 	var view_t: Transform3D = cam_xform.affine_inverse()
 	var proj: Projection = rsd.get_cam_projection()
 	var world_to_clip: Projection = proj * Projection(view_t)
 	var sun_world: Vector3 = cam_pos + sd * 1.0e7   # 默认: 无穷远平行光
 	if is_local >= 0.5:
-		sun_world = f.get("sun_pos", sun_world)   # 近场: 真实位置
+		sun_world = sp   # 近场: 真实位置
 	var clip: Vector4 = world_to_clip * Vector4(sun_world.x, sun_world.y, sun_world.z, 1.0)
 	var sun_uv := Vector2(0.5, 0.5)
 	if absf(clip.w) > 1e-6:

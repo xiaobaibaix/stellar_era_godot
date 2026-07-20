@@ -15,12 +15,16 @@ extends Node3D
 ## LOD 距离判定的聚焦目标(用它的位置算细分距离); 留空则用 camera。
 ## 跟随角色模式下设为 Player, 让细分围绕角色而非相机; 视锥剔除仍用渲染相机。
 @export var lod_target: Node3D
-## 太阳光(可选):
+## 太阳光(可选, 单太阳遗留接口; 推荐用 sun_lights 数组):
 ## - DirectionalLight3D: _update_sun 把它的 -Z 对齐 sun_dir(平行光跟随大气太阳方向)。
 ## - OmniLight3D: _update_sun 从它的位置反推 sun_dir(点光源位置驱动大气/海洋太阳方向);
 ##   编辑器里拖动光源, 大气/海洋高光实时跟随(每帧检测位置变化)。
 ## 两种都让地形光照方向与大气/海洋的 u_sun_dir 一致。
+## 注: 若 sun_lights 为空, 此字段会被自动包进 sun_lights[0]; 二者并存时以 sun_lights 为准。
 @export var sun_light: Light3D
+## 多太阳(可同时挂多个 DirectionalLight3D / OmniLight3D)。大气/海洋/晨昏线对每个太阳各算一次并累加。
+## 性能代价: 大气 raymarch 内层 × 太阳数, 4 个太阳 ≈ 4× 单太阳开销。最多 4 个(MAX_SUNS=4)。
+@export var sun_lights: Array[Light3D] = []
 var terrain: Terrain
 var roots: Array = []  # Array[QNode]
 var _V: Array = []  # 12 个单位顶点(Vector3)
@@ -43,7 +47,14 @@ var _atmo_comp_res: Compositor
 # 这样编辑器视口相机(不在场景 Camera3D 位置)也能看到大气。depth_test_disabled 下壳覆盖的像素都积分;
 # shader 用 depth_texture 处理遮挡 → 相机在壳外(太空)/壳内(地表)都正确(raySphere 算 tNear/tFar,
 # 相机在内 tNear=0)。物理大气顶 u_ratmo = R*atmoScale = 壳半径。
-var _sun_dir: Vector3 = Vector3(0.739, 0.443, 0.515)   # normalize(1,0.6,0.8) 默认
+var _sun_dir: Vector3 = Vector3(0.739, 0.443, 0.515)   # normalize(1,0.6,0.8) 默认(主太阳; 海洋/地形用)
+# 多太阳快照: 每帧 _update_sun 填充, _push_compositor_frame 推给大气 compositor。
+# 与 MAX_SUNS=4 对齐(atmosphere_compute.glsl / atmosphere_compositor.gd)。
+var _sun_dirs: Array[Vector3] = []
+var _sun_positions: Array[Vector3] = []   # 近场点光源: 真实世界位置; 方向光: 任意(不会用)
+var _sun_is_locals: Array[float] = []     # 1.0=近场(用 position 反推方向), 0.0=无穷远(用 dir)
+var _sun_count: int = 0
+const MAX_SUNS: int = 4
 
 var _gen: int = 0
 var _pool: PatchWorkerPool
@@ -75,6 +86,8 @@ var _remaining_splits: int = 0  # 本 LOD pass 剩余分裂预算(移植 web spl
 var _lod_dirty: int = 3         # >0 需跑 select_lod; 移动/相机变换/有在途 job 时置 3, 空闲逐拍递减到 0 后短路
 var _last_cam_xform: Transform3D = Transform3D()  # 上次渲染相机变换(检测原地转视角 → 更新视锥剔除)
 var _last_sun_light_pos: Vector3 = Vector3(INF, INF, INF)  # 上次 OmniLight3D 位置(检测拖动 → 重算 sun_dir)
+var _last_sun_lights_key: Array = []   # 上次 sun_lights 集合(检测增删光源 → 重算)
+var _last_omni_positions: Dictionary = {}   # instance_id -> Vector3(多 OmniLight3D 各自位置追踪)
 
 
 # 作为预制体节点: 进树即自动构建; _process 自动取场景活动相机驱动 LOD。
@@ -139,13 +152,10 @@ func _process(_delta: float) -> void:
 	# 信号连接保险(运行时用)
 	if params != null and params.has_signal("param_changed") and not params.is_connected("param_changed", _on_param_changed):
 		params.connect("param_changed", _on_param_changed)
-	# OmniLight3D 当太阳时: 检测光源位置变化 → 重算 sun_dir(编辑器拖光源, 大气/海洋高光实时跟随)。
-	# DirectionalLight3D 不需要, 它的方向由 params 通过 look_at 强制对齐。
-	if sun_light is OmniLight3D:
-		var cur_pos: Vector3 = sun_light.global_position
-		if not cur_pos.is_equal_approx(_last_sun_light_pos):
-			_last_sun_light_pos = cur_pos
-			_update_sun()
+	# 多太阳位置变化检测: 任一 OmniLight3D 拖动 / sun_lights 增删 → 重算所有 sun dir/pos。
+	# DirectionalLight3D 不需要(方向由 params 通过 look_at 强制对齐)。
+	if _sun_lights_changed() or _any_omni_moved():
+		_update_sun()
 	# 参数指纹轮询(编辑器+运行时统一): 每 15 帧检测参数变化 → rebuild。
 	# @tool 下 local_to_scene 副本的 param_changed 信号不可靠, 改用轮询(参照 planet_node.gd)。
 	_param_tick += 1
@@ -767,16 +777,23 @@ func _push_compositor_frame() -> void:
 	_atmo_compositor.enabled = p.showAtmosphere   # 关 = 跳过整条后处理(含云)
 	# sun_pos / sun_is_local: 点光源近场时, 大气晨昏线按真实球冠几何(angular radius = acos(R/d))收缩;
 	# 方向光/无光源 → 推到无穷远, sun_dir 视为常数方向(等价于原本“半边亮”的行为)。
-	var sun_world_pos: Vector3 = global_position + _sun_dir * 1.0e9
-	var sun_is_local: float = 0.0
-	if sun_light is OmniLight3D:
-		sun_world_pos = sun_light.global_position
-		sun_is_local = 1.0
+	# 多太阳支持: 推 sun_dirs/sun_positions/sun_is_locals 数组 + sun_count(最多 MAX_SUNS=4 个)。
+	# 兼容: 仍保留 sun_dir/sun_pos/sun_is_local(单太阳旧字段), 让旧 compositor 路径也能取到 [0]。
+	var default_pos: Vector3 = global_position + _sun_dir * 1.0e9
+	var first_pos: Vector3 = default_pos
+	var first_local: float = 0.0
+	if _sun_count > 0:
+		first_pos = _sun_positions[0]
+		first_local = _sun_is_locals[0]
 	_atmo_compositor.set_frame_data({
 		"time": Time.get_ticks_msec() / 1000.0,
 		"sun_dir": _sun_dir,
-		"sun_pos": sun_world_pos,
-		"sun_is_local": sun_is_local,
+		"sun_pos": first_pos,
+		"sun_is_local": first_local,
+		"sun_dirs": _sun_dirs.duplicate(),
+		"sun_positions": _sun_positions.duplicate(),
+		"sun_is_locals": _sun_is_locals.duplicate(),
+		"sun_count": _sun_count,
 		"planet_center": global_position,
 		"rground": ground_r,
 		"ratmo": R * p.atmoScale,
@@ -831,29 +848,143 @@ func _apply_ocean_uniforms() -> void:
 	_ocean_mat.set_shader_parameter("u_spec_strength", p.oceanSpecStrength)
 
 
-# sun_dir 来源:
-# - sun_light 是 OmniLight3D: 从光源位置反推(点光源驱动, 用户拖光源 → 大气/海洋跟随)。
-# - sun_light 是 DirectionalLight3D / 留空: 从 sunElevation/sunAzimuth 算 planet-local sun_dir。
-# 然后 push 到两 shader; DirectionalLight3D 会被 look_at(-Z 对齐) 跟随 sun_dir。
+# 返回"有效太阳列表": sun_lights 数组(若非空), 否则 [sun_light](遗留单太阳字段)。
+func _effective_sun_lights() -> Array[Light3D]:
+	var arr: Array[Light3D] = []
+	for l in sun_lights:
+		if l is Light3D:
+			arr.append(l)
+	if arr.is_empty() and sun_light is Light3D:
+		arr.append(sun_light)
+	return arr
+
+
+# sun_lights 集合是否变化(增删光源 → 重算所有 sun dir/pos)。比较对象引用集合(忽略顺序)。
+func _sun_lights_changed() -> bool:
+	var cur: Array = _effective_sun_lights()
+	if cur.size() != _last_sun_lights_key.size():
+		_last_sun_lights_key = cur.duplicate()
+		return true
+	for l in cur:
+		if not _last_sun_lights_key.has(l):
+			_last_sun_lights_key = cur.duplicate()
+			return true
+	return false
+
+
+# 任一 OmniLight3D 是否被拖动(位置变化)。多太阳场景下每个 OmniLight3D 各自追踪位置(instance_id 索引)。
+func _any_omni_moved() -> bool:
+	var moved: bool = false
+	var cur_ids: Array = []
+	var first_omni_pos: Variant = null   # 用于同步遗留变量 _last_sun_light_pos
+	for l in _effective_sun_lights():
+		if not (l is OmniLight3D):
+			continue
+		var id: int = l.get_instance_id()
+		cur_ids.append(id)
+		var p: Vector3 = l.global_position
+		if first_omni_pos == null:
+			first_omni_pos = p
+		var prev: Variant = _last_omni_positions.get(id, null)
+		if prev == null or not (prev as Vector3).is_equal_approx(p):
+			moved = true
+		_last_omni_positions[id] = p
+	# 清理已删除光源的残留记录
+	for k in _last_omni_positions.keys():
+		if not cur_ids.has(k):
+			_last_omni_positions.erase(k)
+	# 同步遗留变量(单太阳旧代码用): 保存第一个 OmniLight3D 的当前位置
+	if first_omni_pos != null:
+		_last_sun_light_pos = first_omni_pos
+	return moved
+
+
+# sun_dir 来源(每太阳独立):
+# - OmniLight3D: 从光源位置反推(点光源驱动, 用户拖光源 → 大气/海洋跟随), is_local=1。
+# - DirectionalLight3D: 用其 -Z 朝向(planet-local, 与 look_at 对齐), is_local=0。
+#   (DirectionalLight3D 自己被 look_at(-Z = -sun_dir) 强制对齐 params.sunElevation/Azimuth 算出的方向)
+# - 无光源: 从 params.sunElevation/sunAzimuth 算 planet-local sun_dir(单太阳遗留行为)。
+# 数组长度对齐 MAX_SUNS=4; _sun_count 为有效太阳数。然后 push 给海洋 shader(主太阳 [0])。
 func _update_sun() -> void:
 	if params == null:
 		return
-	if sun_light is OmniLight3D:
-		var offset: Vector3 = sun_light.global_position - global_position
-		if offset.length_squared() > 1e-8:
-			_sun_dir = offset.normalized()
-		# 光源恰好在 planet_center(罕见) → 保留上次 _sun_dir, 避免除零
-	else:
+	var lights: Array[Light3D] = _effective_sun_lights()
+	var cnt: int = mini(lights.size(), MAX_SUNS)
+	# 没有挂光源 → 退回单太阳遗留路径(sunElevation/Azimuth → 一个无穷远太阳)
+	if cnt == 0:
 		var el: float = deg_to_rad(params.sunElevation)
 		var az: float = deg_to_rad(params.sunAzimuth)
 		_sun_dir = Vector3(cos(el) * cos(az), sin(el), cos(el) * sin(az)).normalized()
+		_sun_dirs = [_sun_dir]
+		_sun_positions = [global_position + _sun_dir * 1.0e9]
+		_sun_is_locals = [0.0]
+		_sun_count = 1
+	else:
+		_sun_dirs.clear()
+		_sun_positions.clear()
+		_sun_is_locals.clear()
+		for i in range(cnt):
+			var l: Light3D = lights[i]
+			if l is OmniLight3D:
+				var offset: Vector3 = l.global_position - global_position
+				if offset.length_squared() > 1e-8:
+					var d: Vector3 = offset.normalized()
+					_sun_dirs.append(d)
+					_sun_positions.append(l.global_position)
+					_sun_is_locals.append(1.0)
+					if i == 0:
+						_sun_dir = d   # 主太阳方向(海洋/地形用)
+				else:
+					# 光源恰好在 planet_center(罕见) → 跳过(不计入有效太阳)
+					pass
+			elif l is DirectionalLight3D:
+				# DirectionalLight3D 沿 -Z 传播; sun_dir = -basis.z(光从此方向射向行星)
+				var d: Vector3 = (-l.global_basis.z).normalized()
+				_sun_dirs.append(d)
+				_sun_positions.append(global_position + d * 1.0e9)   # 无穷远占位
+				_sun_is_locals.append(0.0)
+				if i == 0:
+					_sun_dir = d
+				# 单 DirectionalLight3D 时: 用 params 的 sunElevation/Azimuth look_at 强制对齐
+				# (与遗留行为一致; 多 DirectionalLight3D 时尊重用户在编辑器里设的朝向)
+				if cnt == 1:
+					var el2: float = deg_to_rad(params.sunElevation)
+					var az2: float = deg_to_rad(params.sunAzimuth)
+					var wanted: Vector3 = Vector3(cos(el2) * cos(az2), sin(el2), cos(el2) * sin(az2)).normalized()
+					l.look_at(l.global_position - wanted, Vector3.UP)
+					_sun_dirs[0] = wanted
+					_sun_dir = wanted
+			else:
+				# SpotLight3D 等其它 Light3D: 按 DirectionalLight3D 处理(用其 -Z 朝向)
+				var d3: Vector3 = (-l.global_basis.z).normalized()
+				_sun_dirs.append(d3)
+				_sun_positions.append(global_position + d3 * 1.0e9)
+				_sun_is_locals.append(0.0)
+				if i == 0:
+					_sun_dir = d3
+		_sun_count = _sun_dirs.size()
+	# 推主太阳给地形(虽然 terrain.gdshader 当前未用 u_sun_dir, 但保留以兼容) + 海洋 shader
 	if material != null:
 		material.set_shader_parameter("u_sun_dir", _sun_dir)
 	if _ocean_mat != null:
+		# 主太阳 [0]: u_sun_dir/u_sun_pos/u_sun_is_local + u_sun_count
 		_ocean_mat.set_shader_parameter("u_sun_dir", _sun_dir)
-	if sun_light is DirectionalLight3D:
-		# 光沿 -Z 传播; -Z = -sun_dir → 光从太阳方向射向行星, dot(N,sun_dir)>0 的面被照亮
-		sun_light.look_at(sun_light.global_position - _sun_dir, Vector3.UP)
+		if _sun_count > 0:
+			_ocean_mat.set_shader_parameter("u_sun_pos", _sun_positions[0])
+			_ocean_mat.set_shader_parameter("u_sun_is_local", _sun_is_locals[0])
+		_ocean_mat.set_shader_parameter("u_sun_count", _sun_count)
+		# 额外槽位 1..N-1 → 数组(对齐 ocean shader 的 u_sun_dirs_add[3] 等)
+		if _ocean_mat.shader != null and _ocean_mat.shader.has_param("u_sun_dirs_add"):
+			var extras_dirs: PackedVector3Array = PackedVector3Array()
+			var extras_pos: PackedVector3Array = PackedVector3Array()
+			var extras_loc: PackedFloat32Array = PackedFloat32Array()
+			for i in range(1, _sun_count):
+				extras_dirs.append(_sun_dirs[i])
+				extras_pos.append(_sun_positions[i])
+				extras_loc.append(_sun_is_locals[i])
+			_ocean_mat.set_shader_parameter("u_sun_dirs_add", extras_dirs)
+			_ocean_mat.set_shader_parameter("u_sun_positions_add", extras_pos)
+			_ocean_mat.set_shader_parameter("u_sun_is_locals_add", extras_loc)
 
 
 func set_wireframe(on: bool) -> void:
