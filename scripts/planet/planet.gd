@@ -598,12 +598,43 @@ func _rebuild_merged_mesh() -> void:
 		for i in range(am.get_surface_count()):
 			_terrain_mesh.set_surface_override_material(i, _wire_fill_mat if i < fill else _wire_line_mat)
 	else:
+		# 非 wire(Phase B): 所有可见叶拼成【单个】 TRIANGLES surface → 1 draw call。
+		# verts/norms/cols 用 append_array(C 级 memcpy, 快); indices 须按累积顶点数偏移 →
+		# 先统计总索引数一次性 resize(避免 append 多次重分配), 再循环写入。直接读 _patch_data。
+		var big_v := PackedVector3Array()
+		var big_n := PackedVector3Array()
+		var big_c := PackedColorArray()
+		var total_idx := 0
 		for q in leaves:
-			for s in q._surfaces:
-				var sd: Dictionary = s
-				am.add_surface_from_arrays(int(sd.prim), sd.arrays)
+			var idx0: PackedInt32Array = q._patch_data.indices
+			total_idx += idx0.size()
+		var big_i := PackedInt32Array()
+		big_i.resize(total_idx)
+		var w := 0
+		var offset := 0
+		for q in leaves:
+			var data: Dictionary = q._patch_data
+			var v: PackedVector3Array = data.verts
+			var n: PackedVector3Array = data.norms
+			var c: PackedColorArray = data.cols
+			var idx: PackedInt32Array = data.indices
+			big_v.append_array(v)
+			big_n.append_array(n)
+			big_c.append_array(c)
+			var vs: int = v.size()
+			for i in range(idx.size()):
+				big_i[w] = idx[i] + offset
+				w += 1
+			offset += vs
 			stats.patches += 1
 			stats.triangles += q.tri_count
+		var surf := []
+		surf.resize(Mesh.ARRAY_MAX)
+		surf[Mesh.ARRAY_VERTEX] = big_v
+		surf[Mesh.ARRAY_NORMAL] = big_n
+		surf[Mesh.ARRAY_COLOR] = big_c
+		surf[Mesh.ARRAY_INDEX] = big_i
+		am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, surf)
 		_terrain_mesh.mesh = am
 		_terrain_mesh.material_override = material
 		for i in range(am.get_surface_count()):
