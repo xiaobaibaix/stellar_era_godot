@@ -41,9 +41,9 @@ func _ready() -> void:
 				planet = p
 				break
 			p = p.get_parent()
-	# 找相机挂点(预制体里 Player 根下的 CameraSlot, 与本节点同级)
+	# 找相机挂点(Player 根下的 CameraSlot 直接子节点)
 	if camera_slot == null:
-		camera_slot = get_parent().get_node_or_null("CameraSlot")
+		camera_slot = get_node_or_null("CameraSlot")
 	# Player 是 Planet 的子节点 → 本节点 _ready 早于 Planet._ready(terrain 尚未建),
 	# 此处不采样高度; 贴地/朝向推迟到 _physics_process 首帧(terrain 届时已建)。
 
