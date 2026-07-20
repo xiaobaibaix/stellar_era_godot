@@ -68,10 +68,15 @@ func _ready() -> void:
 		# project.godot 全局 mode=3(全屏); test_planet 调试要普通窗口, 这里覆盖。
 		# 用 DisplayServer(主窗口 API) 比 Window.mode setter 更稳(macOS 全屏 Space 切换有边角 case)。
 		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+	# 用 is 检查避免路径错/类型不匹配时把整个 _ready 废掉(get_node_or_null 返回错类型 → 运行时错 → 后续代码不跑)。
 	if planet_path != NodePath():
-		_planet = get_node_or_null(planet_path)
+		var pn: Node = get_node_or_null(planet_path)
+		if pn is Planet:
+			_planet = pn
 	if player_path != NodePath():
-		_player = get_node_or_null(player_path)
+		var pl: Node = get_node_or_null(player_path)
+		if pl is Player:
+			_player = pl
 	# 用初始 transform 反推 yaw/pitch/distance(对齐 OrbitCamera 思路): 否则脚本默认 distance(800)
 	# 在某些 radius 下会让相机落在星球内, 每次运行都得手动拉出来。
 	var fp := _focus_point(focus)
@@ -117,7 +122,34 @@ func _process(delta: float) -> void:
 		var eased := _ease_in_out(_transition_t)
 		# 终点每帧采样(PLAYER 焦点下角色在走, 终点要跟着移动), 否则过渡结束瞬间会" snap "到正确位置。
 		var end_xform := _desired_end_xform(_pending_focus)
-		global_transform = _from_xform.interpolate_with(end_xform, eased)
+		# 球面插值位置(不直线插值): 从 (730,0,0) 直线到 (0,331,11), t≈0.7 时到行星半径之内(318 < 326)
+		# → 相机裁进地形里, 看起来"卡住没动"。改成绕行星外缘的大圆弧: 减中心 → 方向 slerp + 半径 lerp → 加回中心。
+		var center: Vector3 = _planet.global_position if (_planet != null and is_instance_valid(_planet)) else Vector3.ZERO
+		var start_rel: Vector3 = _from_xform.origin - center
+		var end_rel: Vector3 = end_xform.origin - center
+		var start_len: float = start_rel.length()
+		var end_len: float = end_rel.length()
+		var cam_pos: Vector3
+		if start_len > 1e-3 and end_len > 1e-3:
+			var start_dir: Vector3 = start_rel / start_len
+			var end_dir: Vector3 = end_rel / end_len
+			# 方向走单位球大圆 + 半径线性插值: 任一时刻相机到中心的距离 = lerpf(start_len, end_len, eased),
+			# 必落在 [min, max] 端点之间; 两端点都在行星外 → 整段路径都在行星外, 不会裁进地表。
+			var mid_dir: Vector3 = start_dir.slerp(end_dir, eased)
+			var mid_len: float = lerpf(start_len, end_len, eased)
+			cam_pos = center + mid_dir * mid_len
+		else:
+			cam_pos = _from_xform.origin.lerp(end_xform.origin, eased)
+		var look_target: Vector3 = _focus_point(_pending_focus)
+		# 平滑 blend up: PLANET→PLAYER 时从世界 UP 渐变到角色径向 up, 避免过渡结束瞬间 roll snap。
+		var end_up: Vector3 = Vector3.UP
+		if _pending_focus == Focus.PLAYER and _player != null and is_instance_valid(_player):
+			end_up = _player.global_transform.basis.y
+		var blend_up: Vector3 = Vector3.UP.slerp(end_up, eased).normalized()
+		var x: Transform3D = Transform3D()
+		x.origin = cam_pos
+		x = x.looking_at(look_target, blend_up)
+		global_transform = x
 		if _transition_t >= 1.0:
 			focus = _pending_focus
 			_transitioning = false
@@ -156,11 +188,25 @@ func _effective_min_distance() -> float:
 # 当前(已 damped) yaw/pitch/distance → 轨道变换。每帧用, 跟随用户输入平滑变化。
 func _compute_orbit_xform(f: int) -> Transform3D:
 	var fp := _focus_point(f)
-	var cp := cos(pitch)
-	var offset := Vector3(cp * sin(yaw) * distance, sin(pitch) * distance, cp * cos(yaw) * distance)
 	var x := Transform3D()
-	x.origin = fp + offset
-	x = x.looking_at(fp, Vector3.UP)
+	if f == Focus.PLAYER and _player != null and is_instance_valid(_player):
+		# PLAYER 焦点用角色基做参考系: yaw 绕径向 up(basis.y)转, pitch 沿径向抬升, 屏幕上方向 = 径向外。
+		# 用世界 UP 会让角色走到星球侧面时相机 roll 90°(世界 Y 此时是切向, 不是径向) → 看起来严重倾斜。
+		var pb := _player.global_transform.basis
+		var up: Vector3 = pb.y            # 径向外
+		var back: Vector3 = pb.z          # 角色后方(_align_basis: basis.z = -fwd)
+		var cp := cos(pitch)
+		# 在角色切平面里: 从"后方"绕 up 转 yaw → 切向位置; 沿 up 抬 sin(pitch) → 第三人称俯仰。
+		var tangent: Vector3 = back.rotated(up, yaw)
+		var offset: Vector3 = tangent * (cp * distance) + up * (sin(pitch) * distance)
+		x.origin = fp + offset
+		x = x.looking_at(fp, up)
+	else:
+		# PLANET 焦点: 球面对称, 用世界轴没问题。
+		var cp := cos(pitch)
+		var offset := Vector3(cp * sin(yaw) * distance, sin(pitch) * distance, cp * cos(yaw) * distance)
+		x.origin = fp + offset
+		x = x.looking_at(fp, Vector3.UP)
 	return x
 
 
@@ -207,8 +253,16 @@ func _recapture_orbit_state() -> void:
 	if d < 1e-3:
 		return
 	_target_distance = clampf(d, _effective_min_distance(), max_distance)
-	_target_pitch = asin(clampf(rel.y / d, -1.0, 1.0))
-	_target_yaw = atan2(rel.x, rel.z)
+	if focus == Focus.PLAYER and _player != null and is_instance_valid(_player):
+		# PLAYER 焦点: 把世界 rel 表达到角色本地系(正交基 → inverse = transpose), 再按 _compute_orbit_xform
+		# 的约定(back=+Z, up=+Y, yaw 绕 +Y 右手)反算 yaw/pitch; 否则过渡终点与下一帧轨道算的会对不上。
+		var pb := _player.global_transform.basis
+		var local_rel: Vector3 = pb.inverse().xform(rel)
+		_target_pitch = asin(clampf(local_rel.y / d, -1.0, 1.0))
+		_target_yaw = atan2(local_rel.x, local_rel.z)
+	else:
+		_target_pitch = asin(clampf(rel.y / d, -1.0, 1.0))
+		_target_yaw = atan2(rel.x, rel.z)
 	distance = _target_distance
 	pitch = _target_pitch
 	yaw = _target_yaw
