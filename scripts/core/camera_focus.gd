@@ -257,7 +257,7 @@ func _recapture_orbit_state() -> void:
 		# PLAYER 焦点: 把世界 rel 表达到角色本地系(正交基 → inverse = transpose), 再按 _compute_orbit_xform
 		# 的约定(back=+Z, up=+Y, yaw 绕 +Y 右手)反算 yaw/pitch; 否则过渡终点与下一帧轨道算的会对不上。
 		var pb := _player.global_transform.basis
-		var local_rel: Vector3 = pb.inverse().xform(rel)
+		var local_rel: Vector3 = pb.inverse() * rel
 		_target_pitch = asin(clampf(local_rel.y / d, -1.0, 1.0))
 		_target_yaw = atan2(local_rel.x, local_rel.z)
 	else:
