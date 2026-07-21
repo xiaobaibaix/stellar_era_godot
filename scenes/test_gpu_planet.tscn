@@ -1,0 +1,26 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/planet/gpu/gpu_planet.gd" id="1_gp"]
+
+[sub_resource type="Environment" id="Env_main"]
+background_mode = 1
+background_color = Color(0.04, 0.04, 0.06, 1.0)
+glow_enabled = true
+
+[node name="TestGpuPlanet" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Env_main")
+
+[node name="GpuPlanet" type="Node3D" parent="."]
+script = ExtResource("1_gp")
+
+[node name="OmniLight3D" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 80, 180, 220)
+light_energy = 2.5
+omni_range = 8192.0
+omni_attenuation = 0.0
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 280)
+fov = 60.0
