@@ -18,7 +18,8 @@
 shader_type spatial;
 render_mode cull_back;   // 同 terrain.gdshader: 引擎默认光照(sun_light 照亮 ALBEDO+NORMAL)
 
-uniform sampler2D u_patchTex;          // 6×N RGBA32F: per-instance patch 数据(见上)
+uniform sampler2D u_patchTex;          // 6×(MAX_PATCHES+1) RGBA32F: per-instance patch 数据 + 末行 count
+const int META_ROW = 4096;             // patch 纹理末行(=MAX_PATCHES)存可见 patch 数, 供坍缩守卫读
 uniform float u_radius = 100.0;
 uniform float u_max_height = 8.0;
 uniform float u_normal_eps = 0.001;    // 顶点法线有限差分步长(方向空间)
@@ -183,37 +184,44 @@ varying float v_moist_raw;
 
 void vertex() {
 	int id = int(INSTANCE_ID);
-	// 每 instance 的面角点(单位球方向)从 patch 纹理取。Phase 1 = 每根面一个 instance。
-	vec3 A = texelFetch(u_patchTex, ivec2(0, id), 0).xyz;
-	vec3 B = texelFetch(u_patchTex, ivec2(1, id), 0).xyz;
-	vec3 C = texelFetch(u_patchTex, ivec2(2, id), 0).xyz;
-	float u = UV.x;
-	float v = UV.y;
-	float w = 1.0 - u - v;
-	vec3 d = normalize(A * w + B * u + C * v);   // 与 heightmap_baker.dir_from_bary 同式
-	float h = terrain_height(d);
-	vec3 displaced = d * (u_radius + h * u_max_height);
-	VERTEX = displaced;                          // 对象空间(GpuPlanet 原点 = 行星中心)
-	v_h = h;
-	v_world_dir = normalize((MODEL_MATRIX * vec4(d, 0.0)).xyz);
-	v_world_pos = (MODEL_MATRIX * vec4(displaced, 1.0)).xyz;
+	// 坍缩守卫(方案 A 零回读): 超出可见 patch 数的 instance → 退化三角形, 光栅器丢弃。
+	// Godot vertex 处理器禁止 return(同 fragment) → 用 if/else 包裹。
+	float patch_cnt = texelFetch(u_patchTex, ivec2(0, META_ROW), 0).x;
+	if (id < int(patch_cnt)) {
+		// 每 instance 的面角点(单位球方向)从 patch 纹理取。
+		vec3 A = texelFetch(u_patchTex, ivec2(0, id), 0).xyz;
+		vec3 B = texelFetch(u_patchTex, ivec2(1, id), 0).xyz;
+		vec3 C = texelFetch(u_patchTex, ivec2(2, id), 0).xyz;
+		float u = UV.x;
+		float v = UV.y;
+		float w = 1.0 - u - v;
+		vec3 d = normalize(A * w + B * u + C * v);   // 与 heightmap_baker.dir_from_bary 同式
+		float h = terrain_height(d);
+		vec3 displaced = d * (u_radius + h * u_max_height);
+		VERTEX = displaced;                          // 对象空间(GpuPlanet 原点 = 行星中心)
+		v_h = h;
+		v_world_dir = normalize((MODEL_MATRIX * vec4(d, 0.0)).xyz);
+		v_world_pos = (MODEL_MATRIX * vec4(displaced, 1.0)).xyz;
 
-	// moisture(生物群系配色): 顶点处算一次, varying 插值给 fragment。
-	v_moist_raw = noise3(v_world_dir * u_moist_freq + u_off_moist);
+		// moisture(生物群系配色): 顶点处算一次, varying 插值给 fragment。
+		v_moist_raw = noise3(v_world_dir * u_moist_freq + u_off_moist);
 
-	// 解析有限差分法线(与 terrain.gdshader 一致 → 跨 instance 平滑、轮廓无棱)。
-	vec3 up_n = abs(d.x) <= 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
-	vec3 t1 = normalize(cross(d, up_n));
-	vec3 t2 = normalize(cross(d, t1));
-	float neps = u_normal_eps;
-	vec3 d1 = normalize(d + t1 * neps);
-	vec3 d2 = normalize(d + t2 * neps);
-	vec3 p1 = d1 * (u_radius + terrain_height(d1) * u_max_height);
-	vec3 p2 = d2 * (u_radius + terrain_height(d2) * u_max_height);
-	vec3 n = normalize(cross(p1 - displaced, p2 - displaced));
-	if (dot(n, d) < 0.0) n = -n;
-	NORMAL = n;
-	v_world_normal = normalize((MODEL_MATRIX * vec4(n, 0.0)).xyz);
+		// 解析有限差分法线(与 terrain.gdshader 一致 → 跨 instance 平滑、轮廓无棱)。
+		vec3 up_n = abs(d.x) <= 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+		vec3 t1 = normalize(cross(d, up_n));
+		vec3 t2 = normalize(cross(d, t1));
+		float neps = u_normal_eps;
+		vec3 d1 = normalize(d + t1 * neps);
+		vec3 d2 = normalize(d + t2 * neps);
+		vec3 p1 = d1 * (u_radius + terrain_height(d1) * u_max_height);
+		vec3 p2 = d2 * (u_radius + terrain_height(d2) * u_max_height);
+		vec3 n = normalize(cross(p1 - displaced, p2 - displaced));
+		if (dot(n, d) > 0.0) n = -n;   // 取反(原 < 0.0): 用户反馈法线方向反
+		NORMAL = n;
+		v_world_normal = normalize((MODEL_MATRIX * vec4(n, 0.0)).xyz);
+	} else {
+		VERTEX = vec3(0.0);   // 坍缩: 退化三角形, 光栅器丢弃
+	}
 }
 
 // 配色(逐位复制自 terrain.gdshader 213-239)。

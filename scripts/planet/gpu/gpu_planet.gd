@@ -1,25 +1,30 @@
 # gdlint: disable=variable-name, max-line-length
-## GPU 驱动行星 Phase 1: @tool Node3D。
+## GPU 驱动行星(Phase 2)。@tool Node3D。
 ##
-## 渲染一颗被噪声位移的球面行星, 用 MultiMesh(20 instance, 每 icosahedron 根面一个) +
-## 共享三角形 patch 网格 + patch 纹理(per-instance 面角点)。**固定全 LOD**: 无 compute 遍历、
-## 无裁剪、无焊接 —— 先跑通 instance + 位移(设计文档 §13 Phase 1 验收)。
+## Phase 1: MultiMesh + patch 纹理 + face-bary 位移(固定全 LOD)。
+## Phase 2: LOD 四叉树遍历挪到 GPU compute(lod_traverse.glsl, 经 GpuLodCompositor PRE_OPAQUE 跑),
+##          每帧 compute 选叶写 patch 纹理, vertex shader 读(1-帧延迟)→ 近处细分、远处粗。
+##          vertex shader 不变(Phase 1 的回报): 仍 texelFetch 面角点 → face-bary 位移。
 ##
-## 架构(前向兼容 Phase 2):
-##   - patch 网格只取决于 patch_resolution(三角形 (u,v) 参数域), 与 radius/噪声无关 → 仅 res 变才重建。
-##   - patch 纹理存 20 面角点(icosahedron 固定, 与参数无关) → 只建一次。
-##   - 半径/高度/噪声全部走 shader uniform → 参数变更只重推 uniform(便宜)。
-##   - Phase 2 起: patch 纹理由 compute 写入(可变叶数 + lodTrans + minmax), 本脚本 vertex shader 不变。
+## 数据流:
+##   GpuPlanet._process(主线程) → 算 C_const(=maxHeight·vp_h/(2·tan(fov/2))/sseThreshold) + cam_pos →
+##     GpuLodCompositor.set_frame_data →
+##   compositor PRE_OPAQUE(渲染线程) → lod_traverse.glsl 写 patch 纹理(tex[write]) + 末行 count →
+##     绑 material.u_patchTex = tex[read](上一帧) →
+##   terrain_gpu.gdshader vertex → texelFetch 面角点 → 位移; id≥count 坍缩。
 ##
 ## 与旧 scripts/planet/planet.gd 零耦合: 新文件、新节点, 不 import/不修改旧实现。位移噪声与
-## terrain.gdshader / terrain.gd::height_at 逐位一致(terrain_gpu.gdshader 复制了噪声块)。
+## terrain.gdshader / terrain.gd::height_at 逐位一致。
 @tool
 class_name GpuPlanet
 extends Node3D
 
-const PATCH_TEX_SLOTS := 6           # 每 instance 6 texel(设计文档 §8.3 终极布局)
-const DEFAULT_PATCH_RES := 64        # Phase 1 单 LOD 分辨率/边(越大越平滑越费)
+const PATCH_TEX_SLOTS := 6           # 每 patch 6 texel(设计文档 §8.3 终极布局)
+const MAX_PATCHES := 4096            # 与 lod_traverse.glsl / terrain_gpu.gdshader META_ROW 一致
+const PATCH_TEX_H := MAX_PATCHES + 1 # patch 纹理高(末行存 count)
+const DEFAULT_PATCH_RES := 32        # Phase 2 单叶分辨率/边(四叉树下够用; 越大越平滑越费)
 const MM_NODE_NAME := "GpuPatchMM"
+const MAX_GPU_LEVEL := 6             # 单遍遍历层数上限(4^6=82k 节点/帧, 可测; level 8=1.75M 太重, 留 Phase 6 ping-pong)
 
 @export var params: PlanetParams:
 	set(v):
@@ -30,8 +35,11 @@ const MM_NODE_NAME := "GpuPatchMM"
 			params.param_changed.connect(_on_param_changed)
 		_schedule_rebuild()
 
-## 每根面的三角形 patch 边分辨率(单 LOD)。Phase 2 四叉树后改用 params.patchResolution/叶。
-@export_range(8, 128, 1) var patch_resolution: int = DEFAULT_PATCH_RES:
+## 驱动 LOD 的相机(@tool 编辑器 get_viewport 相机不可靠, 用显式引用)。Phase 2 必填。
+@export var camera: Camera3D
+
+## 每叶三角形 patch 边分辨率。
+@export_range(8, 64, 1) var patch_resolution: int = DEFAULT_PATCH_RES:
 	set(v):
 		patch_resolution = v
 		_schedule_rebuild()
@@ -39,20 +47,55 @@ const MM_NODE_NAME := "GpuPatchMM"
 var _mm: MultiMesh
 var _mminst: MultiMeshInstance3D
 var _mat: ShaderMaterial
-var _patch_tex: ImageTexture
+var _patch_tex_fallback: ImageTexture   # 初始绑定 + 无 compositor 时的 fallback(20 面, Phase1 风格)
 var _patch_mesh: ArrayMesh
 var _mesh_res: int = -1
 var _default_params: PlanetParams
 var _dirty := false
+var _lod_comp: GpuLodCompositor
+var _frame: int = 0   # 双缓冲帧计数(GpuPlanet 主线程拥有; 决定 compositor 写哪块、绑哪块)
 
 
 func _ready() -> void:
 	_build_all()
 	_push_params()
+	_setup_lod_compositor()
+
+
+func _exit_tree() -> void:
+	# 摘掉 compositor(避免旧 WorldEnvironment 残留 effect 空跑)
+	if _lod_comp != null:
+		var we := _find_world_environment()
+		if we != null and we.compositor != null:
+			we.compositor.compositor_effects.erase(_lod_comp)
+		_lod_comp = null
+
+
+func _process(_delta: float) -> void:
+	# 每帧: 推 LOD 帧数据(含 write_idx)给 compositor + 主线程绑定上一帧写好的纹理(正确 sampler 绑定)。
+	if _lod_comp == null or not is_instance_valid(camera) or _mat == null:
+		return
+	var p: PlanetParams = _effective_params()
+	var write_idx: int = _frame & 1
+	var vp := camera.get_viewport()
+	var vp_h: float = float(vp.size.y) if vp != null else 1080.0
+	var fov_rad: float = deg_to_rad(camera.fov)
+	var k: float = vp_h / (2.0 * tan(fov_rad * 0.5))
+	var c_const: float = p.maxHeight * k / max(p.sseThresholdPixels, 0.001)
+	_lod_comp.set_frame_data({
+		"cam_pos": camera.global_position,
+		"planet_center": global_position,
+		"radius": p.radius,
+		"maxHeight": p.maxHeight,
+		"C_const": c_const,
+		"maxLevel": min(p.maxLevel, MAX_GPU_LEVEL),
+		"write_idx": write_idx,
+	})
+	_mat.set_shader_parameter("u_patchTex", _lod_comp.get_read_texture(write_idx))
+	_frame += 1
 
 
 func _on_param_changed(_key: String) -> void:
-	# 参数变更只重推 uniform + 包围盒(patch 网格/纹理与参数无关)。便宜, 每帧多次也扛得住。
 	_push_params()
 
 
@@ -69,16 +112,14 @@ func _rebuild_deferred() -> void:
 	_push_params()
 
 
-# 建全: patch 纹理(一次) + patch 网格(res 变才重建) + MultiMesh + 节点 + 材质(一次)。
 func _build_all() -> void:
-	if _patch_tex == null:
-		_patch_tex = _build_patch_tex()
+	if _patch_tex_fallback == null:
+		_patch_tex_fallback = _build_patch_tex_fallback()
 	if _patch_mesh == null or _mesh_res != patch_resolution:
 		_patch_mesh = _build_patch_mesh(patch_resolution)
 		_mesh_res = patch_resolution
 		if _mm != null:
 			_mm.mesh = _patch_mesh
-	# 复用编辑器里已存在的运行时子节点(script 重载后成员变量清零但节点还在)。
 	if _mminst != null and not is_instance_valid(_mminst):
 		_mminst = null
 	if _mminst == null:
@@ -87,14 +128,14 @@ func _build_all() -> void:
 		_mminst = MultiMeshInstance3D.new()
 		_mminst.name = MM_NODE_NAME
 		add_child(_mminst)
-		_mminst.owner = null   # 运行时生成 → 不存盘、不显示在场景树持久层, 但编辑器视口照渲染
+		_mminst.owner = null
 	if _mm == null:
 		_mm = MultiMesh.new()
 		_mm.transform_format = MultiMesh.TRANSFORM_3D
 		_mm.mesh = _patch_mesh
-		_mm.instance_count = GpuIco.FACE_COUNT
-		for i in range(GpuIco.FACE_COUNT):
-			_mm.set_instance_transform(i, Transform3D.IDENTITY)   # 位置全在 shader 算, transform 单位
+		_mm.instance_count = MAX_PATCHES   # 方案 A: 固定上限, shader 坍缩 id≥count
+		for i in range(MAX_PATCHES):
+			_mm.set_instance_transform(i, Transform3D.IDENTITY)
 		_mminst.multimesh = _mm
 	if _mat == null:
 		var sh: Shader = load("res://shaders/planet_gpu/terrain_gpu.gdshader")
@@ -103,7 +144,6 @@ func _build_all() -> void:
 		_mminst.material_override = _mat
 
 
-# 推全部 uniform(镜像 planet.gd _apply_params; 颜色用 shader 默认, 不推) + 包围盒 + patch 纹理。
 func _push_params() -> void:
 	if _mat == null:
 		return
@@ -130,8 +170,8 @@ func _push_params() -> void:
 	_mat.set_shader_parameter("u_off_mtn", Terrain.off(p.mountainSeed))
 	_mat.set_shader_parameter("u_off_plate", Terrain.off(p.plateSeed))
 	_mat.set_shader_parameter("u_off_moist", Terrain.off(p.moistureSeed))
-	_mat.set_shader_parameter("u_patchTex", _patch_tex)
-	# MultiMesh AABB = patch 网格小 AABB → 必须手动覆盖到行星包围盒, 否则被剔除看不见。
+	# 初始/fallback 绑定; compositor 运行后每帧覆盖 u_patchTex 为 GPU 写的纹理。
+	_mat.set_shader_parameter("u_patchTex", _patch_tex_fallback)
 	var r_extent: float = p.radius + p.maxHeight * 1.2 + 1.0
 	_mminst.custom_aabb = AABB(Vector3(-r_extent, -r_extent, -r_extent), Vector3(2.0 * r_extent, 2.0 * r_extent, 2.0 * r_extent))
 
@@ -144,40 +184,78 @@ func _effective_params() -> PlanetParams:
 	return _default_params
 
 
-# ---- patch 纹理: 6 × FACE_COUNT RGBA32F, CPU 填 20 面角点(与参数无关, 一次) ----
-static func _build_patch_tex() -> ImageTexture:
+# ---- LOD compositor 接线: 找场景 WorldEnvironment, 建 GpuLodCompositor 挂其 compositor.effects ----
+func _setup_lod_compositor() -> void:
+	if _lod_comp != null:
+		return
+	if _mat == null:
+		return
+	var we: WorldEnvironment = _find_world_environment()
+	if we == null:
+		push_warning("[GpuPlanet] 场景无 WorldEnvironment, GPU LOD 不生效(用 fallback 20 面渲染)")
+		return
+	var comp: Compositor = we.compositor
+	if comp == null:
+		comp = Compositor.new()
+		we.compositor = comp
+	_lod_comp = GpuLodCompositor.new()
+	if not _lod_comp.setup(_mat.get_rid()):
+		push_error("[GpuPlanet] GpuLodCompositor.setup 失败(compute shader 编译错误?)")
+		_lod_comp = null
+		return
+	# 重新赋值整个数组(而非 in-place append)→ 触发 Compositor 属性 setter → 重新注册 effects 到渲染服务器。
+	var effs: Array[CompositorEffect] = comp.compositor_effects.duplicate()
+	effs.append(_lod_comp)
+	comp.compositor_effects = effs
+
+
+func _find_world_environment() -> WorldEnvironment:
+	var root := get_tree().root if is_inside_tree() else null
+	if root == null:
+		return null
+	return _scan_world_environment(root)
+
+
+func _scan_world_environment(n: Node) -> WorldEnvironment:
+	if n is WorldEnvironment:
+		return n as WorldEnvironment
+	for c in n.get_children():
+		var r: WorldEnvironment = _scan_world_environment(c)
+		if r != null:
+			return r
+	return null
+
+
+# ---- fallback patch 纹理: 6×(MAX_PATCHES+1), 前 20 行填面角点, 末行 count=20 ----
+# 用途: ① 首帧/compositor 未跑时绑定(避免 u_patchTex 空); ② 无 camera/compositor 时 Phase1 风格渲染。
+static func _build_patch_tex_fallback() -> ImageTexture:
 	var W: int = PATCH_TEX_SLOTS
-	var H: int = GpuIco.FACE_COUNT
+	var H: int = PATCH_TEX_H
 	var floats := PackedFloat32Array()
 	floats.resize(W * H * 4)
-	for fi in range(H):
+	floats.fill(0.0)
+	for fi in range(GpuIco.FACE_COUNT):
 		var corners: Array = GpuIco.face_corners(fi)
 		var A: Vector3 = corners[0]
 		var B: Vector3 = corners[1]
 		var C: Vector3 = corners[2]
 		var b: int = fi * W * 4
-		# texel0: (A.xyz, face)  texel1: (B.xyz, lod=0)  texel2: (C.xyz, _)
 		floats[b + 0] = A.x; floats[b + 1] = A.y; floats[b + 2] = A.z; floats[b + 3] = float(fi)
 		floats[b + 4] = B.x; floats[b + 5] = B.y; floats[b + 6] = B.z; floats[b + 7] = 0.0
 		floats[b + 8] = C.x; floats[b + 9] = C.y; floats[b + 10] = C.z; floats[b + 11] = 0.0
-		# texel3: (ua=0,va=0,ub=1,vb=0)  level0 占满整面下三角
-		floats[b + 12] = 0.0; floats[b + 13] = 0.0; floats[b + 14] = 1.0; floats[b + 15] = 0.0
-		# texel4: (uc=0,vc=1,lodTransAB=0,lodTransBC=0)
-		floats[b + 16] = 0.0; floats[b + 17] = 1.0; floats[b + 18] = 0.0; floats[b + 19] = 0.0
-		# texel5: (minH,maxH,_,_)  Phase1 不用(无裁剪/LOD), 留 Phase2
-		floats[b + 20] = 0.0; floats[b + 21] = 0.0; floats[b + 22] = 0.0; floats[b + 23] = 0.0
+	# 末行 metadata: count = 20(渲染前 20 个 instance = 20 面)
+	var mb: int = MAX_PATCHES * W * 4
+	floats[mb + 0] = float(GpuIco.FACE_COUNT)
 	var img := Image.create_from_data(W, H, false, Image.FORMAT_RGBAF, floats.to_byte_array())
 	return ImageTexture.create_from_image(img)
 
 
 # ---- 共享三角形 patch 网格: n 细分, 顶点 (i,j) i+j<=n, uv=(i/n, j/n) ----
-# 上三角 (i,j),(i+1,j),(i,j+1) 需 i+j<=n-1; 下三角 (i+1,j),(i+1,j+1),(i,j+1) 需 i+j<=n-2。
-# 合计 n² 三角(与 qnode._split 同构)。绕序: patch-local CCW 映射到面 (A,B,C) 即外向(cull_back 可见)。
 static func _build_patch_mesh(n: int) -> ArrayMesh:
 	var verts := PackedVector3Array()
 	var uvs := PackedVector2Array()
 	var idx := PackedInt32Array()
-	var idmap: Dictionary = {}   # Vector2i -> int
+	var idmap: Dictionary = {}
 	for j in range(n + 1):
 		for i in range(n + 1):
 			if i + j <= n:
