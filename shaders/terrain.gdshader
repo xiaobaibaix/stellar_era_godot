@@ -172,6 +172,9 @@ varying vec3 v_world_pos;
 varying vec3 v_world_dir;
 varying vec3 v_world_normal;
 varying float v_h;
+// moisture 噪声原始值(范围 -1..1): vertex() 算一次, fragment() 直接用, 省掉每像素一次 noise3
+// (1M+ 像素 × noise3 ≈ fragment 主要开销; 移到 ~289 顶点 × noise3 后用 varying 插值, 质量略平滑但 GPU 大省)。
+varying float v_moist_raw;
 
 void vertex() {
 	vec3 d = normalize(VERTEX);
@@ -186,6 +189,10 @@ void vertex() {
 	v_h = h;
 	v_world_dir = normalize((MODEL_MATRIX * vec4(d, 0.0)).xyz);
 	v_world_pos = (MODEL_MATRIX * vec4(displaced, 1.0)).xyz;
+
+	// moisture(生物群系配色用): 顶点处算一次, varying 插值给 fragment, 不必每像素 noise3。
+	// 用世界方向 v_world_dir(与原 fragment 实现一致)。
+	v_moist_raw = noise3(v_world_dir * u_moist_freq + u_off_moist);
 
 	// 解析有限差分法线(与旧 patch_builder 一致 → 跨 LOD 平滑、轮廓无棱)。
 	vec3 up_n = abs(d.x) <= 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
@@ -218,7 +225,8 @@ vec3 terrain_color(float h, vec3 d) {
 	float alt = clamp(h / u_alt_range, 0.0, 1.0);   // 绝对高度: 雪线/岩线钉死, 不随海平面滑动(只有水线/滩涂跟海平面)
 	float lat = abs(d.y);
 	float temp = clamp((1.0 - alt) * (1.0 - lat), 0.0, 1.0);
-	float moist = noise3(d * u_moist_freq + u_off_moist) * 0.5 + 0.5;
+	// moisture 用 vertex() 算好的 v_moist_raw(范围 -1..1), 转 0..1 后按高度衰减。原 noise3 已挪到 vertex → fragment 省掉每像素一次噪声。
+	float moist = v_moist_raw * 0.5 + 0.5;
 	moist = clamp(moist * (1.0 - alt * 0.4), 0.0, 1.0);
 	if (alt > 0.72 || temp < 0.12) {
 		float s = clamp((max(alt, 1.0 - temp) - 0.6) / 0.4, 0.0, 1.0);

@@ -6,7 +6,7 @@
 [ext_resource type="Script" uid="uid://c18n2n3tlwx8e" path="res://scripts/render/atmosphere_compositor.gd" id="2_hisq8"]
 [ext_resource type="PackedScene" uid="uid://m7jxxg83yibb" path="res://scenes/player.tscn" id="5_216rf"]
 [ext_resource type="Script" uid="uid://l46qfqye6qnc" path="res://scripts/core/camera_focus.gd" id="7_cfocus"]
-[ext_resource type="Script" path="res://scripts/debug/fps_hud.gd" id="8_fps"]
+[ext_resource type="Script" uid="uid://bcjua5g2udx5y" path="res://scripts/debug/fps_hud.gd" id="8_fps"]
 
 [sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_b6b10"]
 panorama = ExtResource("1_cptss")
@@ -20,35 +20,33 @@ sky = SubResource("Sky_hisq8")
 tonemap_mode = 4
 glow_enabled = true
 
-[sub_resource type="CompositorEffect" id="CompositorEffect_4qwjy"]
+[sub_resource type="CompositorEffect" id="CompositorEffect_mf1ej"]
 resource_local_to_scene = false
 resource_name = ""
-enabled = false
+enabled = true
 effect_callback_type = 4
 needs_motion_vectors = false
 needs_normal_roughness = false
 script = ExtResource("2_hisq8")
 
-[sub_resource type="Compositor" id="Compositor_mf1ej"]
-compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_4qwjy")])
+[sub_resource type="Compositor" id="Compositor_cef0k"]
+compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_mf1ej")])
 
-[sub_resource type="Resource" id="Resource_cef0k"]
+[sub_resource type="Resource" id="Resource_l2qgg"]
 resource_local_to_scene = true
 script = ExtResource("2_cptss")
 radius = 326.0
 showInset = false
-showAtmosphere = false
-showClouds = false
 showGodrays = false
 
 [node name="TestPlanet" type="Node" unique_id=233593354]
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=2107573917]
 environment = SubResource("Environment_216rf")
-compositor = SubResource("Compositor_mf1ej")
+compositor = SubResource("Compositor_cef0k")
 
 [node name="Planet" parent="." unique_id=1923769825 node_paths=PackedStringArray("camera", "sun_lights") instance=ExtResource("1_wovwi")]
-params = SubResource("Resource_cef0k")
+params = SubResource("Resource_l2qgg")
 camera = NodePath("../Camera3D")
 sun_lights = [null, NodePath("../OmniLight3D")]
 
@@ -66,5 +64,5 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 824.80164)
 omni_range = 4096.0
 omni_attenuation = 0.0
 
-[node name="FPSHUD" type="CanvasLayer" parent="."]
+[node name="FPSHUD" type="CanvasLayer" parent="." unique_id=1951836338]
 script = ExtResource("8_fps")
