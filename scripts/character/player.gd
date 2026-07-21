@@ -30,6 +30,9 @@ var _cam_pitch: float = 0.35        # 相机俯仰(绕枢轴的仰角)
 var _initialized: bool = false      # 首帧(terrain 就绪后)贴地初始化
 var _jump_prev: bool = false        # 上一帧跳跃键状态(边沿检测)
 var _block_jump_until_release: bool = false   # 瞬移吃掉触发用的空格, 避免落地即跳(松开后恢复)
+# 持久化切向基朝向(yaw=0 时)。平行传输: 每帧投影到当前切平面 → 消除"用固定 Vector3.FORWARD 投影"
+# 在 ±Z 极点附近的奇点(FORWARD·up→±1 时投影长度→0, normalized 后方向乱跳 → 玩家在该位置绕圈)。
+var _base_fwd: Vector3 = Vector3(0.0, 0.0, -1.0)
 
 
 func _ready() -> void:
@@ -60,7 +63,12 @@ func _physics_process(delta: float) -> void:
 	var pos: Vector3 = global_position - center
 	var up: Vector3 = pos.normalized() if pos.length_squared() > 1e-6 else Vector3.UP
 
-	# 切向基: forward 在切平面里(世界 FORWARD 投影), 再绕 up 转 _yaw
+	# 平行传输: 把上一帧的 _base_fwd 投影到当前切平面(只去掉 up 分量)→ 切向 forward 平滑随玩家位置变化,
+	# 没有奇点。取代旧的"每帧从 Vector3.FORWARD 投影"—— 那在 up≈±Z(行星 Z 极点附近)投影长度→0,
+	# normalized 后方向乱跳, 表现为"玩家走到该位置按直走却绕圈"。
+	_parallel_transport_base_fwd(up)
+
+	# 切向基: forward = _base_fwd 绕 up 转 _yaw
 	var fwd: Vector3 = _tangent_forward(up)
 	var right: Vector3 = fwd.rotated(up, PI / 2.0)
 
@@ -111,12 +119,24 @@ func _ground_radius(up: Vector3) -> float:
 	return planet.params.radius + h * planet.params.maxHeight
 
 
-# 世界 FORWARD 投影到切平面 → 归一 → 绕 up 转 _yaw 得当前朝向
+# 平行传输持久化的 _base_fwd 到当前切平面: 只去掉 up 分量, 不再依赖固定 Vector3.FORWARD。
+# 这样切向 forward 随玩家位置连续变化, 消除 ±Z 极点附近的奇点。
+func _parallel_transport_base_fwd(up: Vector3) -> void:
+	var proj: Vector3 = _base_fwd - up * _base_fwd.dot(up)
+	if proj.length_squared() > 1e-6:
+		_base_fwd = proj.normalized()
+		return
+	# 反极点罕见情形: _base_fwd 与 up 平行(投影=0)→ 找一个不平行于 up 的世界轴投影, 重置 _base_fwd。
+	for c in [Vector3.RIGHT, Vector3.UP, Vector3.FORWARD]:
+		var p: Vector3 = c - up * c.dot(up)
+		if p.length_squared() > 1e-6:
+			_base_fwd = p.normalized()
+			return
+
+
+# _base_fwd 绕 up 转 _yaw 得当前朝向(_base_fwd 已由 _parallel_transport_base_fwd 投影到切平面)
 func _tangent_forward(up: Vector3) -> Vector3:
-	var f: Vector3 = Vector3.FORWARD - up * Vector3.FORWARD.dot(up)
-	if f.length_squared() < 1e-6:
-		f = Vector3.RIGHT - up * Vector3.RIGHT.dot(up)
-	return f.normalized().rotated(up, _yaw)
+	return _base_fwd.rotated(up, _yaw)
 
 
 # 移动后贴地: 用【新位置】的径向重算地面半径。
@@ -154,6 +174,12 @@ func teleport_to(world_pos: Vector3, up: Vector3) -> void:
 		return
 	global_position = world_pos
 	_yaw = 0.0
+	# 重置 _base_fwd 到新位置的切平面: 投影 FORWARD, 退化时用 RIGHT(同首帧逻辑)。
+	# 否则瞬移后 _base_fwd 还是旧位置的, 在新切平面外 → 投影会大幅旋转, 朝向突变。
+	var f: Vector3 = Vector3.FORWARD - up * Vector3.FORWARD.dot(up)
+	if f.length_squared() < 1e-6:
+		f = Vector3.RIGHT - up * Vector3.RIGHT.dot(up)
+	_base_fwd = f.normalized()
 	_vel = Vector3.ZERO
 	_on_ground = true
 	_block_jump_until_release = true   # 吃掉触发瞬移的这次空格, 避免落地即跳
