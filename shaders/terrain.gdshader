@@ -1,14 +1,15 @@
-// 行星地形 spatial shader(Phase 1+ Step2)。
+// 行星地形 spatial shader(Phase 3a: 预烘焙位移+法线版)。
 // render_mode unshaded: 自算 Lambert(绕开 PBR), 大气壳在屏幕空间复合做空气透视。
 //
-// 【位移/法线/配色全在 GPU】—— CPU(patch_builder)只铺理想球面网格 + 裙边(alpha=0 标记),
-// 本 shader 在 vertex() 沿径向 d 位移出山脉、解析有限差分算法线, fragment() 按高度/气候配色 + Lambert。
+// 【位移/法线/配色全在 worker】—— patch_builder.gd 铺【已位移网格】(d·(R+h·maxH)) + 【裙边】(alpha=0 标记),
+// 算法与旧 GPU 版完全一致(同 NORMAL_EPS 步长的有限差分法线), 只是搬到 worker 一次算好后缓存。
+// 本 shader 在 vertex() 只读取属性(VERTEX=已位移位置, NORMAL=法线, COLOR.r=h), fragment() 按高度/气候配色。
 //
 // 高度函数 terrain_height(d) 与 scripts/terrain/terrain.gd::height_at 【逐位一致】(同共享噪声) ——
 // 这是 GPU 视觉与 CPU 碰撞(planet_walker 贴地)不穿地/不悬空的全部依据。
 shader_type spatial;
 // 用引擎默认光照(同 ocean.gdshader): 本环境 unshaded spatial 输出全黑, 故走 lit + ALBEDO + NORMAL。
-// 自己在 vertex 算位移 + 解析法线, fragment 只给 ALBEDO(配色); 引擎用 sun_light 照亮。
+// worker 预烘焙 VERTEX(已位移)/NORMAL/COLOR.r(h); vertex() 只搬运 + 算一次 moisture, fragment 只给 ALBEDO(配色)。
 render_mode cull_back;
 
 uniform vec3 u_sun_dir = vec3(0.739, 0.443, 0.515);
@@ -177,36 +178,27 @@ varying float v_h;
 varying float v_moist_raw;
 
 void vertex() {
-	vec3 d = normalize(VERTEX);
-	float h = terrain_height(d);
-	float r = u_radius + h * u_max_height;
+	// Phase 3a: VERTEX/NORMAL/COLOR.r 全是 worker 预烘焙的:
+	//   VERTEX = d·(R+h·maxH) 已位移位置; NORMAL = 有限差分法线; COLOR.r = h(配色/雪线用); COLOR.a = 裙边标志位。
+	// 取代旧版"shader 每帧 terrain_height 3 次/顶点": worker 算一次缓存 → GPU 顶点着色器从 ~120 noise/顶点 降到 1 noise/顶点(只 moisture)。
+	vec3 displaced = VERTEX;
+	vec3 d = normalize(displaced);
+	float h = COLOR.r;
 	// 裙边顶点(COLOR.a<0.5)径向内缩 u_skirt_depth → 挂在位移面下, 盖 LOD 裂缝。
 	if (COLOR.a < 0.5) {
-		r -= u_skirt_depth;
+		float r = length(displaced) - u_skirt_depth;
+		displaced = d * r;
 	}
-	vec3 displaced = d * r;
 	VERTEX = displaced;
 	v_h = h;
 	v_world_dir = normalize((MODEL_MATRIX * vec4(d, 0.0)).xyz);
 	v_world_pos = (MODEL_MATRIX * vec4(displaced, 1.0)).xyz;
 
 	// moisture(生物群系配色用): 顶点处算一次, varying 插值给 fragment, 不必每像素 noise3。
-	// 用世界方向 v_world_dir(与原 fragment 实现一致)。
 	v_moist_raw = noise3(v_world_dir * u_moist_freq + u_off_moist);
 
-	// 解析有限差分法线(与旧 patch_builder 一致 → 跨 LOD 平滑、轮廓无棱)。
-	vec3 up_n = abs(d.x) <= 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
-	vec3 t1 = normalize(cross(d, up_n));
-	vec3 t2 = normalize(cross(d, t1));
-	float neps = u_normal_eps;
-	vec3 d1 = normalize(d + t1 * neps);
-	vec3 d2 = normalize(d + t2 * neps);
-	vec3 p1 = d1 * (u_radius + terrain_height(d1) * u_max_height);
-	vec3 p2 = d2 * (u_radius + terrain_height(d2) * u_max_height);
-	vec3 n = normalize(cross(p1 - displaced, p2 - displaced));
-	if (dot(n, d) < 0.0) n = -n;
-	NORMAL = n;   // 引擎光照用(对象空间; 引擎自动转世界并按 sun_light 照亮)
-	v_world_normal = normalize((MODEL_MATRIX * vec4(n, 0.0)).xyz);
+	// NORMAL 已是 worker 预烘焙的有限差分法线(与旧 shader 同算法) → 直接转世界空间给 fragment。
+	v_world_normal = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
 }
 
 vec3 terrain_color(float h, vec3 d) {
