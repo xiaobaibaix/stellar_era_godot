@@ -88,10 +88,11 @@ func compute_strides() -> Array:
 
 
 # cam_pos: LOD 细分距离用的聚焦目标(角色/lod_target)位置; cull_pos: 可见性剔除用的【真实渲染相机】位置;
-# frustum: 世界系 Plane[]; cam_moved: 是否移动; _now: 未用。
+# frustum: 世界系 Plane[]; sse_k: 屏幕空间误差系数 = vp_h / (2 × tan(fov_y/2))(Planet.update 一次性算好);
+# cam_moved: 是否移动; _now: 未用。
 # cull: 是否做剔除(地平线+视锥)。编辑器由 Planet.update 传 false → 只跑距离 LOD 细分, 不隐藏任何 chunk。
-# 移植 planet.js QNode.selectLOD: 地平线剔除 → 视锥剔除 → 分裂/合并滞回(带预算) → 定 render_state。
-func select_lod(cam_pos: Vector3, cull_pos: Vector3, frustum: Array, cam_moved: bool, _now: float, cull: bool = true) -> void:
+# 移植 planet.js QNode.selectLOD + Cesium/SSE 指标: 地平线剔除 → 视锥剔除 → SSE 分裂/合并滞回(带预算) → 定 render_state。
+func select_lod(cam_pos: Vector3, cull_pos: Vector3, frustum: Array, sse_k: float, cam_moved: bool, _now: float, cull: bool = true) -> void:
 	var p: PlanetParams = planet.params
 	# 1) 地平线剔除(用渲染相机 cull_pos): 行星本体背面的 chunk 直接跳过(整棵子树不渲染)
 	if cull and p.horizonCulling and _is_below_horizon(cull_pos):
@@ -104,10 +105,14 @@ func select_lod(cam_pos: Vector3, cull_pos: Vector3, frustum: Array, cam_moved: 
 		if not _sphere_in_frustum(frustum, center_world + planet.global_position, r):
 			_set_state(0)
 			return
-	# 3) 分裂/合并【距离滞回】
-	var split_t: float = edge_len * p.splitFactor
-	var want_split: bool = level < p.maxLevel and d < split_t
-	var want_merge: bool = d > split_t * p.mergeHysteresis
+	# 3) SSE 分裂/合并【滞回】
+	# 几何误差(Cesium 风格): level L 时 chunk 相对真实地表的最大垂直误差 ≈ maxHeight × scale / 2^L。
+	# 每细分一层, 未采样细节减半 → 误差减半; scale 用于手动微调(粗/细偏置)。
+	# SSE = g_err × sse_k / d。分裂阈 SSE > T ⟺ d < g_err × sse_k / T = split_d。
+	var g_err: float = p.maxHeight * p.geometricErrorScale / float(1 << level)
+	var split_d: float = g_err * sse_k / p.sseThresholdPixels
+	var want_split: bool = level < p.maxLevel and d < split_d
+	var want_merge: bool = d > split_d * p.mergeHysteresis
 	if want_split and children == null:
 		# 每帧分裂预算: 配额用完则本帧退化为叶(父层暂显), 下帧再试
 		if not planet.split_budget_ok():
@@ -119,7 +124,7 @@ func select_lod(cam_pos: Vector3, cull_pos: Vector3, frustum: Array, cam_moved: 
 	# 死区(既不分裂也不合并): 维持现状
 
 	if children != null:
-		_render_interior(cam_pos, cull_pos, frustum, cam_moved, cull)
+		_render_interior(cam_pos, cull_pos, frustum, sse_k, cam_moved, cull)
 	else:
 		_render_leaf()
 
@@ -132,7 +137,7 @@ func _render_leaf() -> void:
 
 
 # 渲染为内部节点: 4 子全就绪 → render_state=2(递归子); 否则请求缺失子 + 自身兜底(state=1)消除 pop-in。
-func _render_interior(cam_pos: Vector3, cull_pos: Vector3, frustum: Array, cam_moved: bool, cull: bool = true) -> void:
+func _render_interior(cam_pos: Vector3, cull_pos: Vector3, frustum: Array, sse_k: float, cam_moved: bool, cull: bool = true) -> void:
 	var all_ready: bool = (
 		children[0].mesh_ready
 		and children[1].mesh_ready
@@ -142,7 +147,7 @@ func _render_interior(cam_pos: Vector3, cull_pos: Vector3, frustum: Array, cam_m
 	if all_ready:
 		_set_state(2)  # 自身不渲染, 由收集时递归子
 		for c in children:
-			c.select_lod(cam_pos, cull_pos, frustum, cam_moved, 0.0, cull)
+			c.select_lod(cam_pos, cull_pos, frustum, sse_k, cam_moved, 0.0, cull)
 		return
 	# 子未就绪: 请求缺失子 patch, 隐藏子, 自身兜底渲染
 	for c in children:

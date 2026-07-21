@@ -218,9 +218,22 @@ signal bulk_changed
 ## 最大细分层数: 越大近处 patch 越细(细节越多, 但 patch 越多越费)。
 @export_range(1, 12, 1) var maxLevel: int = 8:
 	set(v): maxLevel = v; param_changed.emit("maxLevel")
-## 细分触发倍率: 相机距 patch 中心 < edge_len × splitFactor 就细分。
+## 细分触发倍率(已废弃, 仅遗留 target_level_at 死代码用): select_lod 现在走 SSE 公式,
+## 真正生效的是 sseThresholdPixels + geometricErrorScale。保留此字段仅为向后兼容旧场景文件。
 @export_range(1.0, 6.0, 0.05) var splitFactor: float = 2.5:
 	set(v): splitFactor = v; param_changed.emit("splitFactor")
+## 屏幕空间误差阈值(像素): chunk 在屏幕上的几何误差超过此值才细分。
+## SSE = geometric_error × viewport_height / (distance × 2 × tan(fov_y/2))。
+## 越小越严格(更精细, 更费 GPU); 越大越省(更粗糙)。
+## 推荐: 2~3 像素(电影级), 5~8 像素(平衡), 10+ 像素(性能优先/移动端)。
+## 默认 5.0(平衡档, 比 web 版旧 splitFactor=2.5 略省 → 近地 FPS 略升); 卡顿就调到 8~12, 想精细就调到 3。
+@export_range(1.0, 32.0, 0.5) var sseThresholdPixels: float = 5.0:
+	set(v): sseThresholdPixels = v; param_changed.emit("sseThresholdPixels")
+## 几何误差缩放: level L 的 chunk 几何误差 = maxHeight × geometricErrorScale / 2^L。
+## >1 更早细分(认为地形细节比 maxHeight/2^L 更粗), <1 更晚细分(认为更细)。
+## 用于手动微调, 多数情况保持 1.0 即可。
+@export_range(0.1, 4.0, 0.05) var geometricErrorScale: float = 1.0:
+	set(v): geometricErrorScale = v; param_changed.emit("geometricErrorScale")
 ## 预取环倍率(>1): 进入 edge_len × splitFactor × prefetchFactor 即后台预生成下一级,
 ## 到 splitFactor 才显示。摊平生成峰值、消除 pop-in。=1 关闭预取。
 @export_range(1.0, 3.0, 0.05) var prefetchFactor: float = 1.4:
@@ -238,7 +251,7 @@ signal bulk_changed
 ## 直接跳过遍历与渲染, 大幅降 patch/三角数(角色模式性能主要来源)。远距观察全球时天然无剔除。
 @export var horizonCulling: bool = true:
 	set(v): horizonCulling = v; param_changed.emit("horizonCulling")
-## 合并滞回(移植 web 版): 分裂阈 d < edge×splitFactor; 合并阈 d > edge×splitFactor×mergeHysteresis。
+## 合并滞回(像素域, 适用于 SSE): 分裂阈 split_d = g_err×K/T; 合并阈 merge_d = split_d × mergeHysteresis。
 ## 两阈之间留死区 → 消除细分边界来回抖动(churn), 取代旧的 retired 合并缓存。
 @export_range(1.0, 2.0, 0.01) var mergeHysteresis: float = 1.15:
 	set(v): mergeHysteresis = v; param_changed.emit("mergeHysteresis")

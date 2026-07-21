@@ -86,7 +86,7 @@ const FOREGROUND_INFLIGHT_CAP := 24  # 前景(显示必需)job 总上限; 防靠
 const LOD_TICK_EVERY := 3   # select_lod 每 N 帧跑一次(遍历整棵四叉树是主线程热点); ≈20Hz 够 LOD 用
 const STRIDE_BUDGET := 24   # 每 LOD pass 最多 compute_strides 次数(每次=3 target_level_at); 封顶 → 与移动速度解耦
 # 影响 LOD 细分但不重建地形的参数: 改了只需重跑 select_lod(相机静止也立即刷新)。
-const LOD_DIRTY_KEYS := ["maxLevel", "splitFactor", "prefetchFactor", "frustumMargin", "nearRadius", "horizonCulling", "mergeHysteresis", "splitBudget"]
+const LOD_DIRTY_KEYS := ["maxLevel", "splitFactor", "prefetchFactor", "frustumMargin", "nearRadius", "horizonCulling", "mergeHysteresis", "splitBudget", "sseThresholdPixels", "geometricErrorScale"]
 var _prefetch_this_frame: int = 0
 var _lod_tick: int = 0
 var _stride_used: int = 0
@@ -312,6 +312,8 @@ func _compute_lod_hash() -> int:
 	h = (h * 31 + hash(int(p.horizonCulling))) & 0x7FFFFFFF
 	h = (h * 31 + hash(p.mergeHysteresis)) & 0x7FFFFFFF
 	h = (h * 31 + hash(p.splitBudget)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.sseThresholdPixels)) & 0x7FFFFFFF
+	h = (h * 31 + hash(p.geometricErrorScale)) & 0x7FFFFFFF
 	return h
 
 
@@ -751,6 +753,15 @@ func update(cam: Camera3D) -> void:
 	cam.force_update_transform()   # 对齐 web camera.updateMatrixWorld(): 确保 get_frustum() 用本帧最新相机变换, 不滞后
 	var frustum: Array = cam.get_frustum()
 	var now: float = Time.get_ticks_msec() / 1000.0
+	# SSE 系数(屏幕空间误差公式里的 K): vp_h / (2 × tan(fov_y/2))。一次性算好传给每个 QNode,
+	# 让 select_lod 按 d < g_err × K / T 判定细分, 取代旧的 d < edge × splitFactor。
+	# 编辑器视口相机也可能没设 fov(默认 75); 安全起见用 max(vp_h, 1.0) 防 0。
+	var fov_y_rad: float = deg_to_rad(cam.fov if cam.fov > 0.0 else 75.0)
+	var vp_h: float = 1080.0
+	var vp := cam.get_viewport()
+	if vp != null:
+		vp_h = maxf(vp.get_visible_rect().size.y, 1.0)
+	var sse_k: float = vp_h / (2.0 * tan(fov_y_rad * 0.5))
 	# 编辑器不做剔除(地平线+视锥): 只跑距离 LOD 细分, chunk 不因「相机看不到」而被隐藏;
 	# 运行时照常剔除。cull 经 select_lod/_render_interior 递归传到整棵四叉树。
 	var cull: bool = not Engine.is_editor_hint()
@@ -762,7 +773,7 @@ func update(cam: Camera3D) -> void:
 	# 角色贴地时地平线极近, 但第三人称相机抬高/后拉看得更远 → 用相机位判可见, 消除中远景三角空洞。
 	var cull_pos: Vector3 = cam.global_position - global_position
 	for r in roots:
-		r.select_lod(cp, cull_pos, frustum, _cam_moved, now, cull)
+		r.select_lod(cp, cull_pos, frustum, sse_k, _cam_moved, now, cull)
 	# 结构仍在变(分裂/合并级联) 或 有在途 mesh → 保持 _lod_dirty, 让 select_lod 继续跑到稳定。
 	# 这样改参数后即便相机静止, 也会按当前 lod 相机位置重新细分(不再停在最低细分等相机移动)。
 	if _tree_changed or _pending > 0:
