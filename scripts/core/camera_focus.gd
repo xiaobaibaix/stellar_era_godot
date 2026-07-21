@@ -58,6 +58,7 @@ var _transitioning: bool = false
 var _transition_t: float = 0.0
 var _from_xform: Transform3D
 var _pending_focus: int = -1
+var _wireframe: bool = false   # F1 切换的线框模式状态(只在此脚本管, 不读 Planet._wire)
 
 
 func _ready() -> void:
@@ -96,9 +97,17 @@ func _unhandled_input(event: InputEvent) -> void:
 	# 切换期间冻结轨道输入(否则 yaw/pitch/distance 会继续被鼠标/滚轮推着走, 与插值叠加产生抖动)。
 	if _transitioning:
 		return
-	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_M:
-		toggle_focus()
-		return
+	if event is InputEventKey and event.pressed and not event.echo:
+		match event.keycode:
+			KEY_M:
+				toggle_focus()
+				return
+			# F1 切 mesh 线框(深色实心面 + 亮线段, 仅显示朝向相机的边); 与 main.gd 的 F1 同语义。
+			KEY_F1:
+				if _planet != null and is_instance_valid(_planet):
+					_wireframe = not _wireframe
+					_planet.set_wireframe(_wireframe)
+				return
 	if event is InputEventMouseMotion and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
 		_target_yaw -= event.relative.x * rotate_speed
 		var sgn := -1.0 if invert_y else 1.0
