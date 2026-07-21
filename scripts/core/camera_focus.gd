@@ -32,9 +32,6 @@ enum Focus { PLANET, PLAYER }
 @export var planet_min_distance_ratio: float = 1.3
 
 @export_group("Player focus")
-## 切到 PLAYER 焦点时, 若当前 distance > planet.radius × player_reset_ratio(刚从全球过来),
-## 重置为 player_default_distance; 否则保留当前 distance(已在角色附近)。
-@export var player_reset_ratio: float = 1.5
 ## 切到 PLAYER 焦点的默认轨道距离(第三人称)。
 @export var player_default_distance: float = 12.0
 ## 第三人称俯仰角(弧度, 相对玩家径向 up; 正=相机抬高俯视)。
@@ -228,9 +225,9 @@ func _desired_end_xform(f: int) -> Transform3D:
 		Focus.PLAYER:
 			# 角色朝向: player.gd 的 _align_basis 把 basis.z 设为 -forward, 所以"角色后方" = +basis.z 方向。
 			# 径向 up = basis.y(指向行星外)。
-			var want_d: float = distance
-			if _planet != null and is_instance_valid(_planet) and distance > _planet.params.radius * player_reset_ratio:
-				want_d = player_default_distance
+			# 始终用 player_default_distance: PLANET 轨道距离(min ≈ radius×1.3 ≈ 424)对 PLAYER 视图(典型 12)永远太远,
+			# 保留旧值会让过渡终点离行星中心 600+ → 立即触发 auto_switch → 弹回 PLANET(用户看到"过去了又回来")。
+			var want_d: float = player_default_distance
 			if _player != null and is_instance_valid(_player):
 				var pb := _player.global_transform.basis
 				var back := pb.z
