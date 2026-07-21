@@ -607,8 +607,53 @@ func _mark_all_roots_dirty() -> void:
 		_root_dirty[i] = 1
 
 
-# 重建【单个根】的 ArrayMesh: 只收集该根的可见叶, 每叶一个 surface(本地索引, 无偏移循环)。
-# 只在 _root_dirty[i]==1 时调 → 飞行时只 churn 的几个根花成本, 其余可见根零成本。
+# 把多个 surface arrays 合并成单个 arrays[](顶点/法线/颜色 append_array + 索引按累积顶点偏移)。
+# 用于每根内部合并 → 恒 1 surface/根: 绕开 ArrayMesh MAX_MESH_SURFACES(256)上限 + draw call 降到 20。
+# channels 由各 arr 实际填充决定(非 wire 三角面: v/n/c/i; wire 实心面/线段: v/i)。同一次合并内各 arr 通道一致。
+func _merge_surface_arrays(src_list: Array) -> Array:
+	var big_v := PackedVector3Array()
+	var big_n := PackedVector3Array()
+	var big_c := PackedColorArray()
+	var has_n := false
+	var has_c := false
+	var total_idx := 0
+	for arr in src_list:
+		big_v.append_array(arr[Mesh.ARRAY_VERTEX])
+		var n: Variant = arr[Mesh.ARRAY_NORMAL]
+		if n != null and n.size() > 0:
+			big_n.append_array(n)
+			has_n = true
+		var c: Variant = arr[Mesh.ARRAY_COLOR]
+		if c != null and c.size() > 0:
+			big_c.append_array(c)
+			has_c = true
+		total_idx += arr[Mesh.ARRAY_INDEX].size()
+	# 索引按累积顶点数偏移: 一次性 resize 后逐元素写入(避免 append 多次重分配)。
+	var big_i := PackedInt32Array()
+	big_i.resize(total_idx)
+	var w := 0
+	var voff := 0
+	for arr in src_list:
+		var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var idx: PackedInt32Array = arr[Mesh.ARRAY_INDEX]
+		var cnt := idx.size()
+		for j in range(cnt):
+			big_i[w] = idx[j] + voff
+			w += 1
+		voff += v.size()
+	var out := []
+	out.resize(Mesh.ARRAY_MAX)
+	out[Mesh.ARRAY_VERTEX] = big_v
+	if has_n:
+		out[Mesh.ARRAY_NORMAL] = big_n
+	if has_c:
+		out[Mesh.ARRAY_COLOR] = big_c
+	out[Mesh.ARRAY_INDEX] = big_i
+	return out
+
+
+# 重建【单个根】的 ArrayMesh: 该根所有可见叶合并成【单 surface】(非 wire)或【fill+line 两 surface】(wire)。
+# 恒 ≤2 surface/根 → 永不触 MAX_MESH_SURFACES(256)。只在 _root_dirty[i]==1 时调 → 只 churn 根花成本。
 func _rebuild_root_mesh(i: int) -> void:
 	if i < 0 or i >= _root_meshes.size():
 		_root_patches[i] = 0
@@ -624,32 +669,34 @@ func _rebuild_root_mesh(i: int) -> void:
 	var rp := 0
 	var rt := 0
 	if _wire:
-		# 线框: 先加所有叶的实心遮挡面(surface 0..fill-1), 再加所有叶的亮线段。
-		# 前 fill 个配 _wire_fill_mat, 其后配 _wire_line_mat。
-		var fill := 0
+		# 线框: 所有叶的实心遮挡面合并成 1 surface, 所有亮线段合并成 1 surface(共 2 surface/根)。
+		var fill_arr := []
+		var line_arr := []
 		for q in leaves:
 			if q._surfaces.size() >= 1:
-				var s0: Dictionary = q._surfaces[0]
-				am.add_surface_from_arrays(int(s0.prim), s0.arrays)
+				fill_arr.append((q._surfaces[0] as Dictionary).arrays)
 				rp += 1
 				rt += q.tri_count
-				fill += 1
-		for q in leaves:
 			if q._surfaces.size() >= 2:
-				var s1: Dictionary = q._surfaces[1]
-				am.add_surface_from_arrays(int(s1.prim), s1.arrays)
+				line_arr.append((q._surfaces[1] as Dictionary).arrays)
+		if not fill_arr.is_empty():
+			am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, _merge_surface_arrays(fill_arr))
+		if not line_arr.is_empty():
+			am.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, _merge_surface_arrays(line_arr))
 		mi.mesh = am
 		mi.material_override = null
 		for s in range(am.get_surface_count()):
-			mi.set_surface_override_material(s, _wire_fill_mat if s < fill else _wire_line_mat)
+			mi.set_surface_override_material(s, _wire_fill_mat if s == 0 else _wire_line_mat)
 	else:
-		# 非 wire: 每叶一个 TRIANGLES surface(本地索引, 无偏移循环)→ 彻底去掉 GDScript 索引循环热点。
+		# 非 wire: 该根所有可见叶合并成【单个】 TRIANGLES surface → 恒 1 surface/根。
+		var tri_arr := []
 		for q in leaves:
 			if q._surfaces.size() >= 1:
-				var s0: Dictionary = q._surfaces[0]
-				am.add_surface_from_arrays(int(s0.prim), s0.arrays)
+				tri_arr.append((q._surfaces[0] as Dictionary).arrays)
 				rp += 1
 				rt += q.tri_count
+		if not tri_arr.is_empty():
+			am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, _merge_surface_arrays(tri_arr))
 		mi.mesh = am
 		mi.material_override = material
 		for s in range(am.get_surface_count()):

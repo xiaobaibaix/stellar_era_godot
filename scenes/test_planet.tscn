@@ -35,7 +35,8 @@ compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_mf1e
 [sub_resource type="Resource" id="Resource_l2qgg"]
 resource_local_to_scene = true
 script = ExtResource("2_cptss")
-radius = 326.0
+radius = 500.0
+maxHeight = 25.0
 showInset = false
 showAtmosphere = false
 showClouds = false
@@ -53,7 +54,7 @@ camera = NodePath("../Camera3D")
 sun_lights = [null, NodePath("../OmniLight3D")]
 
 [node name="Player" parent="Planet" unique_id=818653580 instance=ExtResource("5_216rf")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 536.36707, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 946.1213, 0)
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=39806466]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 678.9389)
