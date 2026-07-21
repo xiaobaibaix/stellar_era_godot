@@ -23,7 +23,7 @@ glow_enabled = true
 [sub_resource type="CompositorEffect" id="CompositorEffect_mf1ej"]
 resource_local_to_scene = false
 resource_name = ""
-enabled = true
+enabled = false
 effect_callback_type = 4
 needs_motion_vectors = false
 needs_normal_roughness = false
@@ -37,6 +37,8 @@ resource_local_to_scene = true
 script = ExtResource("2_cptss")
 radius = 326.0
 showInset = false
+showAtmosphere = false
+showClouds = false
 showGodrays = false
 
 [node name="TestPlanet" type="Node" unique_id=233593354]

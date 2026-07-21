@@ -30,8 +30,8 @@ var roots: Array = []  # Array[QNode]
 var _V: Array = []  # 12 个单位顶点(Vector3)
 var _faces: Array = []  # 20 个 [i,j,k]
 var material: ShaderMaterial
-var _wire_fill_mat: StandardMaterial3D  # 线框模式实心遮挡面材质(surface 0)
-var _wire_line_mat: StandardMaterial3D  # 线框模式亮线段材质(surface 1)
+var _wire_fill_mat: ShaderMaterial  # 线框模式实心遮挡面材质(terrain shader + u_wire_mode=1, 共用位移)
+var _wire_line_mat: ShaderMaterial  # 线框模式亮线段材质(terrain shader + u_wire_mode=2)
 var stats: Dictionary = {"patches": 0, "triangles": 0, "inflight": 0}
 var _tla_cache: Dictionary = {}       # target_level_at 缓存: 量化方向(Vector3i) -> level
 var _tla_cache_gen: int = -1          # 缓存所属 generation; _gen 变(rebuild)时清空
@@ -129,21 +129,15 @@ func _ready() -> void:
 		material.resource_local_to_scene = false   # 共享一份; uniform 推一次全 patch 生效
 		# render_mode cull_back 已在 shader 里声明(封闭球壳); 此处不再设 StandardMaterial3D 选项。
 	if _wire_fill_mat == null:
-		# 线框模式的"实心遮挡面": 深色 + CULL_BACK + 写深度。背面三角形被剔除不写深度,
-		# 但前方三角形写了深度 → 背面/远侧的线段在深度测试时被挡掉(只看得见朝向相机的线)。
-		_wire_fill_mat = StandardMaterial3D.new()
-		_wire_fill_mat.albedo_color = Color(0.04, 0.07, 0.12)
-		_wire_fill_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		_wire_fill_mat.cull_mode = BaseMaterial3D.CULL_BACK
+		# 线框模式的"实心遮挡面": 复用 terrain shader 拿到顶点位移(否则网格是平滑球),
+		# 通过 u_wire_mode=1 让 fragment 输出深色, 深度照常写(挡背面线段)。
+		_wire_fill_mat = material.duplicate()
+		_wire_fill_mat.set_shader_parameter("u_wire_mode", 1.0)
 	if _wire_line_mat == null:
-		# 线框模式的"亮线段": 只测深度、不写深度(DEPTH_DRAW_DISABLED; no_depth_test 默认 false 仍测深度)。
-		# 线段本身不受 cull_mode 影响, 但会被 surface0 的实心深度剔除: 前面线段比遮挡面略近
-		# (verts 不缩放, 遮挡面 ×0.99998)→ 画出; 背面线段在远处 → 深度测试失败 → 隐藏。
-		_wire_line_mat = StandardMaterial3D.new()
-		_wire_line_mat.albedo_color = Color(0.55, 0.85, 1.0)
-		_wire_line_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		_wire_line_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-		_wire_line_mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+		# 线框模式的"亮线段": 同样复用 terrain shader 拿位移, u_wire_mode=2 输出亮色。
+		# 线段(PrimitiveMesh LINE)不受 cull_mode 影响 → shader 的 cull_back 不会剔掉线段。
+		_wire_line_mat = material.duplicate()
+		_wire_line_mat.set_shader_parameter("u_wire_mode", 2.0)
 	_build_effects()  # 大气壳 + 海洋 mesh + shader(Phase 2)
 	_build_compositor()  # CompositorEffect 全屏后处理大气(挂 WorldEnvironment)
 	if roots.is_empty():
@@ -382,34 +376,41 @@ func _build_noise() -> void:
 
 
 # 把地形参数/种子偏移推到 terrain.gdshader uniform(与 terrain.gd height_at 同源 → GPU 视觉=CPU 碰撞)。
+# 同时推给 wire 材质: 它们复用 terrain shader 拿位移, 必须同步噪声/半径等参数, 否则线框贴合不到地形。
 func _apply_terrain_uniforms() -> void:
 	if material == null or params == null:
 		return
 	var p := params
-	material.set_shader_parameter("u_radius", p.radius)
-	material.set_shader_parameter("u_max_height", p.maxHeight)
-	material.set_shader_parameter("u_skirt_depth", p.maxHeight * 2.5)   # 裙边径向内缩, 盖 LOD 裂缝
-	material.set_shader_parameter("u_sea", p.seaLevel)
-	material.set_shader_parameter("u_warp", p.warpStrength)
-	material.set_shader_parameter("u_warp_freq", p.warpFreq)
-	material.set_shader_parameter("u_cont_freq", p.continentFreq)
-	material.set_shader_parameter("u_cont_oct", p.continentOctaves)
-	material.set_shader_parameter("u_cont_gain", p.continentGain)
-	material.set_shader_parameter("u_cont_lac", p.continentLacunarity)
-	material.set_shader_parameter("u_mtn_freq", p.mountainFreq)
-	material.set_shader_parameter("u_mtn_oct", p.mountainOctaves)
-	material.set_shader_parameter("u_mtn_strength", p.mountainStrength)
-	material.set_shader_parameter("u_plate", p.plateStrength)
-	material.set_shader_parameter("u_plate_freq", p.plateFreq)
-	material.set_shader_parameter("u_moist_freq", p.moistureFreq)
-	material.set_shader_parameter("u_alt_range", p.climateAltRange)
-	material.set_shader_parameter("u_use_climate", 1 if p.useClimate else 0)
-	material.set_shader_parameter("u_off_warp", Terrain.off(p.warpSeed))
-	material.set_shader_parameter("u_off_cont", Terrain.off(p.continentSeed))
-	material.set_shader_parameter("u_off_mtn", Terrain.off(p.mountainSeed))
-	material.set_shader_parameter("u_off_plate", Terrain.off(p.plateSeed))
-	material.set_shader_parameter("u_off_moist", Terrain.off(p.moistureSeed))
-	material.set_shader_parameter("u_sun_dir", _sun_dir)
+	var mats: Array = [material]
+	if _wire_fill_mat != null:
+		mats.append(_wire_fill_mat)
+	if _wire_line_mat != null:
+		mats.append(_wire_line_mat)
+	for mat in mats:
+		mat.set_shader_parameter("u_radius", p.radius)
+		mat.set_shader_parameter("u_max_height", p.maxHeight)
+		mat.set_shader_parameter("u_skirt_depth", p.maxHeight * 2.5)   # 裙边径向内缩, 盖 LOD 裂缝
+		mat.set_shader_parameter("u_sea", p.seaLevel)
+		mat.set_shader_parameter("u_warp", p.warpStrength)
+		mat.set_shader_parameter("u_warp_freq", p.warpFreq)
+		mat.set_shader_parameter("u_cont_freq", p.continentFreq)
+		mat.set_shader_parameter("u_cont_oct", p.continentOctaves)
+		mat.set_shader_parameter("u_cont_gain", p.continentGain)
+		mat.set_shader_parameter("u_cont_lac", p.continentLacunarity)
+		mat.set_shader_parameter("u_mtn_freq", p.mountainFreq)
+		mat.set_shader_parameter("u_mtn_oct", p.mountainOctaves)
+		mat.set_shader_parameter("u_mtn_strength", p.mountainStrength)
+		mat.set_shader_parameter("u_plate", p.plateStrength)
+		mat.set_shader_parameter("u_plate_freq", p.plateFreq)
+		mat.set_shader_parameter("u_moist_freq", p.moistureFreq)
+		mat.set_shader_parameter("u_alt_range", p.climateAltRange)
+		mat.set_shader_parameter("u_use_climate", 1 if p.useClimate else 0)
+		mat.set_shader_parameter("u_off_warp", Terrain.off(p.warpSeed))
+		mat.set_shader_parameter("u_off_cont", Terrain.off(p.continentSeed))
+		mat.set_shader_parameter("u_off_mtn", Terrain.off(p.mountainSeed))
+		mat.set_shader_parameter("u_off_plate", Terrain.off(p.plateSeed))
+		mat.set_shader_parameter("u_off_moist", Terrain.off(p.moistureSeed))
+		mat.set_shader_parameter("u_sun_dir", _sun_dir)
 
 
 func height_at(x: float, y: float, z: float) -> float:

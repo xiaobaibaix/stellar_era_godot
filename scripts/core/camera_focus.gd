@@ -47,6 +47,12 @@ enum Focus { PLANET, PLAYER }
 ## test_planet 调试用: 不全屏; 其他场景用本脚本时可在 Inspector 关掉。
 @export var force_windowed: bool = true
 
+@export_group("Collision")
+## 相机径向碰撞余量(世界单位): 相机钻进位移后地形内部时, 沿径向推至 地形半径 + 此值。
+## 修复"靠近地面/角色时出现空洞": 原因是 cull_back 把相机所见山体背面剔掉。
+## PLAYER 焦点默认 pitch=0.35 × distance=12 ≈ 4 单位高度, 附近山峰(maxHeight=8)高过相机 → 钻进 mesh。
+@export var terrain_collision_margin: float = 0.8
+
 var _target_yaw: float
 var _target_pitch: float
 var _target_distance: float
@@ -173,6 +179,7 @@ func _process(delta: float) -> void:
 			var atmo_shell := _planet.params.radius * _planet.params.atmoScale
 			if cam_d > atmo_shell * auto_switch_ratio:
 				_start_transition(Focus.PLANET)
+	_collide_with_terrain()
 
 
 func _focus_point(f: int) -> Vector3:
@@ -289,3 +296,27 @@ func _start_transition(new_focus: int) -> void:
 
 func _ease_in_out(t: float) -> float:
 	return t * t * (3.0 - 2.0 * t)
+
+
+# 相机-地形径向碰撞: 相机钻进位移后地形内部时, 沿径向推至表面之上(margin)。
+# height_at 每帧 1 次(GDScript 噪声 ~1ms), 移植 C++ 后基本零成本。
+# 不改 yaw/pitch/distance: 轨道意图保留, 视觉上相机被"挡"在山外; 用户缩回时自动恢复轨道。
+func _collide_with_terrain() -> void:
+	if _planet == null or not is_instance_valid(_planet):
+		return
+	var planet_center: Vector3 = _planet.global_position
+	var cam_rel: Vector3 = global_position - planet_center
+	var cam_dist: float = cam_rel.length()
+	if cam_dist < 1e-3:
+		return
+	# 早出: 相机已远超最高峰 + margin → 不可能碰撞, 跳过 height_at(GDScript 噪声 ~1.3ms/次)
+	# PLANET 焦点常态: cam_dist ≈ radius × 1.3 = 424, 最高峰 = radius + 8 + 0.8 → 总跳过, 零开销。
+	var p := _planet.params
+	if cam_dist > p.radius + p.maxHeight + terrain_collision_margin:
+		return
+	var cam_dir: Vector3 = cam_rel / cam_dist
+	var h: float = _planet.height_at(cam_dir.x, cam_dir.y, cam_dir.z)
+	var terrain_r: float = p.radius + h * p.maxHeight
+	var min_r: float = terrain_r + terrain_collision_margin
+	if cam_dist < min_r:
+		global_position = planet_center + cam_dir * min_r
