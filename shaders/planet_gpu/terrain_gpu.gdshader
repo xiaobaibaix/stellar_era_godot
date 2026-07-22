@@ -222,8 +222,9 @@ void vertex() {
 		vec3 p2 = d2 * (u_radius + terrain_height(d2) * u_max_height);
 		vec3 n = normalize(cross(p1 - displaced, p2 - displaced));
 		if (dot(n, d) < 0.0) n = -n;   // 与 terrain.gdshader 逐位一致: 强制法线外向(dot(n,d)>0)
-		NORMAL = n;
-		v_world_normal = normalize((MODEL_MATRIX * vec4(n, 0.0)).xyz);
+		// cull_front 下引擎会自动翻 NORMAL 做双面 shading, 这里先翻一次让它翻回来 → 外向法线参与光照。
+		NORMAL = -n;
+		v_world_normal = normalize((MODEL_MATRIX * vec4(n, 0.0)).xyz);   // 自用 varying 不翻, 保持外向
 	} else {
 		VERTEX = vec3(0.0);   // 坍缩: 退化三角形, 光栅器丢弃
 	}
