@@ -16,7 +16,12 @@
 // Phase 1 只读 texel0..2 的 .xyz(A/B/C); bary/lodTrans/minmax 留给 Phase 2+(焊接/裁剪/烘焙路)。
 // Phase 2 起: 同一 shader, patch 纹理改由 compute 写入(可变叶数), vertex 逻辑不变。
 shader_type spatial;
-render_mode cull_back;   // 同 terrain.gdshader: 引擎默认光照(sun_light 照亮 ALBEDO+NORMAL)
+// cull_front 而非 terrain.gdshader 的 cull_back: GpuPlanet 的 patch mesh 经 UV→sphere
+// barycentric 映射后, Godot 视三角面为"背向"(经验结论, 与纸面 CCW 分析不一致 —— 推测
+// ArrayMesh + spatial shader 管线某处对 patch-local Y 或索引 winding 有 convention 差异)。
+// 用 cull_front 补, 视觉结果正确(正面外向法线可见)。terrain.gdshader 用 cull_back 是因为
+// 它的网格是 CPU 烘的理想球面, winding 不同; 此处 cull 模式不参与"逐位一致"约束。
+render_mode cull_front;
 
 uniform sampler2D u_patchTex;          // 6×(MAX_PATCHES+1) RGBA32F: per-instance patch 数据 + 末行 count
 const int META_ROW = 4096;             // patch 纹理末行(=MAX_PATCHES)存可见 patch 数, 供坍缩守卫读
