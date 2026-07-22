@@ -1,39 +1,65 @@
 # gdlint: disable=variable-name, max-line-length
-## GPU LOD 遍历 compositor(Phase 2)。CompositorEffect 挂 PRE_OPAQUE, 每帧跑 lod_traverse.glsl。
+## GPU LOD compositor(Phase 3: traverse + cull)。CompositorEffect 挂 PRE_OPAQUE。
 ##
-## 拥有: shader/pipeline、双缓冲 patch 纹理(RD, STORAGE|SAMPLING)、双 counter(storage buffer)、
-## Texture2DRD 包装(绑给 material)、frame 数据(cam_pos/planet_center/C_const/radius/maxHeight/maxLevel)。
+## 拥有: 两个 compute pipeline(traverse + cull)、双缓冲 trav/cull 纹理(RD, STORAGE|SAMPLING)、
+## 双 counter(storage buffer)、MinMax Texture2DArray(20 layer, 含 mip 链, 1 次烘)、frame UBO
+## (uniform buffer, 每帧 buffer_update)、Texture2DRD 包装(绑给 material)、frame 数据。
 ##
-## 1-帧延迟(消除同帧 storage→sampler 竞态, 沿用项目 LUT 模式): 本帧 compute 写 tex[write_idx],
-## vertex shader 读 tex[read_idx](上一帧的)。帧末绑 material.u_patchTex = tex2drd[read_idx]。首帧空(count=0 坍缩)。
+## 1-帧延迟(消除同帧 storage→sampler 竞态): 本帧 compute 写 [write_idx], vertex 读 [read_idx]。
 ##
-## 每帧 dispatch 序列(一个 compute_list, barrier 分隔 storage 依赖):
-##   reset(level=-1, 1线程) → barrier → [per level 0..maxLevel: dispatch(ceil(20·4^L/64)) → barrier] → metadata(level=-2, 1线程)。
+## 每帧 dispatch 序列(每个 dispatch 独立 compute_list, barrier 自动分隔 storage 依赖):
+##   ─── traverse 阶段(选叶) ───
+##   reset trav_counter(level=-1) →
+##   [per level 0..maxLevel: dispatch(ceil(20·4^L/64), level=L)] →
+##   trav metadata(level=-2): trav_counter → trav_tex META_ROW
+##   ─── cull 阶段(视锥裁剪) ───
+##   reset cull_counter(mode=-1) →
+##   cull dispatch(ceil(MAX_PATCHES/64), mode=0): 读 trav_tex, 采样 MinMax, frustum 测试, 写 cull_tex →
+##   cull metadata(mode=-2): cull_counter → cull_tex META_ROW
 ##
-## 相机矩阵/位置由 GpuPlanet._process 主线程算好后 set_frame_data 推(不像大气 compositor 自己取 render_data 相机,
-## 因为 LOD 需要显式 camera 引用以兼容 @tool 编辑器)。只在渲染线程 _render_callback 里读写 RID, 不碰主线程节点。
+## 相机矩阵/位置由 GpuPlanet._process 主线程算好后 set_frame_data 推。MinMax 烘焙由 GpuPlanet
+## 在 setup 时调 set_minmax(data) 推一次(param 变时重烘)。只在渲染线程 _render_callback 里读写 RID。
 @tool
 class_name GpuLodCompositor
 extends CompositorEffect
 
-const SHADER_PATH := "res://shaders/compute/lod_traverse.glsl"
-const MAX_PATCHES := 4096          # 与 lod_traverse.glsl MAX_PATCHES 一致
+const TRAVERSE_SHADER_PATH := "res://shaders/compute/lod_traverse.glsl"
+const CULL_SHADER_PATH := "res://shaders/compute/lod_cull.glsl"
+const MAX_PATCHES := 4096          # 与 shader MAX_PATCHES 一致
 const PATCH_TEX_W := 6             # 每 patch 6 texel
 const PATCH_TEX_H := MAX_PATCHES + 1   # 末行存 count metadata
 const WG := 64                     # workgroup size(与 glsl local_size_x 一致)
+const BAKE_RES := 512              # MinMax 烘焙分辨率(2^9 = 512; maxLevel 6 足够覆盖)
+# FrameData UBO: frustum[6](96) + cam(16) + planet(16) + consts(16) = 144 字节
+const FRAME_UBO_SIZE := 144
 
 var _rd: RenderingDevice
-var _shader: RID
-var _pipeline: RID
+var _trav_shader: RID
+var _trav_pipeline: RID
+var _cull_shader: RID
+var _cull_pipeline: RID
 var _material_rid: RID
 
 # 双缓冲(1-帧延迟): idx = _frame & 1 写, 1-idx 读。
-var _patch_tex: Array = [RID(), RID()]      # RD 纹理(storage+sampling)
-var _counter: Array = [RID(), RID()]        # storage buffer(uint count)
-var _tex2drd: Array = [null, null]          # Texture2DRD 包装(暴露给 GpuPlanet 主线程 set_shader_parameter 绑定)
-var _uniform_set: Array = [null, null]      # 缓存的 uniform set [set0_image, set1_counter] per write idx
-var _frame: int = 0
-var _cb_count: int = 0   # 调试: _render_callback 被调用次数(>0 说明回调已注册)
+var _trav_tex: Array = [RID(), RID()]      # 中间: traverse 输出 → cull 输入
+var _trav_counter: Array = [RID(), RID()]  # traverse 的 atomicAdd 计数器
+var _cull_tex: Array = [RID(), RID()]      # 终端: cull 输出 → vertex 读(就是 u_patchTex)
+var _cull_counter: Array = [RID(), RID()]  # cull 的 atomicAdd 计数器
+var _tex2drd: Array = [null, null]         # Texture2DRD 包装(暴露给 GpuPlanet 主线程 set_shader_parameter 绑定)
+
+# MinMax 资源(per-frame 只读; param 变时 set_minmax 重建)
+var _minmax_tex: RID
+var _minmax_sampler: RID
+var _minmax_ready := false
+
+# FrameData UBO(每帧 buffer_update; cull shader set 4 用)
+var _frame_ubo: RID
+
+# 缓存的 uniform sets(按 RID 经 UniformSetCacheRD 缓存)
+var _trav_sets: Array = [null, null]   # [write_idx] = [set0_image, set1_counter]
+var _cull_sets: Array = [null, null]   # [write_idx] = [set0..4]
+
+var _cb_count: int = 0   # 调试: _render_callback 被调用次数
 var _mutex := Mutex.new()
 var _frame_data: Dictionary = {}
 var _ready := false
@@ -47,12 +73,20 @@ func _init() -> void:
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
-		_free_res(_shader)
-		_shader = RID()
-		_pipeline = RID()
+		_free_res(_trav_shader)
+		_free_res(_cull_shader)
+		_trav_shader = RID()
+		_cull_shader = RID()
+		_trav_pipeline = RID()
+		_cull_pipeline = RID()
 		for i in range(2):
-			_free_res(_patch_tex[i]); _patch_tex[i] = RID()
-			_free_res(_counter[i]); _counter[i] = RID()
+			_free_res(_trav_tex[i]); _trav_tex[i] = RID()
+			_free_res(_trav_counter[i]); _trav_counter[i] = RID()
+			_free_res(_cull_tex[i]); _cull_tex[i] = RID()
+			_free_res(_cull_counter[i]); _cull_counter[i] = RID()
+		_free_res(_minmax_tex); _minmax_tex = RID()
+		_free_res(_minmax_sampler); _minmax_sampler = RID()
+		_free_res(_frame_ubo); _frame_ubo = RID()
 		_ready = false
 
 
@@ -61,7 +95,7 @@ static func _free_res(rid: RID) -> void:
 		RenderingServer.get_rendering_device().free_rid(rid)
 
 
-# GpuPlanet._ready 调: 编 shader + 建双缓冲纹理/counter/包装。
+# GpuPlanet._ready 调: 编两个 shader + 建双缓冲纹理/counter/UBO/包装。
 func setup(material_rid: RID) -> bool:
 	_material_rid = material_rid
 	if _rd == null:
@@ -69,41 +103,103 @@ func setup(material_rid: RID) -> bool:
 	if _rd == null:
 		push_error("[GpuLodCompositor] 无 RenderingDevice")
 		return false
-	if not _compile_shader():
+	if not _compile_traverse():
+		return false
+	if not _compile_cull():
 		return false
 	for i in range(2):
-		if not _patch_tex[i].is_valid():
-			_patch_tex[i] = _create_patch_tex()
-			_counter[i] = _create_counter()
+		if not _trav_tex[i].is_valid():
+			_trav_tex[i] = _create_patch_tex()
+			_trav_counter[i] = _create_counter()
+			_cull_tex[i] = _create_patch_tex()
+			_cull_counter[i] = _create_counter()
 			var t := Texture2DRD.new()
-			t.texture_rd_rid = _patch_tex[i]   # 正确属性名 texture_rd_rid(非 texture_rd)
+			t.texture_rd_rid = _cull_tex[i]   # vertex 读的是 cull 输出
 			_tex2drd[i] = t
-			_uniform_set[i] = null   # 首次 _render_callback 经 UniformSetCacheRD 按 RID 缓存
+			_trav_sets[i] = null
+			_cull_sets[i] = null
+	if not _frame_ubo.is_valid():
+		var zeros := PackedByteArray()
+		zeros.resize(FRAME_UBO_SIZE)
+		_frame_ubo = _rd.uniform_buffer_create(FRAME_UBO_SIZE, zeros)
 	_ready = true
 	return true
 
 
-# GpuPlanet._process(主线程)调: 取上一帧写好的纹理(Texture2DRD)绑给 material。write_idx=本帧要写的。
+# GpuPlanet 烘 MinMax 后调一次, 把金字塔上传为 Texture2DArray。param 变 → 重新调。
+func set_minmax(data: GpuMinMaxData) -> bool:
+	if _rd == null:
+		_rd = RenderingServer.get_rendering_device()
+	if _rd == null:
+		push_error("[GpuLodCompositor] set_minmax: 无 RenderingDevice")
+		return false
+	if data.bake_res != BAKE_RES:
+		push_error("[GpuLodCompositor] set_minmax: bake_res 不匹配(got %d, expect %d)" % [data.bake_res, BAKE_RES])
+		return false
+	_free_res(_minmax_tex)
+	_minmax_tex = _create_minmax_tex(data)
+	if not _minmax_tex.is_valid():
+		return false
+	if not _minmax_sampler.is_valid():
+		var st := RDSamplerState.new()
+		st.min_filter = RenderingDevice.SAMPLER_FILTER_NEAREST
+		st.mag_filter = RenderingDevice.SAMPLER_FILTER_NEAREST
+		st.mip_filter = RenderingDevice.SAMPLER_FILTER_NEAREST   # textureLod 显式 mip; NEAREST 避免跨 mip 插值
+		st.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+		st.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+		_minmax_sampler = _rd.sampler_create(st)
+	# 失效缓存的 cull uniform sets(minmax_tex RID 变了)
+	_cull_sets[0] = null
+	_cull_sets[1] = null
+	_minmax_ready = true
+	return true
+
+
+# GpuPlanet._process(主线程)调: 取上一帧写好的 cull 纹理(Texture2DRD)绑给 material。
 func get_read_texture(write_idx: int) -> Texture2DRD:
 	return _tex2drd[1 - write_idx]
 
 
-func _compile_shader() -> bool:
-	if _pipeline.is_valid():
+# MinMax 是否就绪(set_minmax 成功后 true)。未就绪时 cull 被跳过, cull_tex 全 0 →
+# GpuPlanet 应继续绑 fallback 纹理(否则 shader 读到 count=0 → 坍缩无渲染 → 灰屏)。
+func is_minmax_ready() -> bool:
+	return _minmax_ready
+
+
+func _compile_traverse() -> bool:
+	if _trav_pipeline.is_valid():
 		return true
-	var sf := load(SHADER_PATH) as RDShaderFile
+	var sf := load(TRAVERSE_SHADER_PATH) as RDShaderFile
 	if sf == null:
-		push_error("[GpuLodCompositor] load RDShaderFile 失败: " + SHADER_PATH)
+		push_error("[GpuLodCompositor] load 失败: " + TRAVERSE_SHADER_PATH)
 		return false
 	var spirv: RDShaderSPIRV = sf.get_spirv()
 	if spirv == null or spirv.compile_error_compute != "":
-		push_error("[GpuLodCompositor] compute 编译错误: " + (spirv.compile_error_compute if spirv != null else "null"))
+		push_error("[GpuLodCompositor] traverse 编译错误: " + (spirv.compile_error_compute if spirv != null else "null"))
 		return false
-	_shader = _rd.shader_create_from_spirv(spirv)
-	if not _shader.is_valid():
+	_trav_shader = _rd.shader_create_from_spirv(spirv)
+	if not _trav_shader.is_valid():
 		return false
-	_pipeline = _rd.compute_pipeline_create(_shader)
-	return _pipeline.is_valid()
+	_trav_pipeline = _rd.compute_pipeline_create(_trav_shader)
+	return _trav_pipeline.is_valid()
+
+
+func _compile_cull() -> bool:
+	if _cull_pipeline.is_valid():
+		return true
+	var sf := load(CULL_SHADER_PATH) as RDShaderFile
+	if sf == null:
+		push_error("[GpuLodCompositor] load 失败: " + CULL_SHADER_PATH)
+		return false
+	var spirv: RDShaderSPIRV = sf.get_spirv()
+	if spirv == null or spirv.compile_error_compute != "":
+		push_error("[GpuLodCompositor] cull 编译错误: " + (spirv.compile_error_compute if spirv != null else "null"))
+		return false
+	_cull_shader = _rd.shader_create_from_spirv(spirv)
+	if not _cull_shader.is_valid():
+		return false
+	_cull_pipeline = _rd.compute_pipeline_create(_cull_shader)
+	return _cull_pipeline.is_valid()
 
 
 # 6 × (MAX_PATCHES+1) RGBA32F, STORAGE|SAMPLING。零填充(末行 count=0 → 首帧坍缩无渲染, 安全)。
@@ -116,8 +212,7 @@ func _create_patch_tex() -> RID:
 	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
 	var bytes := PackedByteArray()
 	bytes.resize(PATCH_TEX_W * PATCH_TEX_H * 16)   # 全 0
-	# texture_create 第3参类型是 Array[PackedByteArray](每层一个), 非 bare PackedByteArray。
-	# 零填充必需: 1-帧延迟下首帧读 read_idx 未写过 → META_ROW count=0 → 坍缩守卫生效(否则读显存垃圾绕过守卫渲染 NaN)。
+	# 零填充必需: 首帧读 read_idx 未写过 → META_ROW count=0 → 坍缩守卫生效(否则读显存垃圾绕过守卫渲染 NaN)。
 	var layers: Array = [bytes]
 	return _rd.texture_create(fmt, RDTextureView.new(), layers)
 
@@ -128,7 +223,45 @@ func _create_counter() -> RID:
 	return _rd.storage_buffer_create(4, bytes)
 
 
-# 主线程(GpuPlanet._process)每帧调: 推相机/参数快照。
+# MinMax Texture2DArray(20 layer × bake_res² × R32G32_SFLOAT, 含 mip 链 log2(bake_res)+1 级)。
+# per (face, mip) 调 texture_update 写入对应 PackedFloat32Array(从 data.build_pyramid())。
+func _create_minmax_tex(data: GpuMinMaxData) -> RID:
+	var fmt := RDTextureFormat.new()
+	# Godot 4.x 属性名是 array_layers(不是 layers, 改名自旧 API)。
+	fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D_ARRAY
+	fmt.format = RenderingDevice.DATA_FORMAT_R32G32_SFLOAT
+	fmt.width = data.bake_res
+	fmt.height = data.bake_res
+	fmt.depth = 1
+	fmt.array_layers = GpuIco.FACE_COUNT
+	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
+	# mip levels: Godot 按位宽自动推导 = floor(log2(max(w,h))) + 1
+	# 但 Godot 4.x RDTextureFormat.mipmaps 需显式设
+	var nmip: int = 1
+	var s: int = data.bake_res
+	while s > 1:
+		s >>= 1
+		nmip += 1
+	fmt.mipmaps = nmip
+	var tex := _rd.texture_create(fmt, RDTextureView.new(), [])
+	if not tex.is_valid():
+		push_error("[GpuLodCompositor] texture_create minmax 失败")
+		return RID()
+	var pyr: Array = data.build_pyramid()
+	# Godot 4 texture_update(tex, layer, data): layer = 数组层索引(0..array_layers-1),
+	# data 必须是该层**整条 mip 链**拼接后的字节(mip0 + mip1 + ... + mip(nmip-1), 每段按
+	# 该 mip 的 width*height*bytes_per_texel)。per face 一次调用, 不是 per mip。
+	for fi in range(GpuIco.FACE_COUNT):
+		var fmips: Array = pyr[fi]
+		var blob := PackedByteArray()
+		for mip in range(nmip):
+			var arr: PackedFloat32Array = fmips[mip]
+			blob.append_array(arr.to_byte_array())
+		_rd.texture_update(tex, fi, blob)
+	return tex
+
+
+# 主线程(GpuPlanet._process)每帧调: 推相机/参数/frustum 快照。
 func set_frame_data(d: Dictionary) -> void:
 	_mutex.lock()
 	_frame_data = d
@@ -136,8 +269,8 @@ func set_frame_data(d: Dictionary) -> void:
 
 
 func _render_callback(_effect_callback_type: int, _render_data: RenderData) -> void:
-	_cb_count += 1   # 调试: 确认回调被调用
-	if not _ready or not _pipeline.is_valid():
+	_cb_count += 1
+	if not _ready or not _trav_pipeline.is_valid() or not _cull_pipeline.is_valid():
 		return
 	if _effect_callback_type != CompositorEffect.EFFECT_CALLBACK_TYPE_PRE_OPAQUE:
 		return
@@ -145,51 +278,157 @@ func _render_callback(_effect_callback_type: int, _render_data: RenderData) -> v
 	var fd: Dictionary = _frame_data
 	_mutex.unlock()
 	if not fd.has("cam_pos"):
-		return   # GpuPlanet 还没推(首帧)→ 跳过
+		return
 
-	var write_idx: int = int(fd.get("write_idx", 0))   # GpuPlanet 主线程决定双缓冲写哪块
-
-	# uniform sets(按 RID 经 UniformSetCacheRD 缓存; RID 稳定 → 首帧后命中缓存)
-	if _uniform_set[write_idx] == null:
-		var u_img := RDUniform.new()
-		u_img.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
-		u_img.binding = 0
-		u_img.add_id(_patch_tex[write_idx])
-		var u_ctr := RDUniform.new()
-		u_ctr.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
-		u_ctr.binding = 0
-		u_ctr.add_id(_counter[write_idx])
-		var s0 := UniformSetCacheRD.get_cache(_shader, 0, [u_img])
-		var s1 := UniformSetCacheRD.get_cache(_shader, 1, [u_ctr])
-		_uniform_set[write_idx] = [s0, s1]
-	var sets: Array = _uniform_set[write_idx]
-
-	# push constant 基底(level 字段[10] 每次 dispatch 覆盖)
+	var write_idx: int = int(fd.get("write_idx", 0))
 	var max_level: int = int(fd["maxLevel"])
-	var cam: Vector3 = fd["cam_pos"]
+
+	# 每帧更新 FrameData UBO(frustum + cam + planet + consts)
+	_update_frame_ubo(fd)
+
+	# 确保 uniform sets 缓存(首帧或 minmax 变后建)
+	_ensure_trav_sets(write_idx)
+	if _minmax_ready:
+		_ensure_cull_sets(write_idx)
+
+	# === Traverse 阶段 ===
 	var pcn: Vector3 = fd["planet_center"]
+	var cam: Vector3 = fd["cam_pos"]
 	var pc_base := PackedFloat32Array([
 		cam.x, cam.y, cam.z, float(fd["radius"]),
 		pcn.x, pcn.y, pcn.z, float(fd["maxHeight"]),
 		float(fd["C_const"]), float(max_level), 0.0, float(MAX_PATCHES),
 	])
+	_dispatch_traverse(write_idx, pc_base, -1.0, 1)                       # reset trav_counter
+	for lvl in range(max_level + 1):                                     # per-level 遍历
+		_dispatch_traverse(write_idx, pc_base, float(lvl), _groups_for_level(lvl))
+	_dispatch_traverse(write_idx, pc_base, -2.0, 1)                       # trav metadata: count → trav_tex META_ROW
 
-	# 每个 dispatch 独立 compute_list(照搬 atmosphere_compositor 惯例): compute_list_end 提交时
-	# 插屏障 → storage 写(counter 原子、imageStore)对下一个 list 可见。比 intra-list add_barrier 稳。
-	_dispatch_one(sets, pc_base, -1.0, 1)                       # reset counter
-	for lvl in range(max_level + 1):                            # per-level 遍历
-		_dispatch_one(sets, pc_base, float(lvl), _groups_for_level(lvl))
-	_dispatch_one(sets, pc_base, -2.0, 1)                       # metadata: count → patch 纹理末行
-	# 纹理绑定由 GpuPlanet._process(主线程 set_shader_parameter)做, 这里只写。
+	# === Cull 阶段(minmax 就绪才跑; 否则 cull_tex 保持上帧内容/全 0 → 坍缩无渲染) ===
+	if _minmax_ready:
+		# cull push constant: mode(0=cull, -1=reset, -2=metadata)
+		_dispatch_cull(write_idx, -1, 1)                # reset cull_counter
+		_dispatch_cull(write_idx, 0, _cull_groups())     # cull dispatch
+		_dispatch_cull(write_idx, -2, 1)                # cull metadata: count → cull_tex META_ROW
 
 
-func _dispatch_one(sets: Array, pc_base: PackedFloat32Array, level: float, groups: int) -> void:
+# 把 frame_data 打包进 _frame_ubo(std140, 144 字节)。
+func _update_frame_ubo(fd: Dictionary) -> void:
+	var floats := PackedFloat32Array()
+	floats.resize(FRAME_UBO_SIZE / 4)   # 36 floats
+	# frustum[6]: Godot Camera3D.get_frustum() 返回**外向法线** N(指向视锥外),
+	# Godot Plane 存 d = dot(N, p_on_plane), 平面方程 dot(N,P)=d。
+	# 外向 N 下: 视锥内 dot(N,P) < d, 视锥外 dot(N,P) > d。
+	# 但 lod_cull.glsl 的 P-vertex 测试 (dot+plane.w<0 = 外侧) 是按**内向法线**设计的
+	# (P-vertex 选 max-dot 方向的角点; 内向 N 下这是"最易出外侧"的角点)。
+	# → 打包时翻 N → 内向: vec4(-N.xyz, +d)。同一几何平面, 内向 N'=−N 时 d'=−d;
+	# shader plane.w = -d' = +d。详见 cull_selftest.gd (A)(验证内向 + vec4(N,-d) + 测 <0 这套约定)。
+	var frustum: Array = fd.get("frustum", [])
+	for i in range(6):
+		if i < frustum.size():
+			var p: Plane = frustum[i]
+			floats[i * 4 + 0] = -p.normal.x   # 翻 N: 外向 → 内向
+			floats[i * 4 + 1] = -p.normal.y
+			floats[i * 4 + 2] = -p.normal.z
+			floats[i * 4 + 3] = p.d           # = -d_inward (d_inward = -d_outward)
+		else:
+			floats[i * 4 + 0] = 0.0
+			floats[i * 4 + 1] = 0.0
+			floats[i * 4 + 2] = 0.0
+			floats[i * 4 + 3] = 0.0
+	# cam_pos_pad: xyz=cam_pos, w=radius
+	var cam: Vector3 = fd["cam_pos"]
+	floats[24] = cam.x
+	floats[25] = cam.y
+	floats[26] = cam.z
+	floats[27] = float(fd["radius"])
+	# planet_center_pad: xyz=center, w=maxHeight
+	var pcn: Vector3 = fd["planet_center"]
+	floats[28] = pcn.x
+	floats[29] = pcn.y
+	floats[30] = pcn.z
+	floats[31] = float(fd["maxHeight"])
+	# consts: x=bake_res_log2, y=maxLevel, z=_, w=MAX_PATCHES
+	floats[32] = log(float(BAKE_RES)) / log(2.0)   # bake_res_log2(自然 log 换底)
+	floats[33] = float(int(fd["maxLevel"]))
+	floats[34] = 0.0
+	floats[35] = float(MAX_PATCHES)
+	_rd.buffer_update(_frame_ubo, 0, FRAME_UBO_SIZE, floats.to_byte_array())
+
+
+# 缓存 traverse uniform sets(per write_idx)
+func _ensure_trav_sets(write_idx: int) -> void:
+	if _trav_sets[write_idx] != null:
+		return
+	var u_img := RDUniform.new()
+	u_img.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	u_img.binding = 0
+	u_img.add_id(_trav_tex[write_idx])
+	var u_ctr := RDUniform.new()
+	u_ctr.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+	u_ctr.binding = 0
+	u_ctr.add_id(_trav_counter[write_idx])
+	var s0 := UniformSetCacheRD.get_cache(_trav_shader, 0, [u_img])
+	var s1 := UniformSetCacheRD.get_cache(_trav_shader, 1, [u_ctr])
+	_trav_sets[write_idx] = [s0, s1]
+
+
+# 缓存 cull uniform sets(per write_idx); minmax_tex 变时强制重建。
+func _ensure_cull_sets(write_idx: int) -> void:
+	if _cull_sets[write_idx] != null:
+		return
+	var u_trav := RDUniform.new()
+	u_trav.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	u_trav.binding = 0
+	u_trav.add_id(_trav_tex[write_idx])
+	var u_cull := RDUniform.new()
+	u_cull.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	u_cull.binding = 0
+	u_cull.add_id(_cull_tex[write_idx])
+	var u_mm := RDUniform.new()
+	u_mm.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	u_mm.binding = 0
+	u_mm.add_id(_minmax_sampler)
+	u_mm.add_id(_minmax_tex)
+	var u_ctr := RDUniform.new()
+	u_ctr.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+	u_ctr.binding = 0
+	u_ctr.add_id(_cull_counter[write_idx])
+	var u_ubo := RDUniform.new()
+	u_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+	u_ubo.binding = 0
+	u_ubo.add_id(_frame_ubo)
+	var s0 := UniformSetCacheRD.get_cache(_cull_shader, 0, [u_trav])
+	var s1 := UniformSetCacheRD.get_cache(_cull_shader, 1, [u_cull])
+	var s2 := UniformSetCacheRD.get_cache(_cull_shader, 2, [u_mm])
+	var s3 := UniformSetCacheRD.get_cache(_cull_shader, 3, [u_ctr])
+	var s4 := UniformSetCacheRD.get_cache(_cull_shader, 4, [u_ubo])
+	_cull_sets[write_idx] = [s0, s1, s2, s3, s4]
+
+
+func _dispatch_traverse(write_idx: int, pc_base: PackedFloat32Array, level: float, groups: int) -> void:
 	pc_base[10] = level   # consts.z = level
+	var sets: Array = _trav_sets[write_idx]
 	var cl := _rd.compute_list_begin()
-	_rd.compute_list_bind_compute_pipeline(cl, _pipeline)
+	_rd.compute_list_bind_compute_pipeline(cl, _trav_pipeline)
 	_rd.compute_list_bind_uniform_set(cl, sets[0], 0)
 	_rd.compute_list_bind_uniform_set(cl, sets[1], 1)
 	_rd.compute_list_set_push_constant(cl, pc_base.to_byte_array(), pc_base.size() * 4)
+	_rd.compute_list_dispatch(cl, groups, 1, 1)
+	_rd.compute_list_end()
+
+
+func _dispatch_cull(write_idx: int, mode: int, groups: int) -> void:
+	var pc := PackedInt32Array([mode, 0, 0, 0])   # mode + 3 pad int(16 字节)
+	var sets: Array = _cull_sets[write_idx]
+	var cl := _rd.compute_list_begin()
+	_rd.compute_list_bind_compute_pipeline(cl, _cull_pipeline)
+	_rd.compute_list_bind_uniform_set(cl, sets[0], 0)
+	_rd.compute_list_bind_uniform_set(cl, sets[1], 1)
+	_rd.compute_list_bind_uniform_set(cl, sets[2], 2)
+	_rd.compute_list_bind_uniform_set(cl, sets[3], 3)
+	_rd.compute_list_bind_uniform_set(cl, sets[4], 4)
+	_rd.compute_list_set_push_constant(cl, pc.to_byte_array(), pc.size() * 4)
 	_rd.compute_list_dispatch(cl, groups, 1, 1)
 	_rd.compute_list_end()
 
@@ -200,3 +439,8 @@ static func _groups_for_level(level: int) -> int:
 		nodes *= 4
 	@warning_ignore("integer_division")
 	return (nodes - 1) / WG + 1
+
+
+static func _cull_groups() -> int:
+	@warning_ignore("integer_division")
+	return (MAX_PATCHES - 1) / WG + 1

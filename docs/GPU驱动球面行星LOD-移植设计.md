@@ -167,6 +167,8 @@ Godot 高级着色语言（`.gdshader`）的 spatial shader **不支持** storag
 
 ### 5.3 ping-pong 遍历（照搬 Unity TerrainBuildCompute）
 
+> ⚠️ **Phase 2 实现偏离**：实际未用 ping-pong，改用**单遍距离壳测试**（数学等价、绕开 Godot 无 indirect-dispatch-count 的坑）。见 §17.1。本节原文保留为设计意图，供 Phase 6 优化回 ping-pong 时参考。
+
 - 缓冲 A/B，各 `MAX_ACTIVE_NODES`（uint，包节点结构体）。
 - 6 次 dispatch（maxLevel=8 可调），每次：`ConsumeBuffer(A)` → EvaluateNode → split 则 `AppendBuffer(B)` 4 子，否则 `AppendFinalNodeList`。
 - `CopyCounterValue` 把 B 的计数转成下一次 dispatch 的 indirect args（Godot：用 `draw_list`/`compute_list` 不支持 indirect dispatch 计数 → 见 §7 妥协：固定上限 + 提前 break，或用 `buffer_get_data` 回读计数做下一次 dispatch 的 group 数）。
@@ -191,17 +193,19 @@ world_r  = radius + h · maxHeight          // 与现 shader 一致
 
 ### 6.2 烘焙范围与分辨率
 
+> ⚠️ **Phase 3 v2 实现偏离**：从 vertex 网格 `(BAKE_RES+1)²` 改为 cell 网格 `BAKE_RES²`，标准 2×2 gather 归约，能与 Godot RD Texture2DArray 自动 mip 链对齐。详见 §18.2。
 - 一张**方形**纹理覆盖 (u,v)∈[0,1]²，有效区为下三角 u+v≤1；上三角(u+v>1)存哨兵（min=+∞/max=-∞）使归约不污染。
-- 边分辨率 `BAKE_RES`（默认 1024，质量档 2048）。纹理 (BAKE_RES+1)²。
-- **混合路**只烘 MinMax，可降到 512（仅供 LOD/裁剪用，不需高频）。
+- 边分辨率 `BAKE_RES`（默认 1024，质量档 2048）。Phase 3 v2 cell 布局：纹理 BAKE_RES²（cell 中心采样, `BAKER_VERSION=2`）。
+- **混合路**只烘 MinMax，可降到 512（仅供 LOD/裁剪用，不需高频）。Phase 3 实际用 `GpuLodCompositor.BAKE_RES = 512`。
 - **纯烘焙路**烘 Height（位移用）需 ≥1024，最好 2048。
 
 ### 6.3 MinMax mip（不对称归约，照搬 Unity MinMaxHeights.compute）
 
-- mip0：2×2 patch 归约，R=min G=max（RG32F）。
-- 逐级：R←min(4 邻), G←max(4 邻)，共 log2(BAKE_RES)+1 级。
-- 哨兵区(u+v>1)在归约中被忽略（min 取有效值、max 取有效值）。
-- 可 CPU 烘（GDScript，慢但一次）或 GPU 烘（`heightmap_minmax.glsl`，快）。推荐 GPU 烘并缓存 `.res`。
+> ⚠️ **Phase 3 v2 实现**：标准 2×2 gather 归约（取代 v1 vertex 网格的 scatter）；mip 选取用 `mip = bake_res_log2 - level`（§18.5）。
+- mip0：cell 中心采样, R=G=height（单点采样）。
+- 逐级：parent cell 从 4 个 child cell gather 取 min/max，共 log2(BAKE_RES)+1 级。
+- 哨兵区(u+v>1)在归约中被跳过（`GpuMinMaxData._build_face_pyramid`）。
+- 可 CPU 烘（GDScript，慢但一次）或 GPU 烘（`heightmap_minmax.glsl`，快）。Phase 3 用 CPU 烘 + `.res` 缓存（`HeightmapBaker.bake_or_load`）。
 
 ### 6.4 存储格式
 
@@ -221,6 +225,8 @@ world_r  = radius + h · maxHeight          // 与现 shader 一致
 > 全部在新文件 `shaders/compute/lod_*.glsl`，`#[compute]` 头，照搬项目 compute 风格（push constant + UniformSetCacheRD）。
 
 ### 7.1 lod_traverse.glsl（遍历 + 评价 + 发射）
+
+> ⚠️ **Phase 2 实现偏离**：① 不用 ping-pong A/B，改单遍距离壳（§17.1）。② icosahedron 角点硬编码进 shader 常量，不走 uniform/纹理常量（§17.3）。③ 紧凑发射 patch 与遍历合并成同一 kernel，无独立 build_patches（§17.5）。本节原文保留为设计意图。
 - 输入：20 根（常量）、camera pos（push constant）、MinMax 纹理（sampler）、参数（push constant/UBO）。
 - ping-pong A/B 活跃节点缓冲（storage）。
 - `EvaluateNode`（球面 + SSE）：
@@ -235,6 +241,9 @@ world_r  = radius + h · maxHeight          // 与现 shader 一致
 - split → append 4 子（中点递推）；否则 → append 到 `finalLeaves` 缓冲。
 
 ### 7.2 lod_build_patches.glsl（紧凑化 + 包围盒 + lodTrans + 裁剪）
+
+> ⚠️ **Phase 2 实现偏离**：本 kernel 当前不存在，紧凑发射直接合进 `lod_traverse.glsl`（§17.5）。
+> ⚠️ **Phase 3 实现偏离**：裁剪走**新起 `lod_cull.glsl`** 而非扩展 lod_traverse；双阶段架构 trav_tex → cull_tex、各自 counter；视锥平面走 UBO（§18.1、§18.3）。本节原文保留为后续 Phase 的参考蓝图。
 - 遍历 `finalLeaves`，每叶生成一个 patch 写入 **patch 纹理**前部（atomicAdd 计数器）。
 - 每个 patch 打包（6 个 RGBA texel）：
   - texel0: A.xyz + face
@@ -250,6 +259,8 @@ world_r  = radius + h · maxHeight          // 与现 shader 一致
 
 ### 7.3 patch 纹理布局
 - 尺寸 `(6, MAX_PATCHES)`，`MAX_PATCHES` 默认 4096（maxLevel=8 实测可见 patch 量级几百~2k，留余量）。
+
+> ⚠️ **Phase 2 实现偏离**：① 实际 `maxLevel=6`（`gpu_planet.gd::MAX_GPU_LEVEL`），非 8（§17.2）。② patch 纹理高度 = `MAX_PATCHES + 1`，末行（`META_ROW`）存 count，**不是独立 storage buffer**（§17.4）。
 - RGBA32F（精度优先）或 RGBA16F（省一半）。混合路位移走实时噪声、patch 纹理只存几何，16F 够。
 - count 单独存一个 `u32` storage buffer。
 
@@ -326,9 +337,11 @@ patch 有 3 条边（AB、BC、CA），每边需知道邻居 patch 的 lod → `
 
 ## 10. 裁剪
 
-- **视锥**：AABB × 6 平面，照搬 Unity（Godot `Camera3D.get_frustum()` 可在 CPU 构造平面推给 compute，或在 compute 内从 VP 矩阵构造）。
+> ⚠️ **Phase 3 实现状态**：视锥裁剪已完成（lod_cull.glsl + GpuLodCompositor 双阶段 + GpuPlanet 推 6 视锥平面 UBO，详见 §18）；Hi-Z 与地平线裁剪留 Phase 5/6。
+
+- **视锥**（**✅ Phase 3 已完成**）：AABB × 6 平面，照搬 Unity 的 P-vertex 测试逻辑。Godot `Camera3D.get_frustum()` 在主线程算 6 平面（Plane, **外向法线** —— 与 Unity 相反），推给 GpuLodCompositor，`_update_frame_ubo` 打包时翻 N 成内向 (`vec4(-N, +d)`) 喂给 shader，每帧 `buffer_update` 到 FrameData UBO（§18.3 / §18.8）。
 - **Hi-Z**（Phase 5）：上一帧深度金字塔，reverse-Z 取 min。Godot Forward+ 默认 reverse-Z。
-- **地平线**（可选）：移植 `_is_below_horizon`，球面角半径公式直接搬，GPU 版无难度。近地行走时砍掉约一半背面 patch，收益大。
+- **地平线**（可选，Phase 3.5/6）：移植 `_is_below_horizon`，球面角半径公式直接搬，GPU 版无难度。近地行走时砍掉约一半背面 patch，收益大。Phase 3 暂未做（§18.6）。
 
 ---
 
@@ -348,8 +361,9 @@ shaders/planet_gpu/
   terrain_gpu.gdshader       spatial：INSTANCE_ID→patch 纹理→bary→位移→焊接
   patch_mesh.gd              (或 gd 内联) 建共享三角形 patch 网格
 shaders/compute/
-  lod_traverse.glsl          遍历+评价+发射（ping-pong）
-  lod_build_patches.glsl     紧凑化+包围盒+lodTrans+裁剪 → patch 纹理+count
+  lod_traverse.glsl          遍历+评价+发射+face-bary（Phase 2 单遍距离壳, Phase 3 加 bary 输出）
+  lod_cull.glsl              视锥裁剪（Phase 3 新增; 读 trav_tex, 采样 MinMax, frustum 测试, 写 cull_tex）
+  lod_build_patches.glsl     (未实现; 原计划紧凑化+包围盒+lodTrans+裁剪 → 由 traverse + cull 双阶段取代)
   hiz_reduce.glsl            深度金字塔（Phase 5）
   heightmap_minmax.glsl      MinMax 归约（可选 GPU 烘）
 data/   (生成物，git 可忽略或纳入)
@@ -388,8 +402,8 @@ data/   (生成物，git 可忽略或纳入)
 |-------|------|------|
 | **0** | `gpu_ico.gd`（20 面+30 边表）、`heightmap_baker` 烘 MinMax（CPU 版先）→ `.res` | 烘出的 minmax 与 `Terrain.height_at` 抽样比对误差 ≤ 量化精度；可视化 minmax 纹理正确 |
 | **1** | `GpuPlanet` + 共享 patch 网格 + MultiMesh + 顶点 shader（**固定全 LOD**：所有叶=level 0，不细分，先跑通 instance + 位移） | 能看到一颗位移正确的球面行星，MultiMesh 渲染，无 compute LOD |
-| **2** | `lod_traverse.glsl` GPU 遍历 + SSE 评价 → patch 纹理 | 近处细分、远处粗，patch 数随距离变化；编辑器/运行时一致 |
-| **3** | 视锥裁剪（+ 地平线可选） | 视锥外/背面 patch 不渲染；旋转无大面积 pop |
+| **2** | `lod_traverse.glsl` GPU 遍历 + SSE 评价 → patch 纹理 | 近处细分、远处粗，patch 数随距离变化；编辑器/运行时一致。**✅ 已完成**（实现偏离见 §17：单遍距离壳取代 ping-pong、maxLevel=6、硬编码 ico、patch 纹理末行存 count、无独立 build_patches）|
+| **3** | 视锥裁剪（+ 地平线可选） | 视锥外/背面 patch 不渲染；旋转无大面积 pop。**✅ 视锥部分已完成**（cell 布局 baker 重构 + MinMax Texture2DArray 上传 + lod_cull.glsl + GpuLodCompositor 双阶段(traverse+cull) + GpuPlanet 推 6 视锥平面; 实现偏离见 §18; 地平线裁剪留 Phase 3.5/Phase 6）|
 | **4** | 面内接缝焊接（lodTrans + FixLODConnectSeam 三角形版） | 面内不同 LOD 交界无裂缝 |
 | **4.5** | 跨面邻接（30 边表）焊接 | 全球无裂缝 |
 | **5** | Hi-Z compositor + 遮挡裁剪 | 山后/地平线后地形被遮挡剔除；快转无闪烁（1 帧延迟可接受）|
@@ -421,9 +435,201 @@ data/   (生成物，git 可忽略或纳入)
 
 ---
 
-## 16. 待你拍板的两个决策
+## 16. 待你拍板的两个决策（已拍板）
 
-1. **位移来源**：混合路（实时噪声位移 + 烘焙 MinMax，**推荐**）vs 纯烘焙路（位移也走高度图，最 Unity）。→ 决定顶点 shader 一个函数 + 是否加载高度图纹理 + 烘焙分辨率/显存。
-2. **接缝**：坚持焊接（分期，跨面有风险）vs 临时裙边兜底（稳但非 Unity 原汁原味）。
+1. **位移来源** → **已选混合路**（实时噪声位移 + 烘焙 MinMax）。
+   - 落地证据：`shaders/planet_gpu/terrain_gpu.gdshader:199` 顶点 shader 跑 `terrain_height(d)` 实时噪声；`scripts/planet/gpu/heightmap_baker.gd:5` 注释明确"混合路：位移仍走实时噪声，MinMax 只供 GPU LOD/裁剪"。
+   - 后续若要切纯烘焙路：把 vertex 的 `terrain_height(d)` 换成 `textureLod(u_heightmap, vec3(Uf,Vf,face), lod)` + 加载 `planet_height_<seedhash>.res`。架构不变。
 
-确认后即可进入 Phase 0 实现。
+2. **接缝** → **已选焊接**（分期：Phase 4 面内先做，Phase 4.5 跨面后做）。
+   - 落地证据：`gpu_ico.gd::build_adjacency()` 已预建 30 边邻接表（adj[fi][ei] = {neighbor_face, neighbor_edge, flipped}）+ 流形自检（flipped 恒 false）供 Phase 4.5 用。
+
+---
+
+## 17. Phase 2 实现决策（与原设计的偏离）
+
+Phase 2 实现时做了 5 处重要偏离，本节固定下来，避免 Phase 3+ 漂移。**后续 Phase 的实现一律以本节为准**；§5、§7 原文保留为"最初设计意图"。
+
+### 17.1 单遍距离壳测试（取代 ping-pong 6 遍遍历）★ 最大偏离
+
+**原文**（§5.3、§7.1）：照搬 Unity，ping-pong A/B 缓冲，每层一次 dispatch 共 6 次，层间靠 `CopyCounterValue` 在 GPU 内链式传 count。
+
+**实际实现**（`lod_traverse.glsl`）：**单遍、无 ping-pong**。每个候选节点 `(face, level, idx)` 独立用距离壳判定是不是叶：
+
+```
+split_d(L) = C_const / 2^L     // C_const = maxHeight · K/T, K=vp_h/(2·tan(fov/2)), T=sseThresholdPixels
+level==0:              dist >= split_d(0)             → 叶（根不细分）；否则根细分往下找
+level>0, <maxLevel:    split_d(L) <= dist < 2·split_d(L) → 叶（父细分了、自己不细分）
+level==maxLevel:       dist < 2·split_d(L)            → 叶（最深，父细分了）
+```
+
+**为什么成立**：`split_d(L)` 随 L 单调降 → `dist < 2·split_d(L) = split_d(L-1)` 蕴含 `dist < split_d(L-2) < ... < split_d(0)`，即所有祖先都细分 → 本节点存在；再加 `dist >= split_d(L)` → 自己不细分 → 是叶。数学证明见 `lod_traverse.glsl:7-13` 注释。
+
+**收益**：
+- 绕过 §5.3 的 Godot 妥协点（无 indirect dispatch count）—— 整个问题不存在了。
+- 少 5 次 dispatch + 5 次 barrier。
+- 节点寄存器内中点递推（MSB 先），无任何跨 invocation 状态。
+
+**代价**：
+- 总 invocation 数 = `Σ 20·4^L` (L=0..maxLevel)。L=6 时 = `(20·4^7-1)/3 - 1 ≈ 273k`，远多于实际"选中叶"数（几百～2k），多出来的 invocation 早 return（距离壳不满足）。算力冗余可接受。
+- Phase 6 想优化时再回 ping-pong（但当前看没必要）。
+
+**对其他 Phase 的影响**：
+- Phase 3 裁剪：直接在距离壳通过后加 AABB×6 平面测试，不影响架构。
+- Phase 4 焊接：**需要加一轮单独的紧凑化 dispatch**（仍无需 ping-pong）算 lodTrans，因为单遍测试里每个节点不知道邻居 LOD。lodTrans 走 edgeKey→lod 哈希（§9.3）。
+
+### 17.2 maxLevel 暂定 6（不是 8）
+
+**原文**（§5.2、§7.3、§13）：maxLevel=8，`MAX_PATCHES=4096`，"maxLevel=8 实测可见 patch 量级几百~2k"。
+
+**实际实现**（`gpu_planet.gd::MAX_GPU_LEVEL = 6`）：硬限到 6。原因：单遍遍历下 L=8 总 invocation = `(20·4^9-1)/3 ≈ 4.4M`，太重；4^6=4096 节点/面已足够近地细节。
+
+**待解**：L=8 需要 ping-pong（§5.3 原方案）或更激进的剪枝（距离壳在根/低层就 reject 整子树）。Phase 6 再权衡。
+
+### 17.3 icosahedron 硬编码到 shader 常量（取代 uniform/纹理常量）
+
+**原文**（§5.1）：20 面的 3 个单位角点作为常量数组/纹理常量。
+
+**实际实现**（`lod_traverse.glsl:37-49`）：`const float PHI`、`const vec3 RAW[12]`、`const int FACES[60]` 直接硬编码到 GLSL，与 `gpu_ico.gd::RAW_VERTS/FACES` 逐位一致。
+
+**收益**：消除 uniform buffer 绑定，少一个 set。
+
+**风险**：两份硬编码（gd 一份、glsl 一份）必须同步。`gpu_ico.gd::verify()` 已加完整性自检（顶点单位化、面索引范围、30 边流形），但**没跨 gd/glsl 一致性自检**——Phase 0 的 minmax_selftest 可顺带加一条：跑 `lod_traverse.glsl` 输出每面 A 角点，与 `gpu_ico.face_corners` 比对。
+
+### 17.4 patch 纹理末行存 count（取代独立 storage buffer）
+
+**原文**（§7.3）："count 单独存一个 u32 storage buffer。"
+
+**实际实现**（`lod_traverse.glsl:51`、`terrain_gpu.gdshader:22`）：count 写进 patch 纹理第 `MAX_PATCHES` 行（`META_ROW = MAX_PATCHES = 4096`），即 `patch_tex` 高度 = `MAX_PATCHES + 1`。Phase 2 末由单线程 mode（`level=-2`）`imageStore(patch_tex, ivec2(0, META_ROW), count)` 完成。vertex shader `texelFetch(u_patchTex, ivec2(0, META_ROW), 0).x` 读 count 做坍缩守卫。
+
+**收益**：少一个 SSBO 绑定；vertex shader 读 count 不依赖额外 uniform。
+
+**代价**：patch 纹理多一行（4097 行）。可忽略。
+
+### 17.5 `lod_build_patches` 合并进 `lod_traverse`（不分两遍）
+
+**原文**（§7.2）：单独的 `lod_build_patches.glsl` kernel 做紧凑化 + 包围盒 + lodTrans + 裁剪，遍历完 finalLeaves 后跑。
+
+**实际实现**：`lod_traverse.glsl` 自己 atomicAdd 计数 + imageStore 6 texel 紧凑发射到 patch 纹理前部。**没有独立的 build_patches kernel**。
+
+**收益**：少一次 dispatch、少一个中间 buffer（finalLeaves）。
+
+**代价**：
+- 当前只写 texel 0..2（A/B/C/face/lod），texel 3..5（bary/lodTrans/minmax）恒 0。
+- Phase 3（裁剪）需要 MinMax 包围盒 → 这时 lod_traverse 需要采样 MinMax 纹理写 texel 5，或者**重起一个 build_patches kernel 专门填包围盒 + 裁剪**（设计原方案）。建议 Phase 3 走后者：lod_traverse 保持"只选叶+紧凑发射 A/B/C"轻量化，新起 `lod_cull.glsl` 读 MinMax、构 AABB、6 平面裁剪、重写紧凑 patch 纹理（in-place 或 ping-pong）。
+
+### 17.6 Phase 2 未做的子系统（给后续 Phase 留接口）
+
+| 子系统 | 当前状态 | 后续 Phase 怎么接 |
+|--------|---------|-----------------|
+| MinMax 纹理上传 GPU | **✅ Phase 3 已完成**：`GpuLodCompositor.set_minmax(data)` 把 `GpuMinMaxData.build_pyramid()` 上传成 20 层带 mip 的 RD Texture2DArray（`gpu_lod_compositor.gd:222-249`）| 已绑进 `lod_cull.glsl` set 2 sampler2DArray |
+| lodTrans（texel 4.zw）| 恒 0 | Phase 4 起填 |
+| MinMax（texel 5）| **✅ Phase 3 起填**：`lod_cull.glsl` 通过的 patch 写 `(minH, maxH, 0, 0)` 到 cull_tex texel 5 | Phase 6 内容自适应 LOD 也可用 |
+| `gpu_hiz_compositor.gd` | 不存在 | Phase 5 |
+| 跨面邻接表使用 | `gpu_ico.build_adjacency()` 已就绪但未使用 | Phase 4.5 |
+
+---
+
+## 18. Phase 3 实现决策（与原设计的偏离）
+
+Phase 3 实现时做了若干偏离，本节固定下来，避免 Phase 4+ 漂移。**后续 Phase 的实现一律以本节为准**。
+
+### 18.1 双阶段架构: traverse 输出 → cull 输入（取代 in-place 紧凑化）
+
+**原文**（§7.2、§17.5 建议项）：`lod_build_patches.glsl` 单遍紧凑化(in-place 或 ping-pong)，遍历完 finalLeaves 后跑。
+
+**实际实现**：双阶段、双纹理、双 counter。
+- `_trav_tex[2]` (intermediate)：`lod_traverse.glsl` 选中的叶原子紧凑发射到此。
+- `_cull_tex[2]` (final)：`lod_cull.glsl` 读 `_trav_tex`、构 AABB、6 平面裁剪、原子紧凑发射到此。
+- 各自独立 counter；vertex 读 `_cull_tex`(`get_read_texture` 返回 `_tex2drd`，包 `_cull_tex`)。
+
+**为什么成立**：原子紧凑不能 in-place(同纹理 race)；双纹理 + barrier 隔离是 Vulkan/GL 标准 storage image 模式。
+
+**收益**：traverse 和 cull 独立调试、可单独禁用(cull 不就绪时 vertex 读全 0 → 坍缩无渲染，不崩)；内存代价 = 4 张 6×4097 RGBA32F = ~1.5MB，可忽略。
+
+**对其他 Phase 影响**：Phase 4 焊接可以在 cull 之后再加 `lod_weld.glsl` 第三阶段(trav → cull → weld)，或在 cull 内顺带做(看是否需要邻居 LOD)。
+
+### 18.2 cell 布局 baker（取代 vertex 网格，BAKER_VERSION=2）
+
+**原文**（§6.1）：bake_res² cells per face，cell center 在 `(i+0.5)/bake_res, (j+0.5)/bake_res`，`i+j < bake_res` 时 cell 在三角形内。
+
+**Phase 0 v1 实际实现**：vertex 网格 `(bake_res+1)²`，每顶点存 (min, max)；scatter 归约产出 `(bake_res/2+1)²` 一级。
+
+**Phase 3 v2 实际实现**（`gpu_minmax_data.gd::BAKER_VERSION = 2`、`heightmap_baker.gd`）：回到 cell 布局 `bake_res²`，标准 2×2 gather 归约。这样 mip 链 `bake_res → bake_res/2 → ... → 1` 与 Godot RD Texture2DArray 自动 mip 链对齐（Godot 对 mip0=W×H 推导 `mip_k = max(1, floor(W/2^k))`）；旧 vertex 布局 mip1=`floor((bake_res+1)/2)²`=(bake_res/2)² 与 scatter 产出 (bake_res/2+1)² 不匹配 → 无法用 Texture2DArray 自动 mip。
+
+**为什么成立**：Godot RD `Texture2DArray` 只接受标准 2×2 gather mip 链。cell 布局是唯一能与 Godot 自动 mip 对齐的选择。
+
+**收益**：能用 Godot Texture2DArray 自动 mip 链，texture_create + texture_update 一对一映射 pyramid 层级。
+
+**代价**：cell 单点采样不能严格包夹 cell 内峰值（理论上比 vertex 4 角点 min/max 稍宽），minmax_selftest 已加近似刻画测试（C 节）。
+
+**数据迁移**：`BAKER_VERSION` 进 `seed_hash`，旧缓存自动失效；首次重烘后 `.res` 自动更新。
+
+### 18.3 视锥平面走 UBO（取代 push constant）
+
+**原文**（§10）："6 平面推给 compute"（未指明通道）。
+
+**实际实现**（`lod_cull.glsl:29-34`、`gpu_lod_compositor.gd::_update_frame_ubo`）：6 视锥平面走 `std140 uniform FrameData` UBO，每帧 `buffer_update`。
+
+**为什么不用 push constant**：6 平面 = 96 字节 + cam/planet/consts 48 字节 = 144 字节，超过 Vulkan 最小 push constant 上限（128 字节）。UBO 是 std140，每帧 `buffer_update` 性能可接受（~微秒级）。
+
+**约定**（法线方向）：`Camera3D.get_frustum()` 返回**外向法线**（指向视锥外，与 Unity 相反，详见 §18.8）。`_update_frame_ubo` pack 时翻 N 成内向：`vec4(-n.x, -n.y, -n.z, +d)`，shader 测试 `dot(plane.xyz, p_vert) + plane.w < 0` 表示 P-vertex 在平面外侧 → 整个 AABB 在此平面外 → cull。
+
+### 18.4 face-bary 在 traverse 递推中同步算（取代 build_patches 阶段重算）
+
+**原文**（§7.1、§17.5）：traverse 只写 A/B/C/face/lod 到 texel 0..2，bary/lodTrans/minmax 在 build_patches 阶段填。
+
+**实际实现**（`lod_traverse.glsl:85-122`）：face-bary 与方向同步递推——初始 `A=(0,0), B=(1,0), C=(0,1)`，子节点角点 bary = 父对应角点 bary 或父两角点 bary 中点。写 texel 3 `(ua,va,ub,vb)`、texel 4 `(uc,vc,_,_)`。
+
+**为什么成立**：traverse 的中点递推算法天然知道每个角点的 face-bary（每步只需 1 次加法 + 1 次除 2）；cull 不需要重新从 (A,B,C) 世界方向反推 bary（那需要在球面上解方程）。
+
+**收益**：cull 直接读 texel 3/4 拿到 bary_center，O(1) 采样 MinMax。
+
+**代价**：traverse shader 多 3 个 vec2 寄存器（ua/va, ub/vb, uc/vc + 临时中点），可忽略。
+
+### 18.5 MinMax mip 选取: `mip = bake_res_log2 - level`
+
+**原文**（§6.3）：未明确。
+
+**实际实现**（`lod_cull.glsl:87-90`）：`mip = clamp(bake_res_log2 - level, 0, bake_res_log2)`，对应 cell footprint 与 patch footprint size-matched：
+- `bake_res=512, level 0`: mip=9 (single cell for whole face) ✓
+- `bake_res=512, level 6`: mip=3 (64 cells per side; cell_footprint=1/64 of face ≈ patch_footprint) ✓
+
+**为什么 size-matched**：cell footprint = `(2^mip / bake_res)²`，patch footprint = `(1/2^level)²`。两者相等 → `2^mip / bake_res = 1/2^level → mip = log2(bake_res) - level`。
+
+**采样点**：patch bary_center `((ua+ub+uc)/3, (va+vb+vc)/3)`，nearest filter → 落到包含 bary_center 的那个 cell。
+
+**保守性**：cell_footprint ≈ patch_footprint → 单 cell 的 min/max 基本包住整个 patch（边界相邻 cell 的极值可能漏，但因 cell 与 patch 同尺寸，遗漏概率低）。若 Phase 6 需更保守的包络，可在 patch footprint 内取 4 个角点 + 中心共 5 个 cell 的 min/max 聚合（5 次 textureLod）。
+
+### 18.6 暂不做地平线裁剪（留 Phase 3.5 或 Phase 6）
+
+**原文**（§10）："地平线（可选）：移植 `_is_below_horizon`，球面角半径公式直接搬，GPU 版无难度。"
+
+**实际实现**：Phase 3 仅做视锥裁剪。地平线裁剪暂留，原因：
+- 视锥裁剪已能砍掉背面行星的大部分 patch（远端 + 相机外侧）。
+- 地平线裁剪主要收益在近地行走时砍背面行星（约一半），目前测试场景以轨道视角为主。
+- 实现简单（球面角半径公式直接搬），Phase 6 内容自适应 LOD 一并做更合适。
+
+**对 Phase 4+ 影响**：无。地平线裁剪可作为 cull shader 内多一个测试条件，或独立第三阶段 `lod_horizon_cull.glsl`。
+
+### 18.7 MinMax texel5 字段复用
+
+**原文**（§7.3 终极布局）：texel5 = (minH, maxH, _, _)。
+
+**实际实现**（`lod_cull.glsl:137`）：通过裁剪的 patch 写 `vec4(minH, maxH, 0.0, 0.0)` 到 cull_tex texel 5。
+
+**未来扩展**：texel5.zw 留给 Phase 6 内容自适应 LOD（如根据实际 min/max 调整 patch 分辨率，或写入"几何复杂度"度量）。
+
+### 18.8 Phase 3 自检与 frustum 打包符号约定
+
+**自检**：`scripts/planet/gpu/cull_selftest.gd` + `scenes/cull_selftest.tscn`（F6 运行，纯 CPU，不需 RenderingDevice）。验证三项：
+- (A) Frustum 平面打包约定：合成**内向法线**平面，验证 shader `dot(N,P)+plane.w<0` 判外侧公式。涵盖 d=0（left/right/top/bottom）和 d≠0（near/far）两类平面。
+- (B) P-vertex AABB 测试：合成 box-frustum `[-1,1]³` + 8 案例（中心/穿过/越界/角接触），验证 lod_cull.glsl P-vertex 选取公式。
+- (C) dispatch 组数数学：level 0..6 节点数与 ceil(nodes/64) 对应。
+
+**关键事实：Godot `Camera3D.get_frustum()` 返回外向法线**（指向视锥外，与 Unity 习惯相反）。运行时 dump 验证：相机在视锥内时，对 far 平面 `distance_to(cam)` 是巨大负数（如 −199729），对 left/top/right/bottom 是 0（这 4 平面过相机原点），只有 near 是小的正数 —— 若法线内向应全部为正。外向法线下：视锥内 `dot(N,P) < d`，视锥外 `dot(N,P) > d`。
+
+**打包：翻 N 让 shader 看到内向法线**：lod_cull.glsl 的 P-vertex 测试（选 max-dot 方向角点 + `dot+plane.w<0` 判外侧）是按内向法线设计的。Godot 喂的是外向 → 打包时把 N 翻成内向：`vec4(-N.x, -N.y, -N.z, +d)`。同一几何平面，内向 N' = −N 时 d' = −d，shader 期望的 `plane.w = -d' = +d`。shader 与 cull_selftest 均不需要改。
+
+**走过的弯路**：一度假设 Godot get_frustum 返回内向（误把 Unity 习惯套到 Godot），运行时 frustum dump 当场证伪 —— trav_count=242 全被 cull 掉。教训：跨引擎移植几何约定（法线方向、平面方程符号）必须运行时打印验证，文档/经验不能直接照搬。
+

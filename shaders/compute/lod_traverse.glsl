@@ -1,6 +1,6 @@
 #[compute]
 
-// GPU LOD 四叉树遍历(Phase 2)。单遍距离壳测试 + 原子紧凑发射, 无 ping-pong(§5.3 ping-pong 是 Phase 6 优化项)。
+// GPU LOD 四叉树遍历(Phase 2 + Phase 3 bary 输出)。单遍距离壳测试 + 原子紧凑发射, 无 ping-pong。
 //
 // 每个 invocation = 一个候选节点 (face, level, idx)。寄存器内中点递推重建 3 角点(同 qnode._split 子序:
 //   子0=[A,ab,ca] 子1=[ab,B,bc] 子2=[ca,bc,C] 子3=[ab,bc,ca]), 算节点中心到相机距离, 用【保守几何误差
@@ -12,8 +12,13 @@
 //   证明(单调): split_d 随 L 单调降 → dist<2·split_d(L)=split_d(L-1) 蕴含 dist<split_d(L-2)<...<split_d(0),
 //   即所有祖先都细分 → 本节点存在; 再加 dist>=split_d(L) → 自己不细分 → 是叶。无需 ping-pong。
 //
-// 选中叶 → atomicAdd(counter) 取槽, imageStore 6 texel 到 patch 纹理(Phase2 只写 A/B/C; bary/lodTrans/minmax=0,
-//   混合路 vertex shader 不读 bary; 焊接/裁剪/MinMax 留 Phase 4/5/6)。内容自适应(实际高差)也留 Phase 6。
+// 选中叶 → atomicAdd(counter) 取槽, imageStore 6 texel 到 patch 纹理:
+//   texel0 = (A.xyz, face)         texel1 = (B.xyz, lod)        texel2 = (C.xyz, _)
+//   texel3 = (ua, va, ub, vb)      texel4 = (uc, vc, _, _)      texel5 = (0,0,0,0) ← Phase 6 MinMax
+//   其中 (ua,va)/(ub,vb)/(uc,vc) 是 A/B/C 在 face-bary 空间的 (u,v) 坐标。face-bary 与方向同步递推:
+//   初始 A_face.bary=(0,0), B_face.bary=(1,0), C_face.bary=(0,1); 子节点 bary = 父 bary 中点平均。
+//   Phase 3 lod_cull 读 bary 中心 = ((ua+ub+uc)/3, (va+vb+vc)/3), 用于采样 MinMax 纹理构 AABB。
+//   Phase 4 焊接将用 bary 边匹配算 lodTrans(目前 texel4.zw 空)。
 //
 // dispatch: 每帧 per-level 一次(group 数 = ceil(20·4^level / 64)), push constant 带 level。
 //   level == -1: reset 模式(线程0 把 counter=0, 帧首调一次)。
@@ -77,19 +82,43 @@ void main() {
 	int face = int(t) / nodesPerFace;
 	int idx = int(t) - face * nodesPerFace;
 
-	// ---- 重建 3 角点(中点递推, MSB 先: b=level-1 是第一层细分选择) ----
+	// ---- 重建 3 角点 + face-bary(中点递推, MSB 先: b=level-1 是第一层细分选择) ----
+	// face-bary 与 heightmap_baker 一致: A=(u=0,v=0), B=(u=1,v=0), C=(u=0,v=1);
+	// 子节点角点 bary = 父对应角点 bary(角点保留) 或父两角点 bary 中点(新引入的边中点)。
 	vec3 A = normalize(RAW[FACES[face * 3]]);
 	vec3 B = normalize(RAW[FACES[face * 3 + 1]]);
 	vec3 C = normalize(RAW[FACES[face * 3 + 2]]);
+	vec2 A_bary = vec2(0.0, 0.0);
+	vec2 B_bary = vec2(1.0, 0.0);
+	vec2 C_bary = vec2(0.0, 1.0);
 	for (int b = level - 1; b >= 0; b--) {
 		int digit = (idx >> (2 * b)) & 3;
 		vec3 ab = normalize(A + B);
 		vec3 bc = normalize(B + C);
 		vec3 ca = normalize(C + A);
-		if (digit == 0) { vec3 oA = A; B = ab; C = ca; A = oA; }   // 子0=[A,ab,ca]
-		else if (digit == 1) { vec3 oB = B; A = ab; C = bc; B = oB; } // 子1=[ab,B,bc]
-		else if (digit == 2) { vec3 oC = C; A = ca; B = bc; C = oC; } // 子2=[ca,bc,C]
-		else { A = ab; B = bc; C = ca; }                            // 子3=[ab,bc,ca]
+		vec2 ab_bary = (A_bary + B_bary) * 0.5;
+		vec2 bc_bary = (B_bary + C_bary) * 0.5;
+		vec2 ca_bary = (C_bary + A_bary) * 0.5;
+		if (digit == 0) {
+			// 子0=[A,ab,ca]: A 保留, B<-ab, C<-ca
+			vec3 oA = A; vec2 oA_bary = A_bary;
+			B = ab; C = ca; A = oA;
+			B_bary = ab_bary; C_bary = ca_bary; A_bary = oA_bary;
+		} else if (digit == 1) {
+			// 子1=[ab,B,bc]: B 保留, A<-ab, C<-bc
+			vec3 oB = B; vec2 oB_bary = B_bary;
+			A = ab; C = bc; B = oB;
+			A_bary = ab_bary; C_bary = bc_bary; B_bary = oB_bary;
+		} else if (digit == 2) {
+			// 子2=[ca,bc,C]: C 保留, A<-ca, B<-bc
+			vec3 oC = C; vec2 oC_bary = C_bary;
+			A = ca; B = bc; C = oC;
+			A_bary = ca_bary; B_bary = bc_bary; C_bary = oC_bary;
+		} else {
+			// 子3=[ab,bc,ca]
+			A = ab; B = bc; C = ca;
+			A_bary = ab_bary; B_bary = bc_bary; C_bary = ca_bary;
+		}
 	}
 
 	// ---- SSE 距离壳判定(保守 g_err = maxHeight/2^level) ----
@@ -112,7 +141,7 @@ void main() {
 	imageStore(patch_tex, ivec2(0, int(slot)), vec4(A, float(face)));
 	imageStore(patch_tex, ivec2(1, int(slot)), vec4(B, float(level)));
 	imageStore(patch_tex, ivec2(2, int(slot)), vec4(C, 0.0));
-	imageStore(patch_tex, ivec2(3, int(slot)), vec4(0.0));   // bary(Phase2 不用)
-	imageStore(patch_tex, ivec2(4, int(slot)), vec4(0.0));   // lodTrans(Phase4)
-	imageStore(patch_tex, ivec2(5, int(slot)), vec4(0.0));   // minmax(Phase3/6)
+	imageStore(patch_tex, ivec2(3, int(slot)), vec4(A_bary.x, A_bary.y, B_bary.x, B_bary.y));
+	imageStore(patch_tex, ivec2(4, int(slot)), vec4(C_bary.x, C_bary.y, 0.0, 0.0));   // z/w = lodTrans(Phase4)
+	imageStore(patch_tex, ivec2(5, int(slot)), vec4(0.0));   // minmax(Phase6)
 }

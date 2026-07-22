@@ -25,6 +25,9 @@ const PATCH_TEX_H := MAX_PATCHES + 1 # patch 纹理高(末行存 count)
 const DEFAULT_PATCH_RES := 32        # Phase 2 单叶分辨率/边(四叉树下够用; 越大越平滑越费)
 const MM_NODE_NAME := "GpuPatchMM"
 const MAX_GPU_LEVEL := 6             # 单遍遍历层数上限(4^6=82k 节点/帧, 可测; level 8=1.75M 太重, 留 Phase 6 ping-pong)
+# 用 preload + GDScript.new() 取代 GpuLodCompositor.new() —— 绕开 class_name 注册时序
+# (@tool 脚本热重载时偶发 "Nonexistent function 'new' in base 'GDScript'", preload 总能用)。
+const _GpuLodCompositor_script := preload("res://scripts/planet/gpu/gpu_lod_compositor.gd")
 
 @export var params: PlanetParams:
 	set(v):
@@ -60,6 +63,7 @@ func _ready() -> void:
 	_build_all()
 	_push_params()
 	_setup_lod_compositor()
+	_bake_and_push_minmax()
 
 
 func _exit_tree() -> void:
@@ -72,7 +76,7 @@ func _exit_tree() -> void:
 
 
 func _process(_delta: float) -> void:
-	# 每帧: 推 LOD 帧数据(含 write_idx)给 compositor + 主线程绑定上一帧写好的纹理(正确 sampler 绑定)。
+	# 每帧: 推 LOD 帧数据(含 write_idx + 6 视锥平面)给 compositor + 主线程绑定上一帧写好的纹理。
 	if _lod_comp == null or not is_instance_valid(camera) or _mat == null:
 		return
 	var p: PlanetParams = _effective_params()
@@ -82,6 +86,9 @@ func _process(_delta: float) -> void:
 	var fov_rad: float = deg_to_rad(camera.fov)
 	var k: float = vp_h / (2.0 * tan(fov_rad * 0.5))
 	var c_const: float = p.maxHeight * k / max(p.sseThresholdPixels, 0.001)
+	# 6 视锥平面(world-space, Godot 内向法线约定)。Camera3D.get_frustum 返回顺序:
+	# near, far, left, top, right, bottom(本项不依赖顺序, shader 全 6 平面测一遍)。
+	var frustum: Array = camera.get_frustum() if camera.is_inside_tree() else []
 	_lod_comp.set_frame_data({
 		"cam_pos": camera.global_position,
 		"planet_center": global_position,
@@ -90,13 +97,42 @@ func _process(_delta: float) -> void:
 		"C_const": c_const,
 		"maxLevel": min(p.maxLevel, MAX_GPU_LEVEL),
 		"write_idx": write_idx,
+		"frustum": frustum,
 	})
-	_mat.set_shader_parameter("u_patchTex", _lod_comp.get_read_texture(write_idx))
+	# minmax 未就绪时 cull 被跳过 → cull_tex 全 0 → vertex 坍缩无渲染(灰屏);
+	# 此时保持绑 fallback(20 面 Phase-1 风格), 让用户看到东西而不是空屏。
+	# 一旦 set_minmax 成功(下帧起), cull 写出有效 count, 切到 cull_tex 真正的 GPU LOD。
+	if _lod_comp.is_minmax_ready():
+		_mat.set_shader_parameter("u_patchTex", _lod_comp.get_read_texture(write_idx))
+		if _frame == 1:
+			print("[GpuPlanet] minmax ready → bind cull_tex (GPU LOD active)")
+	else:
+		_mat.set_shader_parameter("u_patchTex", _patch_tex_fallback)
+		if _frame == 1:
+			print("[GpuPlanet] minmax NOT ready → bind fallback (20 面). 检查 set_minmax 是否失败")
 	_frame += 1
+
+
+# 烘 MinMax(首次 + param 变时)→ compositor.set_minmax。
+func _bake_and_push_minmax() -> void:
+	if _lod_comp == null:
+		print("[GpuPlanet] _bake_and_push_minmax: _lod_comp is null(set_minmax 跳过)")
+		return
+	var p: PlanetParams = _effective_params()
+	var data: GpuMinMaxData = HeightmapBaker.bake_or_load(p, GpuLodCompositor.BAKE_RES)
+	print("[GpuPlanet] bake 完成: bake_res=%d face_count=%d" % [data.bake_res, GpuIco.FACE_COUNT])
+	if not _lod_comp.set_minmax(data):
+		push_warning("[GpuPlanet] MinMax 上传失败(占位 fallback; LOD 不裁剪)")
+		print("[GpuPlanet] set_minmax FAILED → cull 不会跑, 会用 fallback 渲染")
+	else:
+		print("[GpuPlanet] set_minmax OK → 下帧起 cull 跑, GPU LOD 激活")
 
 
 func _on_param_changed(_key: String) -> void:
 	_push_params()
+	# 影响高度的参数变 → 重烘 MinMax(种子/频率/振幅类; 半径/海平面等不影响 MinMax, 但 bake_or_load
+	# 走 seed_hash 缓存命中, 重复烘很快, 为简化统一触发)。
+	_bake_and_push_minmax()
 
 
 func _schedule_rebuild() -> void:
@@ -198,7 +234,7 @@ func _setup_lod_compositor() -> void:
 	if comp == null:
 		comp = Compositor.new()
 		we.compositor = comp
-	_lod_comp = GpuLodCompositor.new()
+	_lod_comp = (_GpuLodCompositor_script as GDScript).new() as GpuLodCompositor
 	if not _lod_comp.setup(_mat.get_rid()):
 		push_error("[GpuPlanet] GpuLodCompositor.setup 失败(compute shader 编译错误?)")
 		_lod_comp = null

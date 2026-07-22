@@ -216,7 +216,7 @@ void vertex() {
 		vec3 p1 = d1 * (u_radius + terrain_height(d1) * u_max_height);
 		vec3 p2 = d2 * (u_radius + terrain_height(d2) * u_max_height);
 		vec3 n = normalize(cross(p1 - displaced, p2 - displaced));
-		if (dot(n, d) > 0.0) n = -n;   // 取反(原 < 0.0): 用户反馈法线方向反
+		if (dot(n, d) < 0.0) n = -n;   // 与 terrain.gdshader 逐位一致: 强制法线外向(dot(n,d)>0)
 		NORMAL = n;
 		v_world_normal = normalize((MODEL_MATRIX * vec4(n, 0.0)).xyz);
 	} else {

@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://da55sca7trun6"
+path="res://.godot/imported/lod_cull.glsl-1037d85958f442420c049f3fda2ae435.res"
+
+[deps]
+
+source_file="res://shaders/compute/lod_cull.glsl"
+dest_files=["res://.godot/imported/lod_cull.glsl-1037d85958f442420c049f3fda2ae435.res"]
+
+[params]
+
