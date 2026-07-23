@@ -1,0 +1,70 @@
+[gd_scene format=3 uid="uid://bm7socvdit1js"]
+
+[ext_resource type="Script" uid="uid://cjg2w1cypjy4u" path="res://scripts/core/orbit_camera.gd" id="1_invnv"]
+[ext_resource type="Script" uid="uid://c75rouywo0j66" path="res://scripts/planet/gpu_lod_compositor.gd" id="2_gplod"]
+[ext_resource type="Script" uid="uid://b5fjitb743vfj" path="res://scripts/planet/gpu_planet.gd" id="3_gp"]
+[ext_resource type="Script" uid="uid://7boxikbjeden" path="res://scripts/core/planet_params.gd" id="4_2vvio"]
+[ext_resource type="PackedScene" uid="uid://beyqcputa5pgw" path="res://scenes/fps.tscn" id="5_42vvu"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_p4lu5"]
+sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+ground_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+
+[sub_resource type="Sky" id="Sky_invnv"]
+sky_material = SubResource("ProceduralSkyMaterial_p4lu5")
+
+[sub_resource type="Environment" id="Environment_q7o7h"]
+background_mode = 2
+sky = SubResource("Sky_invnv")
+glow_enabled = true
+
+[sub_resource type="CompositorEffect" id="CompositorEffect_gplod"]
+resource_local_to_scene = false
+resource_name = ""
+enabled = true
+effect_callback_type = 0
+access_resolved_color = false
+access_resolved_depth = false
+needs_motion_vectors = false
+needs_normal_roughness = false
+script = ExtResource("2_gplod")
+
+[sub_resource type="CompositorEffect" id="CompositorEffect_2vvio"]
+resource_local_to_scene = false
+resource_name = ""
+enabled = true
+effect_callback_type = 0
+access_resolved_color = false
+access_resolved_depth = false
+needs_motion_vectors = false
+needs_normal_roughness = false
+script = ExtResource("2_gplod")
+
+[sub_resource type="Compositor" id="Compositor_gplod"]
+compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_gplod"), SubResource("CompositorEffect_2vvio")])
+
+[sub_resource type="Resource" id="Resource_25nq4"]
+script = ExtResource("4_2vvio")
+metadata/_custom_type_script = "uid://7boxikbjeden"
+
+[node name="Node" type="Node" unique_id=710792981]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1233767851]
+environment = SubResource("Environment_q7o7h")
+compositor = SubResource("Compositor_gplod")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1707112545]
+transform = Transform3D(-0.8660254, -0.43301278, 0.25, 0, 0.49999997, 0.86602545, -0.50000006, 0.75, -0.43301266, 0, 0, 0)
+shadow_enabled = true
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=2085450478]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 349.50043)
+script = ExtResource("1_invnv")
+
+[node name="GpuPlanet" type="Node3D" parent="." unique_id=1899334455 node_paths=PackedStringArray("camera")]
+script = ExtResource("3_gp")
+params = SubResource("Resource_25nq4")
+camera = NodePath("../Camera3D")
+patch_resolution = 8
+
+[node name="Label" parent="." unique_id=584958529 instance=ExtResource("5_42vvu")]

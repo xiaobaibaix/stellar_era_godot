@@ -30,7 +30,7 @@ const MAX_PATCHES := 12288         # 与 shader MAX_PATCHES 一致(PATCH_TEX_H=1
 const PATCH_TEX_W := 6             # 每 patch 6 texel
 const PATCH_TEX_H := MAX_PATCHES + 1   # 末行存 count metadata
 const WG := 64                     # workgroup size(与 glsl local_size_x 一致)
-const BAKE_RES := 512              # MinMax 烘焙分辨率(2^9 = 512; maxLevel 6 足够覆盖)
+const BAKE_RES := 256              # MinMax 烘焙分辨率(2^8=256; maxLevel 6 最细 64 细分/边 → 每 patch ~4 cell, 保守包围盒足够。512 过度精细且烘焙慢 4×)
 # FrameData UBO: frustum[6](96) + cam(16) + planet(16) + consts(16) = 144 字节
 const FRAME_UBO_SIZE := 144
 const LODTEX_RES := 64             # 64×64 cell 网格 = 2^MAX_GPU_LEVEL, 每 face 一个

@@ -31,12 +31,23 @@ const _GpuLodCompositor_script := preload("res://scripts/planet/gpu_lod_composit
 
 @export var params: PlanetParams:
 	set(v):
-		if params != null and params.is_connected("param_changed", _on_param_changed):
+		if params == v:
+			return
+		# 用 Object 的字符串版 has_signal/connect/disconnect, 避开 params.param_changed 属性访问。
+		# 加载 / @tool 热重载瞬间, PlanetParams 脚本的信号表可能尚未就绪, 直接点 .param_changed
+		# 属性会抛 "Invalid access to property or key 'param_changed'"; 字符串版走 Object 接口, 安全。
+		if params != null and params.has_signal("param_changed") and params.is_connected("param_changed", _on_param_changed):
 			params.disconnect("param_changed", _on_param_changed)
 		params = v
-		if params != null:
-			params.param_changed.connect(_on_param_changed)
+		_connect_params_signal()
 		_schedule_rebuild()
+
+
+# 连接 params.param_changed → _on_param_changed(幂等; setter 与 _ready 兜底共用)。
+# 用字符串版接口 + has_signal 门槛, 规避加载瞬间信号表未就绪的属性访问崩溃。
+func _connect_params_signal() -> void:
+	if params != null and params.has_signal("param_changed") and not params.is_connected("param_changed", _on_param_changed):
+		params.connect("param_changed", _on_param_changed)
 
 ## 驱动 LOD 的相机(@tool 编辑器 get_viewport 相机不可靠, 用显式引用)。Phase 2 必填。
 @export var camera: Camera3D
@@ -57,9 +68,15 @@ var _default_params: PlanetParams
 var _dirty := false
 var _lod_comp: GpuLodCompositor
 var _frame: int = 0   # 双缓冲帧计数(GpuPlanet 主线程拥有; 决定 compositor 写哪块、绑哪块)
+# 后台烘焙: 20×BAKE_RES² 噪声采样太重(~260 万次 height_at), 放主线程 _ready 会卡死编辑器/运行。
+# 改为 WorkerThreadPool 后台跑, 期间 minmax 未就绪 → _process 绑 fallback(20 面)先渲染, 完成后切 GPU LOD。
+var _bake_task_id: int = -1
+var _bake_result: GpuMinMaxData
+var _bake_save_path: String = ""
 
 
 func _ready() -> void:
+	_connect_params_signal()   # 兜底: 若 setter 在加载瞬间因信号表未就绪跳过了连接, 这里补上
 	_build_all()
 	_push_params()
 	_setup_lod_compositor()
@@ -67,6 +84,11 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	# 等后台烘焙结束, 避免 worker 线程写入已释放的对象。
+	if _bake_task_id != -1:
+		WorkerThreadPool.wait_for_task_completion(_bake_task_id)
+		_bake_task_id = -1
+		_bake_result = null
 	# 摘掉 compositor(避免旧 WorldEnvironment 残留 effect 空跑)
 	if _lod_comp != null:
 		var we := _find_world_environment()
@@ -76,7 +98,8 @@ func _exit_tree() -> void:
 
 
 func _process(_delta: float) -> void:
-	# 每帧: 推 LOD 帧数据(含 write_idx + 6 视锥平面)给 compositor + 主线程绑定上一帧写好的纹理。
+	# 每帧: 轮询后台烘焙是否完成 → 推 LOD 帧数据 + 绑上一帧写好的纹理。
+	_poll_async_bake()
 	if _lod_comp == null or not is_instance_valid(camera) or _mat == null:
 		return
 	var p: PlanetParams = _effective_params()
@@ -113,17 +136,62 @@ func _process(_delta: float) -> void:
 	_frame += 1
 
 
-# 烘 MinMax(首次 + param 变时)→ compositor.set_minmax。
+# 烘 MinMax(首次 + param 变时)。命中缓存 → 主线程直接 load; 未命中 → 后台线程烘焙, 不阻塞。
 func _bake_and_push_minmax() -> void:
 	if _lod_comp == null:
-		print("[GpuPlanet] _bake_and_push_minmax: _lod_comp is null(set_minmax 跳过)")
 		return
 	var p: PlanetParams = _effective_params()
-	var data: GpuMinMaxData = HeightmapBaker.bake_or_load(p, GpuLodCompositor.BAKE_RES)
-	print("[GpuPlanet] bake 完成: bake_res=%d face_count=%d" % [data.bake_res, GpuIco.FACE_COUNT])
+	var sh: int = HeightmapBaker.compute_seed_hash(p)
+	var path: String = HeightmapBaker.default_path(sh, GpuLodCompositor.BAKE_RES)
+	# 命中缓存 → 主线程直接 load(快, 无需烘焙), 立即应用。
+	if ResourceLoader.exists(path):
+		var cached: Resource = load(path)
+		if cached is GpuMinMaxData:
+			print("[GpuPlanet] MinMax 缓存命中 → 直接加载, GPU LOD 立即激活")
+			_apply_minmax(cached as GpuMinMaxData)
+			return
+	# 未命中 → 后台线程烘焙(避免主线程/编辑器卡死); 期间用 fallback 20 面渲染。
+	if _bake_task_id != -1:
+		return   # 已有烘焙在跑, 不重复提交
+	_bake_save_path = path
+	_bake_result = null
+	_bake_task_id = WorkerThreadPool.add_task(_bake_task.bind(p), false, "planet minmax bake")
+	print("[GpuPlanet] MinMax 缓存未命中 → 后台烘焙中(先用 20 面 fallback, 烘完自动切 GPU LOD)")
+
+
+# 后台线程体: 纯 CPU 噪声采样, 不碰 RenderingDevice / 场景树。结果由主线程 _poll_async_bake 取走。
+func _bake_task(p: PlanetParams) -> void:
+	_bake_result = HeightmapBaker.bake(p, GpuLodCompositor.BAKE_RES)
+
+
+# 主线程每帧轮询: 后台烘焙完成 → 存盘缓存(下次秒开) + 上传 GPU。
+func _poll_async_bake() -> void:
+	if _bake_task_id == -1 or not WorkerThreadPool.is_task_completed(_bake_task_id):
+		return
+	WorkerThreadPool.wait_for_task_completion(_bake_task_id)   # 已完成, 立即返回; 提供内存屏障
+	var data: GpuMinMaxData = _bake_result
+	_bake_task_id = -1
+	_bake_result = null
+	if data == null:
+		return
+	# 存盘: 下次启动 _bake_and_push_minmax 命中缓存, 直接 load 跳过烘焙。
+	if _bake_save_path != "":
+		var dir_path: String = _bake_save_path.get_base_dir()
+		if not DirAccess.dir_exists_absolute(dir_path):
+			DirAccess.make_dir_recursive_absolute(dir_path)
+		var err: Error = ResourceSaver.save(data, _bake_save_path)
+		if err != OK:
+			push_warning("[GpuPlanet] MinMax 缓存存盘失败 %s: %d" % [_bake_save_path, err])
+	print("[GpuPlanet] 后台烘焙完成: bake_res=%d → 上传 GPU" % data.bake_res)
+	_apply_minmax(data)
+
+
+# 上传烘焙数据到 compositor(缓存命中 / 后台烘焙完成 共用)。
+func _apply_minmax(data: GpuMinMaxData) -> void:
+	if _lod_comp == null:
+		return
 	if not _lod_comp.set_minmax(data):
 		push_warning("[GpuPlanet] MinMax 上传失败(占位 fallback; LOD 不裁剪)")
-		print("[GpuPlanet] set_minmax FAILED → cull 不会跑, 会用 fallback 渲染")
 	else:
 		print("[GpuPlanet] set_minmax OK → 下帧起 cull 跑, GPU LOD 激活")
 

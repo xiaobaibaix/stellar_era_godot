@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://beyqcputa5pgw"]
+
+[ext_resource type="Script" uid="uid://bcjua5g2udx5y" path="res://scripts/core/fps_hud.gd" id="1_jtrh3"]
+
+[node name="Label" type="CanvasLayer" unique_id=584958529]
+script = ExtResource("1_jtrh3")
