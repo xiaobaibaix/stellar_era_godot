@@ -66,8 +66,8 @@ const int META_ROW = MAX_PATCHES;
 // Phase 4: lodtex 面内采样。OOB(u<0||v<0||u+v>1) → 返回 -1(哨兵, 让调用方走跨面路径)。
 int _sample_lodtex_inface(int face, vec2 uv) {
 	if (uv.x < 0.0 || uv.y < 0.0 || uv.x + uv.y > 1.0) return -1;
-	int ci = clamp(int(floor(uv.x * 64.0)), 0, 63);
-	int cj = clamp(int(floor(uv.y * 64.0)), 0, 63);
+	int ci = clamp(int(floor(uv.x * 256.0)), 0, 255);
+	int cj = clamp(int(floor(uv.y * 256.0)), 0, 255);
 	return int(imageLoad(lodtex, ivec3(ci, cj, face)).x);
 }
 
@@ -112,8 +112,8 @@ int _sample_lodtex_cross(int self_face, int self_edge, vec3 A, vec3 B, vec3 C) {
 	float u_n = (a22 * b1 - a12 * b2) / det;
 	float v_n = (a11 * b2 - a12 * b1) / det;
 	if (u_n < 0.0 || v_n < 0.0 || u_n + v_n > 1.0) return 0;
-	int ci = clamp(int(floor(u_n * 64.0)), 0, 63);
-	int cj = clamp(int(floor(v_n * 64.0)), 0, 63);
+	int ci = clamp(int(floor(u_n * 256.0)), 0, 255);
+	int cj = clamp(int(floor(v_n * 256.0)), 0, 255);
 	return int(imageLoad(lodtex, ivec3(ci, cj, nf)).x);
 }
 
@@ -209,7 +209,7 @@ void main() {
 	// 面内邻居: 直接 sample lodtex[face]。跨面邻居(OOB query): 投影到 neighbor face-bary,
 	// sample lodtex[neighbor]。A/B/C 是 self patch 3 角点方向(用于跨面 3D→bary 投影)。
 	float lod_self = float(level);
-	float eps_uv = 1.0 / 64.0;   // 整 cell 宽外推(lodtex_selftest (B) 验证)
+	float eps_uv = 2.0 / 256.0;   // 2 格外推(LODTEX_RES=256): 稳稳落进邻居格中心, 不卡边界、不越过 4 格宽的最细同级邻居
 	// AB 边(edge_idx=0)
 	vec2 mid_ab = (A_bary + B_bary) * 0.5;
 	vec2 out_ab = mid_ab - C_bary;

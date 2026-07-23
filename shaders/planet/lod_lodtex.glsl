@@ -31,7 +31,9 @@ layout(push_constant, std430) uniform Push {
 
 const int MAX_PATCHES = 12288;
 const int META_ROW = MAX_PATCHES;
-const int LODTEX_RES = 64;
+// 256 = 4 × 2^MAX_GPU_LEVEL(=64): 最细叶(level 6)占约 4×4 格, 给邻居查询留余量, 消除
+// 三角形叶塞进方格的走样与 query 落在格边界的抖动。必须与 lod_cull.glsl / gpu_lod_compositor.gd 一致。
+const int LODTEX_RES = 256;
 const int FACE_COUNT = 20;
 
 // 2D cross product(z 分量), 用于 barycentric inside test。

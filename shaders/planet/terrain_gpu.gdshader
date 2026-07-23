@@ -190,6 +190,32 @@ varying vec2 v_uv;   // patch-local (u,v), fragment 单遍线框用
 // moisture 噪声原始值(-1..1): vertex() 算一次, fragment() 直接用, 省掉每像素一次 noise3。
 varying float v_moist_raw;
 
+// ===================== 规范 face 参数化(消除焊接缝的关键) =====================
+// icosahedron 顶点/面(与 gpu_ico.gd RAW_VERTS/FACES、lod_traverse.glsl 逐位一致)。
+const float PHI = 1.6180339887498948482;
+const vec3 RAW_VERTS[12] = vec3[12](
+	vec3(-1.0, PHI, 0.0), vec3(1.0, PHI, 0.0), vec3(-1.0, -PHI, 0.0), vec3(1.0, -PHI, 0.0),
+	vec3(0.0, -1.0, PHI), vec3(0.0, 1.0, PHI), vec3(0.0, -1.0, -PHI), vec3(0.0, 1.0, -PHI),
+	vec3(PHI, 0.0, -1.0), vec3(PHI, 0.0, 1.0), vec3(-PHI, 0.0, -1.0), vec3(-PHI, 0.0, 1.0)
+);
+const int FACES[60] = int[60](
+	0, 11, 5,  0, 5, 1,  0, 1, 7,  0, 7, 10, 0, 10, 11,
+	1, 5, 9,  5, 11, 4, 11, 10, 2, 10, 7, 6, 7, 1, 8,
+	3, 9, 4,  3, 4, 2,  3, 2, 6,  3, 6, 8,  3, 8, 9,
+	4, 9, 5,  2, 4, 11, 6, 2, 10, 8, 6, 7,  9, 8, 1
+);
+
+// 规范 face-bary → 单位方向: normalize(该 face 三角原始角点按 face-bary 插值)。
+// 与 heightmap_baker.dir_from_bary 逐位同式; 所有 patch 共用此参数化 → 共享边逐点重合
+// (不再各 patch 用各自角点 nlerp 走不同弧)→ 焊接落点正确、无缝。
+vec3 face_dir_from_bary(int face, vec2 fb) {
+	vec3 V0 = normalize(RAW_VERTS[FACES[face * 3]]);
+	vec3 V1 = normalize(RAW_VERTS[FACES[face * 3 + 1]]);
+	vec3 V2 = normalize(RAW_VERTS[FACES[face * 3 + 2]]);
+	float fw = 1.0 - fb.x - fb.y;
+	return normalize(V0 * fw + V1 * fb.x + V2 * fb.y);
+}
+
 void vertex() {
 	int id = int(INSTANCE_ID);
 	// 坍缩守卫(方案 A 零回读): 超出可见 patch 数的 instance → 退化三角形, 光栅器丢弃。
@@ -197,18 +223,22 @@ void vertex() {
 	float patch_cnt = texelFetch(u_patchTex, ivec2(0, META_ROW), 0).x;
 	if (id < int(patch_cnt)) {
 		// 每 instance 的面角点(单位球方向)从 patch 纹理取。
-		vec4 pt0 = texelFetch(u_patchTex, ivec2(0, id), 0);   // A.xyz, _
-		vec4 pt1 = texelFetch(u_patchTex, ivec2(1, id), 0);   // B.xyz, _
-		vec4 pt2 = texelFetch(u_patchTex, ivec2(2, id), 0);   // C.xyz, lodTrans_CA(Phase 4)
+		vec4 pt0 = texelFetch(u_patchTex, ivec2(0, id), 0);   // A.xyz, face
+		vec4 pt2 = texelFetch(u_patchTex, ivec2(2, id), 0);   // C.xyz, lodTrans_CA
+		vec4 pt3 = texelFetch(u_patchTex, ivec2(3, id), 0);   // A_bary.xy, B_bary.xy
 		vec4 pt4 = texelFetch(u_patchTex, ivec2(4, id), 0);   // C_bary.xy, lodTrans_AB, lodTrans_BC
-		vec3 A = pt0.xyz;
-		vec3 B = pt1.xyz;
-		vec3 C = pt2.xyz;
+		int face = int(pt0.w);
+		vec2 A_bary = pt3.xy;
+		vec2 B_bary = pt3.zw;
+		vec2 C_bary = pt4.xy;
 		float u = UV.x;
 		float v = UV.y;
 		float w = 1.0 - u - v;
 		v_uv = vec2(u, v);   // 传给 fragment 画线框
-		vec3 d = normalize(A * w + B * u + C * v);   // 与 heightmap_baker.dir_from_bary 同式
+		// 顶点 face-bary = patch 角点 face-bary 的线性插值(线性可结合 → 相邻 patch 共享边同点同 bary);
+		// 方向走规范 face-nlerp → 所有 patch 边逐点重合, 消除各 patch 各自 nlerp 造成的缝。
+		vec2 fb = A_bary * w + B_bary * u + C_bary * v;
+		vec3 d = face_dir_from_bary(face, fb);
 		float h = terrain_height(d);
 		vec3 displaced = d * (u_radius + h * u_max_height);   // 默认(无 weld); weld 块可能覆盖
 
@@ -240,8 +270,8 @@ void vertex() {
 				float ks = kf - km;
 				float u_s = ks / u_patch_res;
 				float u_e = (ks + seg) / u_patch_res;
-				vec3 dir_s = normalize(mix(A, B, u_s));
-				vec3 dir_e = normalize(mix(A, B, u_e));
+				vec3 dir_s = face_dir_from_bary(face, mix(A_bary, B_bary, u_s));
+				vec3 dir_e = face_dir_from_bary(face, mix(A_bary, B_bary, u_e));
 				vec3 w_s = dir_s * (u_radius + terrain_height(dir_s) * u_max_height);
 				vec3 w_e = dir_e * (u_radius + terrain_height(dir_e) * u_max_height);
 				displaced = mix(w_s, w_e, tt);
@@ -257,8 +287,8 @@ void vertex() {
 				float ks = kf - km;
 				float v_s = ks / u_patch_res;
 				float v_e = (ks + seg) / u_patch_res;
-				vec3 dir_s = normalize(mix(B, C, v_s));
-				vec3 dir_e = normalize(mix(B, C, v_e));
+				vec3 dir_s = face_dir_from_bary(face, mix(B_bary, C_bary, v_s));
+				vec3 dir_e = face_dir_from_bary(face, mix(B_bary, C_bary, v_e));
 				vec3 w_s = dir_s * (u_radius + terrain_height(dir_s) * u_max_height);
 				vec3 w_e = dir_e * (u_radius + terrain_height(dir_e) * u_max_height);
 				displaced = mix(w_s, w_e, tt);
@@ -274,8 +304,8 @@ void vertex() {
 				float ks = kf - km;
 				float v_s = ks / u_patch_res;
 				float v_e = (ks + seg) / u_patch_res;
-				vec3 dir_s = normalize(mix(A, C, v_s));
-				vec3 dir_e = normalize(mix(A, C, v_e));
+				vec3 dir_s = face_dir_from_bary(face, mix(A_bary, C_bary, v_s));
+				vec3 dir_e = face_dir_from_bary(face, mix(A_bary, C_bary, v_e));
 				vec3 w_s = dir_s * (u_radius + terrain_height(dir_s) * u_max_height);
 				vec3 w_e = dir_e * (u_radius + terrain_height(dir_e) * u_max_height);
 				displaced = mix(w_s, w_e, tt);

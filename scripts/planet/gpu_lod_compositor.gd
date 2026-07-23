@@ -33,7 +33,7 @@ const WG := 64                     # workgroup size(与 glsl local_size_x 一致
 const BAKE_RES := 256              # MinMax 烘焙分辨率(2^8=256; maxLevel 6 最细 64 细分/边 → 每 patch ~4 cell, 保守包围盒足够。512 过度精细且烘焙慢 4×)
 # FrameData UBO: frustum[6](96) + cam(16) + planet(16) + consts(16) = 144 字节
 const FRAME_UBO_SIZE := 144
-const LODTEX_RES := 64             # 64×64 cell 网格 = 2^MAX_GPU_LEVEL, 每 face 一个
+const LODTEX_RES := 256            # 4×2^MAX_GPU_LEVEL: 最细叶占~4×4 格, 消除三角/方格走样+query 边界抖动。必须与 lod_lodtex/lod_cull 一致
 
 var _rd: RenderingDevice
 var _trav_shader: RID

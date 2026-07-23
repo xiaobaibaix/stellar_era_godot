@@ -395,6 +395,10 @@ static func _build_patch_tex_fallback() -> ImageTexture:
 		floats[b + 0] = A.x; floats[b + 1] = A.y; floats[b + 2] = A.z; floats[b + 3] = float(fi)
 		floats[b + 4] = B.x; floats[b + 5] = B.y; floats[b + 6] = B.z; floats[b + 7] = 0.0
 		floats[b + 8] = C.x; floats[b + 9] = C.y; floats[b + 10] = C.z; floats[b + 11] = 0.0
+		# texel3/4: 根面的 face-bary(A=(0,0), B=(1,0), C=(0,1))。shader 改用 face_dir_from_bary 后,
+		# fallback 也必须带 bary, 否则 fb 全 0 → 所有顶点坍到 V0 → 20 面退化。
+		floats[b + 12] = 0.0; floats[b + 13] = 0.0; floats[b + 14] = 1.0; floats[b + 15] = 0.0
+		floats[b + 16] = 0.0; floats[b + 17] = 1.0; floats[b + 18] = 0.0; floats[b + 19] = 0.0
 	# 末行 metadata: count = 20(渲染前 20 个 instance = 20 面)
 	var mb: int = MAX_PATCHES * W * 4
 	floats[mb + 0] = float(GpuIco.FACE_COUNT)
