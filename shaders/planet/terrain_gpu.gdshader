@@ -28,6 +28,7 @@ const int META_ROW = 12288;            // patch 纹理末行(=MAX_PATCHES)存可
 uniform float u_radius = 100.0;
 uniform float u_max_height = 8.0;
 uniform float u_patch_res = 32.0;       // Phase 4: patch mesh 边分辨率(_build_patch_mesh 的 n), 边检测 tol 用
+uniform bool u_wireframe = false;       // 调试线框(单遍, fragment 叠加; 由 F1 切换)
 uniform float u_normal_eps = 0.001;    // 顶点法线有限差分步长(方向空间)
 
 // ---- 地形参数(与 PlanetParams 对应; 同 terrain.gdshader) ----
@@ -185,6 +186,7 @@ varying vec3 v_world_pos;
 varying vec3 v_world_dir;
 varying vec3 v_world_normal;
 varying float v_h;
+varying vec2 v_uv;   // patch-local (u,v), fragment 单遍线框用
 // moisture 噪声原始值(-1..1): vertex() 算一次, fragment() 直接用, 省掉每像素一次 noise3。
 varying float v_moist_raw;
 
@@ -205,6 +207,7 @@ void vertex() {
 		float u = UV.x;
 		float v = UV.y;
 		float w = 1.0 - u - v;
+		v_uv = vec2(u, v);   // 传给 fragment 画线框
 		vec3 d = normalize(A * w + B * u + C * v);   // 与 heightmap_baker.dir_from_bary 同式
 		float h = terrain_height(d);
 		vec3 displaced = d * (u_radius + h * u_max_height);   // 默认(无 weld); weld 块可能覆盖
@@ -342,4 +345,16 @@ vec3 terrain_color(float h, vec3 d) {
 
 void fragment() {
 	ALBEDO = terrain_color(v_h, v_world_dir);
+	if (u_wireframe) {
+		// 单遍线框: 在正常三角形 pass 里按 patch mesh 的三族边(u*n / v*n / (u+v)*n 取整数处)叠加线,
+		// 用屏幕导数抗锯齿 ~1px。不走额外 line pass, 避免 12288 instance 线段爆炸导致掉帧。
+		// 线用 EMISSION(绿), 阴影里也可见, 便于诊断。
+		vec3 vals = vec3(v_uv.x, v_uv.y, v_uv.x + v_uv.y) * u_patch_res;
+		vec3 dd = abs(fract(vals - 0.5) - 0.5);            // 到最近整数线的距离(网格单位)
+		vec3 aa = dd / max(fwidth(vals), vec3(1e-5));       // 换算成像素距离
+		float edge = min(aa.x, min(aa.y, aa.z));
+		float wire = 1.0 - smoothstep(0.0, 1.5, edge);
+		ALBEDO = mix(ALBEDO, vec3(0.02), wire * 0.6);
+		EMISSION = mix(vec3(0.0), vec3(0.1, 0.9, 0.35), wire);
+	}
 }

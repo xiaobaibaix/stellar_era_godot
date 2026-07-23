@@ -23,12 +23,6 @@ var _spec_pitch: float = 0.0
 var _speed_mult: float = 1.0
 
 
-func _enter_tree() -> void:
-	# 必须在任何 Mesh 创建前开启线框索引缓冲生成(_enter_tree 早于所有 _ready), 否则
-	# GpuPlanet 已建好的网格没有线框数据, F1 线框不显示。
-	RenderingServer.set_debug_generate_wireframes(true)
-
-
 func _ready() -> void:
 	_gpu_planet = _find_gpu_planet(get_tree().root)
 	if _gpu_planet != null:
@@ -70,8 +64,8 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _toggle_wireframe() -> void:
 	_wireframe = not _wireframe
-	var vp := get_viewport()
-	vp.debug_draw = Viewport.DEBUG_DRAW_WIREFRAME if _wireframe else Viewport.DEBUG_DRAW_DISABLED
+	if _gpu_planet != null:
+		_gpu_planet.set_wireframe(_wireframe)   # 单遍着色器线框, 无额外 line pass, 不掉帧
 	print("[LODDebug] 线框: %s" % ("开" if _wireframe else "关"))
 
 

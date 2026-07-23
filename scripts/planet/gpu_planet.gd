@@ -177,6 +177,12 @@ func is_lod_frozen() -> bool:
 	return _lod_frozen
 
 
+# 切换单遍着色器线框(F1 用)。不走 DEBUG_DRAW_WIREFRAME(那会额外 line pass, 12288 instance 爆帧)。
+func set_wireframe(on: bool) -> void:
+	if _mat != null:
+		_mat.set_shader_parameter("u_wireframe", on)
+
+
 # 烘 MinMax(首次 + param 变时)。命中缓存 → 主线程直接 load; 未命中 → 后台线程烘焙, 不阻塞。
 func _bake_and_push_minmax() -> void:
 	if _lod_comp == null:
