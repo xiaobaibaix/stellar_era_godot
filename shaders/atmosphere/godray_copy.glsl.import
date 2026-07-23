@@ -3,12 +3,12 @@
 importer="glsl"
 type="RDShaderFile"
 uid="uid://cwrl2ephn7y5d"
-path="res://.godot/imported/godray_copy.glsl-d4164ea5f44dcd8d9b5e43b81b2a187a.res"
+path="res://.godot/imported/godray_copy.glsl-f92f8d9cac01a780cd2950d97247fce4.res"
 
 [deps]
 
 source_file="res://shaders/atmosphere/godray_copy.glsl"
-dest_files=["res://.godot/imported/godray_copy.glsl-d4164ea5f44dcd8d9b5e43b81b2a187a.res"]
+dest_files=["res://.godot/imported/godray_copy.glsl-f92f8d9cac01a780cd2950d97247fce4.res"]
 
 [params]
 

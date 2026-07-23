@@ -3,12 +3,12 @@
 importer="glsl"
 type="RDShaderFile"
 uid="uid://ddtusac1yqfsh"
-path="res://.godot/imported/atmosphere_compute.glsl-f73b762ba431a47b58f1e43a7ea0d27e.res"
+path="res://.godot/imported/atmosphere_compute.glsl-b9a337e452f2565655b03d2e7ba64ae9.res"
 
 [deps]
 
 source_file="res://shaders/atmosphere/atmosphere_compute.glsl"
-dest_files=["res://.godot/imported/atmosphere_compute.glsl-f73b762ba431a47b58f1e43a7ea0d27e.res"]
+dest_files=["res://.godot/imported/atmosphere_compute.glsl-b9a337e452f2565655b03d2e7ba64ae9.res"]
 
 [params]
 

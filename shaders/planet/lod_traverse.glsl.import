@@ -3,12 +3,12 @@
 importer="glsl"
 type="RDShaderFile"
 uid="uid://di21fj4pjwtlh"
-path="res://.godot/imported/lod_traverse.glsl-ff501a6ac3aef75ba02d2014e613cfef.res"
+path="res://.godot/imported/lod_traverse.glsl-5af3125b5ba9f00bdfc90d2bea897af5.res"
 
 [deps]
 
 source_file="res://shaders/planet/lod_traverse.glsl"
-dest_files=["res://.godot/imported/lod_traverse.glsl-ff501a6ac3aef75ba02d2014e613cfef.res"]
+dest_files=["res://.godot/imported/lod_traverse.glsl-5af3125b5ba9f00bdfc90d2bea897af5.res"]
 
 [params]
 

@@ -3,12 +3,12 @@
 importer="glsl"
 type="RDShaderFile"
 uid="uid://c11ul8ovx0477"
-path="res://.godot/imported/lod_lodtex.glsl-45a6fbf6d6b3c765bf79aafd110dadfa.res"
+path="res://.godot/imported/lod_lodtex.glsl-e17ec0ec9d14e2aca13ec42fd930e50d.res"
 
 [deps]
 
 source_file="res://shaders/planet/lod_lodtex.glsl"
-dest_files=["res://.godot/imported/lod_lodtex.glsl-45a6fbf6d6b3c765bf79aafd110dadfa.res"]
+dest_files=["res://.godot/imported/lod_lodtex.glsl-e17ec0ec9d14e2aca13ec42fd930e50d.res"]
 
 [params]
 
