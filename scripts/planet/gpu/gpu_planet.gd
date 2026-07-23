@@ -186,6 +186,7 @@ func _push_params() -> void:
 	var p: PlanetParams = _effective_params()
 	_mat.set_shader_parameter("u_radius", p.radius)
 	_mat.set_shader_parameter("u_max_height", p.maxHeight)
+	_mat.set_shader_parameter("u_patch_res", float(patch_resolution))   # Phase 4: 边检测 tol 用
 	_mat.set_shader_parameter("u_sea", p.seaLevel)
 	_mat.set_shader_parameter("u_warp", p.warpStrength)
 	_mat.set_shader_parameter("u_warp_freq", p.warpFreq)

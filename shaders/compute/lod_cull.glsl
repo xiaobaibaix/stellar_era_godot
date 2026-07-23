@@ -32,6 +32,9 @@ layout(set = 4, binding = 0, std140) uniform FrameData {
 	vec4 planet_center_pad;     // xyz=planet_center(world), w=maxHeight
 	vec4 consts;                // x=bake_res_log2, y=maxLevel, z=_, w=MAX_PATCHES
 } fd;
+// Phase 4: LOD lookup texture, 20 face × 64×64 R8UI。每 cell 存覆盖它的叶的 level。
+// 边 query 点 = mid + (1/64) * normalize(mid - 对角 bary) 外推 1 cell(详见 lodtex_selftest.gd)。
+layout(set = 5, binding = 0, r8ui) readonly uniform uimage2DArray lodtex;
 
 layout(push_constant, std430) uniform Push {
 	int mode;        // 0 = cull, -1 = reset counter, -2 = metadata(count → META_ROW)
@@ -42,6 +45,15 @@ layout(push_constant, std430) uniform Push {
 
 const int MAX_PATCHES = 4096;
 const int META_ROW = MAX_PATCHES;
+
+// Phase 4: lodtex 安全采样。OOB(u<0 || v<0 || u+v>1) → 返回 0(面外无邻居, Phase 4.5 跨面处理)。
+// 否则 cell (floor(u*64), floor(v*64)) clamp [0, 63] → lodtex[face, j, i]。
+int _sample_lodtex_safe(int face, vec2 uv) {
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x + uv.y > 1.0) return 0;
+	int ci = clamp(int(floor(uv.x * 64.0)), 0, 63);
+	int cj = clamp(int(floor(uv.y * 64.0)), 0, 63);
+	return int(imageLoad(lodtex, ivec3(ci, cj, face)).x);
+}
 
 void main() {
 	// ---- 特殊模式: reset / metadata(单线程, 与 lod_traverse 同模式) ----
@@ -124,15 +136,38 @@ void main() {
 		return;
 	}
 
+	// ---- Phase 4: 算 3 边的 lodDelta(自己 - 邻居, max(0, ...)) ----
+	// 边端点 bary(已经在 t3 / t4 里):
+	//   AB: A=t3.xy, B=t3.zw;   BC: B=t3.zw, C=t4.xy;   CA: C=t4.xy, A=t3.xy
+	// 对角(用来定 outward 方向): AB→C, BC→A, CA→B
+	float lod_self = float(level);
+	float eps_uv = 1.0 / 64.0;   // 整 cell 宽外推(lodtex_selftest (B) 验证)
+	// AB 边
+	vec2 mid_ab = (A_bary + B_bary) * 0.5;
+	vec2 out_ab = mid_ab - C_bary;
+	float n_lod_ab = float(_sample_lodtex_safe(face, mid_ab + eps_uv * normalize(out_ab + vec2(1e-8))));
+	float lod_d_ab = max(0.0, lod_self - n_lod_ab);
+	// BC 边
+	vec2 mid_bc = (B_bary + C_bary) * 0.5;
+	vec2 out_bc = mid_bc - A_bary;
+	float n_lod_bc = float(_sample_lodtex_safe(face, mid_bc + eps_uv * normalize(out_bc + vec2(1e-8))));
+	float lod_d_bc = max(0.0, lod_self - n_lod_bc);
+	// CA 边
+	vec2 mid_ca = (C_bary + A_bary) * 0.5;
+	vec2 out_ca = mid_ca - B_bary;
+	float n_lod_ca = float(_sample_lodtex_safe(face, mid_ca + eps_uv * normalize(out_ca + vec2(1e-8))));
+	float lod_d_ca = max(0.0, lod_self - n_lod_ca);
+
 	// ---- 通过 → 原子发射到 cull_tex ----
 	uint out_slot = atomicAdd(cull_counter.count, 1u);
 	if (out_slot >= uint(MAX_PATCHES)) {
 		return;
 	}
+	// texel2.w = lodDelta_CA; texel4.zw = (lodDelta_AB, lodDelta_BC)。其余字段不变。
 	imageStore(cull_tex, ivec2(0, int(out_slot)), t0);
 	imageStore(cull_tex, ivec2(1, int(out_slot)), t1);
-	imageStore(cull_tex, ivec2(2, int(out_slot)), t2);
+	imageStore(cull_tex, ivec2(2, int(out_slot)), vec4(C.xyz, lod_d_ca));
 	imageStore(cull_tex, ivec2(3, int(out_slot)), t3);
-	imageStore(cull_tex, ivec2(4, int(out_slot)), t4);
+	imageStore(cull_tex, ivec2(4, int(out_slot)), vec4(C_bary.x, C_bary.y, lod_d_ab, lod_d_bc));
 	imageStore(cull_tex, ivec2(5, int(out_slot)), vec4(minH, maxH, 0.0, 0.0));
 }

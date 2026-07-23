@@ -25,6 +25,7 @@ extends CompositorEffect
 
 const TRAVERSE_SHADER_PATH := "res://shaders/compute/lod_traverse.glsl"
 const CULL_SHADER_PATH := "res://shaders/compute/lod_cull.glsl"
+const LODTEX_SHADER_PATH := "res://shaders/compute/lod_lodtex.glsl"
 const MAX_PATCHES := 4096          # 与 shader MAX_PATCHES 一致
 const PATCH_TEX_W := 6             # 每 patch 6 texel
 const PATCH_TEX_H := MAX_PATCHES + 1   # 末行存 count metadata
@@ -32,12 +33,15 @@ const WG := 64                     # workgroup size(与 glsl local_size_x 一致
 const BAKE_RES := 512              # MinMax 烘焙分辨率(2^9 = 512; maxLevel 6 足够覆盖)
 # FrameData UBO: frustum[6](96) + cam(16) + planet(16) + consts(16) = 144 字节
 const FRAME_UBO_SIZE := 144
+const LODTEX_RES := 64             # 64×64 cell 网格 = 2^MAX_GPU_LEVEL, 每 face 一个
 
 var _rd: RenderingDevice
 var _trav_shader: RID
 var _trav_pipeline: RID
 var _cull_shader: RID
 var _cull_pipeline: RID
+var _lodtex_shader: RID
+var _lodtex_pipeline: RID
 var _material_rid: RID
 
 # 双缓冲(1-帧延迟): idx = _frame & 1 写, 1-idx 读。
@@ -46,6 +50,19 @@ var _trav_counter: Array = [RID(), RID()]  # traverse 的 atomicAdd 计数器
 var _cull_tex: Array = [RID(), RID()]      # 终端: cull 输出 → vertex 读(就是 u_patchTex)
 var _cull_counter: Array = [RID(), RID()]  # cull 的 atomicAdd 计数器
 var _tex2drd: Array = [null, null]         # Texture2DRD 包装(暴露给 GpuPlanet 主线程 set_shader_parameter 绑定)
+
+# LOD lookup texture 双缓冲(Phase 4): cull sample 用, 读上一帧 rasterize 的 lodtex[1-write_idx]
+# 等等 —— 实际上 lodtex 每帧重建, 不需要双缓冲。本帧 rasterize 完, cull 同帧读。但 cull 跑在
+# PRE_OPAQUE, 主线程 _process 已经把 read cull_tex 绑给 material(那是上一帧 cull 的输出)。
+# 本帧的 rasterize/cull 都用本帧 write_idx 的 lodtex(本帧 compute 写, 本帧 compute 读, 同帧)。
+# 所以单缓冲就够。但保留双缓冲结构为 future-proof(Phase 4.5 可能跨帧 cache 邻居)。
+var _lodtex: Array = [RID(), RID()]        # 20 layer × 64×64 R8UI Texture2DArray, STORAGE 写
+var _lodtex_sets: Array = [null, null]     # [write_idx] = [set0_trav_img, set1_lodtex_img]
+
+# Phase 4.5 跨面焊接邻接表: 60 ints(每 (face, edge) 1 个 neighbor_face index)。
+# cull 检测到 patch edge 沿 face 边界时, 查这张表得邻居 face, 把 self query 3D 方向投影到
+# neighbor face-bary, sample lodtex[neighbor]。
+var _adjacency_buf: RID
 
 # MinMax 资源(per-frame 只读; param 变时 set_minmax 重建)
 var _minmax_tex: RID
@@ -75,15 +92,19 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
 		_free_res(_trav_shader)
 		_free_res(_cull_shader)
+		_free_res(_lodtex_shader)
 		_trav_shader = RID()
 		_cull_shader = RID()
+		_lodtex_shader = RID()
 		_trav_pipeline = RID()
 		_cull_pipeline = RID()
+		_lodtex_pipeline = RID()
 		for i in range(2):
 			_free_res(_trav_tex[i]); _trav_tex[i] = RID()
 			_free_res(_trav_counter[i]); _trav_counter[i] = RID()
 			_free_res(_cull_tex[i]); _cull_tex[i] = RID()
 			_free_res(_cull_counter[i]); _cull_counter[i] = RID()
+			_free_res(_lodtex[i]); _lodtex[i] = RID()
 		_free_res(_minmax_tex); _minmax_tex = RID()
 		_free_res(_minmax_sampler); _minmax_sampler = RID()
 		_free_res(_frame_ubo); _frame_ubo = RID()
@@ -107,17 +128,21 @@ func setup(material_rid: RID) -> bool:
 		return false
 	if not _compile_cull():
 		return false
+	if not _compile_lodtex():
+		return false
 	for i in range(2):
 		if not _trav_tex[i].is_valid():
 			_trav_tex[i] = _create_patch_tex()
 			_trav_counter[i] = _create_counter()
 			_cull_tex[i] = _create_patch_tex()
 			_cull_counter[i] = _create_counter()
+			_lodtex[i] = _create_lodtex_tex()
 			var t := Texture2DRD.new()
 			t.texture_rd_rid = _cull_tex[i]   # vertex 读的是 cull 输出
 			_tex2drd[i] = t
 			_trav_sets[i] = null
 			_cull_sets[i] = null
+			_lodtex_sets[i] = null
 	if not _frame_ubo.is_valid():
 		var zeros := PackedByteArray()
 		zeros.resize(FRAME_UBO_SIZE)
@@ -202,6 +227,24 @@ func _compile_cull() -> bool:
 	return _cull_pipeline.is_valid()
 
 
+func _compile_lodtex() -> bool:
+	if _lodtex_pipeline.is_valid():
+		return true
+	var sf := load(LODTEX_SHADER_PATH) as RDShaderFile
+	if sf == null:
+		push_error("[GpuLodCompositor] load 失败: " + LODTEX_SHADER_PATH)
+		return false
+	var spirv: RDShaderSPIRV = sf.get_spirv()
+	if spirv == null or spirv.compile_error_compute != "":
+		push_error("[GpuLodCompositor] lodtex 编译错误: " + (spirv.compile_error_compute if spirv != null else "null"))
+		return false
+	_lodtex_shader = _rd.shader_create_from_spirv(spirv)
+	if not _lodtex_shader.is_valid():
+		return false
+	_lodtex_pipeline = _rd.compute_pipeline_create(_lodtex_shader)
+	return _lodtex_pipeline.is_valid()
+
+
 # 6 × (MAX_PATCHES+1) RGBA32F, STORAGE|SAMPLING。零填充(末行 count=0 → 首帧坍缩无渲染, 安全)。
 func _create_patch_tex() -> RID:
 	var fmt := RDTextureFormat.new()
@@ -221,6 +264,35 @@ func _create_counter() -> RID:
 	var bytes := PackedByteArray()
 	bytes.resize(4)   # uint32 = 0
 	return _rd.storage_buffer_create(4, bytes)
+
+
+# Phase 4 LOD lookup texture: 20 layer × LODTEX_RES² R8UI Texture2DArray。
+# compute shader(rasterize) 写 → compute shader(cull) 读(都是 STORAGE, 不走 sampler)。
+# 零填充(0 表示 "无 owner"; cull 边 query 落到 0 → lodDelta=0 → 不焊; Phase 4.5 加跨面表)。
+func _create_lodtex_tex() -> RID:
+	var fmt := RDTextureFormat.new()
+	fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D_ARRAY
+	# R8UI = DATA_FORMAT_R8_UINT; Godot 4.7 支持。若某后端不支持, 退 R32_UINT(4× 内存)。
+	fmt.format = RenderingDevice.DATA_FORMAT_R8_UINT
+	fmt.width = LODTEX_RES
+	fmt.height = LODTEX_RES
+	fmt.depth = 1
+	fmt.array_layers = GpuIco.FACE_COUNT
+	fmt.mipmaps = 1
+	# STORAGE_BIT: lodtex.glsl 用 imageStore 写; 同时加 SAMPLING_BIT 给未来可能的 debug 可视化。
+	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
+	# texture_create 期望 per-layer byte array: 每 layer = width*height*bytes_per_texel = 64*64*1 = 4096 字节。
+	# 之前我传了 81920 字节(整个纹理), Godot 会拒绝 → RID 无效 → uniform set 失败 → cull 不写。
+	var layers: Array = []
+	for i in range(GpuIco.FACE_COUNT):
+		var layer := PackedByteArray()
+		layer.resize(LODTEX_RES * LODTEX_RES)
+		layer.fill(0)
+		layers.append(layer)
+	var rid := _rd.texture_create(fmt, RDTextureView.new(), layers)
+	if not rid.is_valid():
+		push_error("[GpuLodCompositor] lodtex texture_create 失败(可能 R8UI storage 不支持, 改 R32_UINT 重试)")
+	return rid
 
 
 # MinMax Texture2DArray(20 layer × bake_res² × R32G32_SFLOAT, 含 mip 链 log2(bake_res)+1 级)。
@@ -270,7 +342,7 @@ func set_frame_data(d: Dictionary) -> void:
 
 func _render_callback(_effect_callback_type: int, _render_data: RenderData) -> void:
 	_cb_count += 1
-	if not _ready or not _trav_pipeline.is_valid() or not _cull_pipeline.is_valid():
+	if not _ready or not _trav_pipeline.is_valid() or not _cull_pipeline.is_valid() or not _lodtex_pipeline.is_valid():
 		return
 	if _effect_callback_type != CompositorEffect.EFFECT_CALLBACK_TYPE_PRE_OPAQUE:
 		return
@@ -288,6 +360,7 @@ func _render_callback(_effect_callback_type: int, _render_data: RenderData) -> v
 
 	# 确保 uniform sets 缓存(首帧或 minmax 变后建)
 	_ensure_trav_sets(write_idx)
+	_ensure_lodtex_sets(write_idx)
 	if _minmax_ready:
 		_ensure_cull_sets(write_idx)
 
@@ -303,6 +376,10 @@ func _render_callback(_effect_callback_type: int, _render_data: RenderData) -> v
 	for lvl in range(max_level + 1):                                     # per-level 遍历
 		_dispatch_traverse(write_idx, pc_base, float(lvl), _groups_for_level(lvl))
 	_dispatch_traverse(write_idx, pc_base, -2.0, 1)                       # trav metadata: count → trav_tex META_ROW
+
+	# === LOD lookup texture 阶段(Phase 4): 每帧 reset + rasterize → cull 同帧读 ===
+	_dispatch_lodtex(write_idx, -1, _lodtex_reset_groups())                # reset: 清零 81920 cells
+	_dispatch_lodtex(write_idx, 0, _cull_groups())                         # rasterize: 每 trav slot 1 thread
 
 	# === Cull 阶段(minmax 就绪才跑; 否则 cull_tex 保持上帧内容/全 0 → 坍缩无渲染) ===
 	if _minmax_ready:
@@ -398,12 +475,18 @@ func _ensure_cull_sets(write_idx: int) -> void:
 	u_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
 	u_ubo.binding = 0
 	u_ubo.add_id(_frame_ubo)
+	# Phase 4: set 5 = lodtex(同 write_idx 的 LOD lookup texture, 本帧 rasterize 写, 本帧 cull 读)
+	var u_lod := RDUniform.new()
+	u_lod.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	u_lod.binding = 0
+	u_lod.add_id(_lodtex[write_idx])
 	var s0 := UniformSetCacheRD.get_cache(_cull_shader, 0, [u_trav])
 	var s1 := UniformSetCacheRD.get_cache(_cull_shader, 1, [u_cull])
 	var s2 := UniformSetCacheRD.get_cache(_cull_shader, 2, [u_mm])
 	var s3 := UniformSetCacheRD.get_cache(_cull_shader, 3, [u_ctr])
 	var s4 := UniformSetCacheRD.get_cache(_cull_shader, 4, [u_ubo])
-	_cull_sets[write_idx] = [s0, s1, s2, s3, s4]
+	var s5 := UniformSetCacheRD.get_cache(_cull_shader, 5, [u_lod])
+	_cull_sets[write_idx] = [s0, s1, s2, s3, s4, s5]
 
 
 func _dispatch_traverse(write_idx: int, pc_base: PackedFloat32Array, level: float, groups: int) -> void:
@@ -428,9 +511,46 @@ func _dispatch_cull(write_idx: int, mode: int, groups: int) -> void:
 	_rd.compute_list_bind_uniform_set(cl, sets[2], 2)
 	_rd.compute_list_bind_uniform_set(cl, sets[3], 3)
 	_rd.compute_list_bind_uniform_set(cl, sets[4], 4)
+	_rd.compute_list_bind_uniform_set(cl, sets[5], 5)   # Phase 4: lodtex
 	_rd.compute_list_set_push_constant(cl, pc.to_byte_array(), pc.size() * 4)
 	_rd.compute_list_dispatch(cl, groups, 1, 1)
 	_rd.compute_list_end()
+
+
+# 缓存 lodtex uniform sets(per write_idx)。set0 = trav_tex(image), set1 = lodtex(image array)。
+func _ensure_lodtex_sets(write_idx: int) -> void:
+	if _lodtex_sets[write_idx] != null:
+		return
+	var u_trav := RDUniform.new()
+	u_trav.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	u_trav.binding = 0
+	u_trav.add_id(_trav_tex[write_idx])
+	var u_lod := RDUniform.new()
+	u_lod.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	u_lod.binding = 0
+	u_lod.add_id(_lodtex[write_idx])
+	var s0 := UniformSetCacheRD.get_cache(_lodtex_shader, 0, [u_trav])
+	var s1 := UniformSetCacheRD.get_cache(_lodtex_shader, 1, [u_lod])
+	_lodtex_sets[write_idx] = [s0, s1]
+
+
+# mode=-1: reset 清零 lodtex(20×64×64=81920 cells, 1280 workgroup 各清 1 cell)
+# mode=0:  rasterize —— 每 trav_tex slot(叶)一个 thread, 写三角形覆盖的 cell
+func _dispatch_lodtex(write_idx: int, mode: int, groups: int) -> void:
+	var pc := PackedInt32Array([mode, 0, 0, 0])
+	var sets: Array = _lodtex_sets[write_idx]
+	var cl := _rd.compute_list_begin()
+	_rd.compute_list_bind_compute_pipeline(cl, _lodtex_pipeline)
+	_rd.compute_list_bind_uniform_set(cl, sets[0], 0)
+	_rd.compute_list_bind_uniform_set(cl, sets[1], 1)
+	_rd.compute_list_set_push_constant(cl, pc.to_byte_array(), pc.size() * 4)
+	_rd.compute_list_dispatch(cl, groups, 1, 1)
+	_rd.compute_list_end()
+
+
+# reset 组数: 20 face × 64×64 = 81920 cells / 64 = 1280 workgroup
+func _lodtex_reset_groups() -> int:
+	return (GpuIco.FACE_COUNT * LODTEX_RES * LODTEX_RES + WG - 1) / WG
 
 
 static func _groups_for_level(level: int) -> int:

@@ -27,6 +27,7 @@ uniform sampler2D u_patchTex;          // 6×(MAX_PATCHES+1) RGBA32F: per-instan
 const int META_ROW = 4096;             // patch 纹理末行(=MAX_PATCHES)存可见 patch 数, 供坍缩守卫读
 uniform float u_radius = 100.0;
 uniform float u_max_height = 8.0;
+uniform float u_patch_res = 32.0;       // Phase 4: patch mesh 边分辨率(_build_patch_mesh 的 n), 边检测 tol 用
 uniform float u_normal_eps = 0.001;    // 顶点法线有限差分步长(方向空间)
 
 // ---- 地形参数(与 PlanetParams 对应; 同 terrain.gdshader) ----
@@ -194,15 +195,90 @@ void vertex() {
 	float patch_cnt = texelFetch(u_patchTex, ivec2(0, META_ROW), 0).x;
 	if (id < int(patch_cnt)) {
 		// 每 instance 的面角点(单位球方向)从 patch 纹理取。
-		vec3 A = texelFetch(u_patchTex, ivec2(0, id), 0).xyz;
-		vec3 B = texelFetch(u_patchTex, ivec2(1, id), 0).xyz;
-		vec3 C = texelFetch(u_patchTex, ivec2(2, id), 0).xyz;
+		vec4 pt0 = texelFetch(u_patchTex, ivec2(0, id), 0);   // A.xyz, _
+		vec4 pt1 = texelFetch(u_patchTex, ivec2(1, id), 0);   // B.xyz, _
+		vec4 pt2 = texelFetch(u_patchTex, ivec2(2, id), 0);   // C.xyz, lodTrans_CA(Phase 4)
+		vec4 pt4 = texelFetch(u_patchTex, ivec2(4, id), 0);   // C_bary.xy, lodTrans_AB, lodTrans_BC
+		vec3 A = pt0.xyz;
+		vec3 B = pt1.xyz;
+		vec3 C = pt2.xyz;
 		float u = UV.x;
 		float v = UV.y;
 		float w = 1.0 - u - v;
 		vec3 d = normalize(A * w + B * u + C * v);   // 与 heightmap_baker.dir_from_bary 同式
 		float h = terrain_height(d);
-		vec3 displaced = d * (u_radius + h * u_max_height);
+		vec3 displaced = d * (u_radius + h * u_max_height);   // 默认(无 weld); weld 块可能覆盖
+
+		// ===== Phase 4: FixLODConnectSeam(3 边都做) =====
+		// 若 vertex 在边(非角点)且该边 lodDelta>0(邻居更粗), 把顶点 slide 到**邻居 chord 中点**:
+		// 邻居(coarser)边只有 PATCH_RES/2^lodDelta+1 个顶点, 渲染为世界直线 polyline。
+		// 自己(finer)边上多余的顶点必须落在该 polyline 的对应段上, 否则有 T-junction 裂缝。
+		// 正确做法: 找顶点所在 chord 段的两端 k_start=floor(k/seg)*seg, k_end=k_start+seg
+		// (seg=2^lodDelta), 算两端世界坐标 W_s/W_e(球面方向 + terrain_height), 顶点 slide 到
+		// mix(W_s, W_e, (k-k_start)/seg)。
+		// 注意: 不是球面 slerp(那会让顶点留在球面上, 跟邻居的世界直线 chord 仍有 gap)。
+		// 边参数化(关键 R4): AB→t=u(A at u=0, B at u=1); BC→t=v(B at v=0, C at v=1);
+		//                   CA→t=v(A at v=0, C at v=1)。
+		float lod_d_ab = pt4.z;
+		float lod_d_bc = pt4.w;
+		float lod_d_ca = pt2.w;
+		float edge_tol = 0.5 / u_patch_res;   // 半顶点宽, 排除角点
+		bool on_ab = abs(v) < edge_tol && u > edge_tol && u < 1.0 - edge_tol;
+		bool on_bc = abs(u + v - 1.0) < edge_tol && u > edge_tol && v > edge_tol;
+		bool on_ca = abs(u) < edge_tol && v > edge_tol && v < 1.0 - edge_tol;
+		if (on_ab && lod_d_ab > 0.0) {
+			float seg = exp2(lod_d_ab);
+			float kf = u * u_patch_res;       // 顶点在边上的 float index
+			float km = mod(kf, seg);           // 余数 [0, seg)
+			if (km > 0.5) {                    // 内部多余顶点(km=0 是对齐 coarse 端点, 不 slide)
+				float tt = km / seg;
+				float ks = kf - km;
+				float u_s = ks / u_patch_res;
+				float u_e = (ks + seg) / u_patch_res;
+				vec3 dir_s = normalize(mix(A, B, u_s));
+				vec3 dir_e = normalize(mix(A, B, u_e));
+				vec3 w_s = dir_s * (u_radius + terrain_height(dir_s) * u_max_height);
+				vec3 w_e = dir_e * (u_radius + terrain_height(dir_e) * u_max_height);
+				displaced = mix(w_s, w_e, tt);
+				d = normalize(mix(dir_s, dir_e, tt));
+				h = (length(displaced) - u_radius) / u_max_height;
+			}
+		} else if (on_bc && lod_d_bc > 0.0) {
+			float seg = exp2(lod_d_bc);
+			float kf = v * u_patch_res;
+			float km = mod(kf, seg);
+			if (km > 0.5) {
+				float tt = km / seg;
+				float ks = kf - km;
+				float v_s = ks / u_patch_res;
+				float v_e = (ks + seg) / u_patch_res;
+				vec3 dir_s = normalize(mix(B, C, v_s));
+				vec3 dir_e = normalize(mix(B, C, v_e));
+				vec3 w_s = dir_s * (u_radius + terrain_height(dir_s) * u_max_height);
+				vec3 w_e = dir_e * (u_radius + terrain_height(dir_e) * u_max_height);
+				displaced = mix(w_s, w_e, tt);
+				d = normalize(mix(dir_s, dir_e, tt));
+				h = (length(displaced) - u_radius) / u_max_height;
+			}
+		} else if (on_ca && lod_d_ca > 0.0) {
+			float seg = exp2(lod_d_ca);
+			float kf = v * u_patch_res;
+			float km = mod(kf, seg);
+			if (km > 0.5) {
+				float tt = km / seg;
+				float ks = kf - km;
+				float v_s = ks / u_patch_res;
+				float v_e = (ks + seg) / u_patch_res;
+				vec3 dir_s = normalize(mix(A, C, v_s));
+				vec3 dir_e = normalize(mix(A, C, v_e));
+				vec3 w_s = dir_s * (u_radius + terrain_height(dir_s) * u_max_height);
+				vec3 w_e = dir_e * (u_radius + terrain_height(dir_e) * u_max_height);
+				displaced = mix(w_s, w_e, tt);
+				d = normalize(mix(dir_s, dir_e, tt));
+				h = (length(displaced) - u_radius) / u_max_height;
+			}
+		}
+
 		VERTEX = displaced;                          // 对象空间(GpuPlanet 原点 = 行星中心)
 		v_h = h;
 		v_world_dir = normalize((MODEL_MATRIX * vec4(d, 0.0)).xyz);
