@@ -79,29 +79,19 @@ int _sample_lodtex_inface(int face, vec2 uv) {
 int _sample_lodtex_cross(int self_face, int self_edge, vec3 A, vec3 B, vec3 C) {
 	int nf = adjacency.neighbor_face[self_face * 3 + self_edge];
 	if (nf < 0) return 0;
-	// self edge midpoint 3D 方向
+	// self edge midpoint 3D 方向(落在共享的二十面体棱上)
 	vec3 mid_3d;
 	if (self_edge == 0) mid_3d = normalize(A + B);
 	else if (self_edge == 1) mid_3d = normalize(B + C);
 	else mid_3d = normalize(C + A);
-	// neighbor face 3 角点方向 + center
 	vec3 A_n = normalize(RAW_VERTS[FACES[nf * 3]]);
 	vec3 B_n = normalize(RAW_VERTS[FACES[nf * 3 + 1]]);
 	vec3 C_n = normalize(RAW_VERTS[FACES[nf * 3 + 2]]);
-	vec3 nf_center = normalize(A_n + B_n + C_n);
-	// 从 midpoint 沿"指向 neighbor center"的切线方向走一步, 让 q3 落到 neighbor face 球面三角内。
-	// 用切线方向(扣掉 radial 分量)而非 chord, 保持 q3 在球面上。eps_3d=0.1 ≈ 5.7° 弧度,
-	// 约邻居面 1/10 大小, 足够跨过边界曲率让投影落进三角形(eps=0.01 投影会卡到边外 u_n<0)。
-	vec3 to_center = nf_center - mid_3d;
-	float radial_dot = dot(to_center, mid_3d);
-	vec3 tangent = to_center - radial_dot * mid_3d;
-	vec3 tangent_dir = normalize(tangent + vec3(1e-20));
-	float eps_3d = 0.1;
-	vec3 q3 = normalize(mid_3d + eps_3d * tangent_dir);
-	// 投影 q3 到 neighbor face-bary 平面: 解 q3-A_n = s*(B_n-A_n) + t*(C_n-A_n) 2x2 系统
+	// 直接把 mid_3d 投影到 nf 的 face-bary 平面: 解 mid_3d-A_n = u*(B_n-A_n) + v*(C_n-A_n)。
+	// mid_3d 就在 nf 的共享边上, 细 patch 边弧极小 → 投影落在该边上、误差可忽略。
 	vec3 ABn = B_n - A_n;
 	vec3 ACn = C_n - A_n;
-	vec3 AQn = q3 - A_n;
+	vec3 AQn = mid_3d - A_n;
 	float a11 = dot(ABn, ABn);
 	float a12 = dot(ABn, ACn);
 	float a22 = dot(ACn, ACn);
@@ -111,9 +101,15 @@ int _sample_lodtex_cross(int self_face, int self_edge, vec3 A, vec3 B, vec3 C) {
 	if (abs(det) < 1e-10) return 0;
 	float u_n = (a22 * b1 - a12 * b2) / det;
 	float v_n = (a11 * b2 - a12 * b1) / det;
-	if (u_n < 0.0 || v_n < 0.0 || u_n + v_n > 1.0) return 0;
-	int ci = clamp(int(floor(u_n * 256.0)), 0, 255);
-	int cj = clamp(int(floor(v_n * 256.0)), 0, 255);
+	// 在 nf 的 bary 空间朝质心迈 2 格(与面内 eps_uv 同尺度、与 level 无关)→ 稳稳落进"紧邻"的
+	// 跨面邻居 cell。取代原 eps_3d=0.1 固定 3D 步: 那个 ≈5.7° 步长对 ≈1° 的细 patch 会跨过好几个
+	// patch、采到远处错误 LOD → 沿二十面体棱(非细分边界)产生假接缝。
+	vec2 q = vec2(u_n, v_n);
+	vec2 to_centroid = vec2(1.0 / 3.0, 1.0 / 3.0) - q;
+	q += (2.0 / 256.0) * normalize(to_centroid + vec2(1e-8));
+	if (q.x < 0.0 || q.y < 0.0 || q.x + q.y > 1.0) return 0;
+	int ci = clamp(int(floor(q.x * 256.0)), 0, 255);
+	int cj = clamp(int(floor(q.y * 256.0)), 0, 255);
 	return int(imageLoad(lodtex, ivec3(ci, cj, nf)).x);
 }
 
