@@ -1,0 +1,15 @@
+[gd_scene format=3 uid="uid://dvvumqb10vtc8"]
+
+[ext_resource type="Script" uid="uid://wtc1vb7c6gl" path="res://scripts/solar/celestial_system.gd" id="1_a48o5"]
+[ext_resource type="Script" uid="uid://cfvcnwn7ts6n6" path="res://scripts/solar/soi_editor_preview.gd" id="2_soiprev"]
+
+[node name="CelestialSystem" type="Node3D" unique_id=1785284761]
+script = ExtResource("1_a48o5")
+
+[node name="SOI" type="MeshInstance3D" parent="." unique_id=1965821511]
+visible = false
+script = ExtResource("2_soiprev")
+
+[node name="Trails" type="Node3D" parent="." unique_id=387353748]
+
+[node name="Orbits" type="Node3D" parent="." unique_id=1942307381]

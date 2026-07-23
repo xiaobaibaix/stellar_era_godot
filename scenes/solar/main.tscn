@@ -1,0 +1,217 @@
+[gd_scene format=3 uid="uid://b5hivomrse3s2"]
+
+[ext_resource type="Texture2D" uid="uid://1dvcnsbflecp" path="res://assets/picture/GalaxyBackground.hdr" id="1_0wfyh"]
+[ext_resource type="Script" uid="uid://cjg2w1cypjy4u" path="res://scripts/core/orbit_camera.gd" id="3_cam"]
+[ext_resource type="Script" uid="uid://c18n2n3tlwx8e" path="res://scripts/atmosphere/atmosphere_compositor.gd" id="3_o6xl0"]
+[ext_resource type="Script" uid="uid://cnmiaw2pdp52j" path="res://scripts/core/main.gd" id="6_main"]
+[ext_resource type="PackedScene" uid="uid://dvvumqb10vtc8" path="res://scenes/solar/celestial_system.tscn" id="8_tipki"]
+[ext_resource type="PackedScene" uid="uid://d10xidui4gp48" path="res://scenes/solar/celestial.tscn" id="9_cel"]
+
+[sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_ihy5a"]
+panorama = ExtResource("1_0wfyh")
+
+[sub_resource type="Sky" id="Sky_1j6d1"]
+sky_material = SubResource("PanoramaSkyMaterial_ihy5a")
+
+[sub_resource type="Environment" id="Environment_r4dii"]
+background_mode = 2
+sky = SubResource("Sky_1j6d1")
+tonemap_mode = 4
+glow_enabled = true
+
+[sub_resource type="CompositorEffect" id="CompositorEffect_o6xl0"]
+resource_local_to_scene = false
+resource_name = ""
+enabled = true
+effect_callback_type = 4
+needs_motion_vectors = false
+needs_normal_roughness = false
+script = ExtResource("3_o6xl0")
+
+[sub_resource type="Compositor" id="Compositor_tipki"]
+compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_o6xl0")])
+
+[node name="Main" type="Node" unique_id=502546147 node_paths=PackedStringArray("camera", "fps_label")]
+script = ExtResource("6_main")
+camera = NodePath("Camera3D")
+fps_label = NodePath("FpsLabel")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1411384491]
+environment = SubResource("Environment_r4dii")
+compositor = SubResource("Compositor_tipki")
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1625772579]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1345.2281)
+current = true
+script = ExtResource("3_cam")
+
+[node name="FpsLabel" type="Label" parent="." unique_id=1044356931]
+offset_left = 860.0
+offset_right = 1136.0
+offset_bottom = 26.0
+text = "FPS:111  patch:314  tri:110.5k  job:0"
+horizontal_alignment = 2
+
+[node name="HUDLayer" type="CanvasLayer" parent="." unique_id=1173052028]
+
+[node name="HUD" type="Label" parent="HUDLayer" unique_id=878069346]
+offset_left = 10.0
+offset_top = 40.0
+theme_override_font_sizes/font_size = 14
+
+[node name="EditorLayer" type="CanvasLayer" parent="." unique_id=197469049]
+
+[node name="Editor" type="PanelContainer" parent="EditorLayer" unique_id=2112306037]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -250.0
+offset_top = 60.0
+offset_right = -10.0
+offset_bottom = 60.0
+
+[node name="Margin" type="MarginContainer" parent="EditorLayer/Editor" unique_id=1791023343]
+layout_mode = 2
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 6
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 6
+
+[node name="VBox" type="VBoxContainer" parent="EditorLayer/Editor/Margin" unique_id=1927587295]
+layout_mode = 2
+theme_override_constants/separation = 4
+
+[node name="Title" type="Label" parent="EditorLayer/Editor/Margin/VBox" unique_id=1008472164]
+layout_mode = 2
+text = "(未聚焦)"
+
+[node name="MassRow" type="HBoxContainer" parent="EditorLayer/Editor/Margin/VBox" unique_id=2123095428]
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="Key" type="Label" parent="EditorLayer/Editor/Margin/VBox/MassRow" unique_id=844551920]
+custom_minimum_size = Vector2(52, 0)
+layout_mode = 2
+text = "mass"
+
+[node name="SpinBox" type="SpinBox" parent="EditorLayer/Editor/Margin/VBox/MassRow" unique_id=1632935582]
+custom_minimum_size = Vector2(140, 0)
+layout_mode = 2
+max_value = 10000000.0
+step = 10.0
+
+[node name="RadiusRow" type="HBoxContainer" parent="EditorLayer/Editor/Margin/VBox" unique_id=819470858]
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="Key" type="Label" parent="EditorLayer/Editor/Margin/VBox/RadiusRow" unique_id=104592839]
+custom_minimum_size = Vector2(52, 0)
+layout_mode = 2
+text = "radius"
+
+[node name="SpinBox" type="SpinBox" parent="EditorLayer/Editor/Margin/VBox/RadiusRow" unique_id=1245042839]
+custom_minimum_size = Vector2(140, 0)
+layout_mode = 2
+min_value = 1.0
+max_value = 5000.0
+step = 5.0
+value = 1.0
+
+[node name="ColorRow" type="HBoxContainer" parent="EditorLayer/Editor/Margin/VBox" unique_id=263478129]
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="Key" type="Label" parent="EditorLayer/Editor/Margin/VBox/ColorRow" unique_id=45845437]
+custom_minimum_size = Vector2(52, 0)
+layout_mode = 2
+text = "color"
+
+[node name="ColorPicker" type="ColorPickerButton" parent="EditorLayer/Editor/Margin/VBox/ColorRow" unique_id=1078106997]
+custom_minimum_size = Vector2(140, 0)
+layout_mode = 2
+edit_alpha = false
+
+[node name="CelestialSystem" parent="." unique_id=2094240379 instance=ExtResource("8_tipki")]
+
+[node name="CelestialSystem" parent="CelestialSystem" unique_id=2029073605 instance=ExtResource("8_tipki")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -21367.557, 0, 0)
+
+[node name="OmniLight3D" type="OmniLight3D" parent="CelestialSystem/CelestialSystem" unique_id=763869859]
+light_energy = 3.0
+omni_range = 20000.0
+omni_attenuation = -0.1
+
+[node name="Star" parent="CelestialSystem/CelestialSystem" unique_id=1953598633 instance=ExtResource("9_cel")]
+mass = 1000000.0
+radius = 300.0
+type = "star"
+color = Color(1, 0.85, 0.4, 1)
+is_dominant = true
+
+[node name="CelestialSystem" parent="CelestialSystem/CelestialSystem" unique_id=1785284761 instance=ExtResource("8_tipki")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2088.998, 0, -462.1526)
+
+[node name="Celestial" parent="CelestialSystem/CelestialSystem/CelestialSystem" unique_id=1605655518 instance=ExtResource("9_cel")]
+mass = 2000.0
+radius = 100.0
+
+[node name="CelestialSystem1" parent="CelestialSystem" unique_id=422503284 node_paths=PackedStringArray("orbit_camera") instance=ExtResource("8_tipki")]
+orbit_camera = NodePath("../../Camera3D")
+
+[node name="Star" parent="CelestialSystem/CelestialSystem1" unique_id=1469884144 instance=ExtResource("9_cel")]
+mass = 1000000.0
+radius = 300.0
+type = "star"
+color = Color(1, 0.85, 0.4, 1)
+is_dominant = true
+
+[node name="OmniLight3D" type="OmniLight3D" parent="CelestialSystem/CelestialSystem1" unique_id=1095267187]
+light_energy = 3.0
+omni_range = 20000.0
+omni_attenuation = -0.1
+
+[node name="PlanetSystem1" parent="CelestialSystem/CelestialSystem1" unique_id=512211728 instance=ExtResource("8_tipki")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3183.77, 0, 0)
+
+[node name="Planet" parent="CelestialSystem/CelestialSystem1/PlanetSystem1" unique_id=1378551634 instance=ExtResource("9_cel")]
+mass = 1000.0
+radius = 80.0
+color = Color(0.4, 0.6, 1, 1)
+is_dominant = true
+
+[node name="MoonSystem" parent="CelestialSystem/CelestialSystem1/PlanetSystem1" unique_id=1486014465 instance=ExtResource("8_tipki")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -137.64624, 0, 0)
+
+[node name="Celestial" parent="CelestialSystem/CelestialSystem1/PlanetSystem1/MoonSystem" unique_id=916681004 instance=ExtResource("9_cel")]
+radius = 25.0
+
+[node name="PlanetSystem2" parent="CelestialSystem/CelestialSystem1" unique_id=689757741 instance=ExtResource("8_tipki")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1808.2476, 0, 0)
+
+[node name="Planet" parent="CelestialSystem/CelestialSystem1/PlanetSystem2" unique_id=769974027 instance=ExtResource("9_cel")]
+mass = 800.0
+radius = 60.0
+color = Color(0.9, 0.5, 0.3, 1)
+is_dominant = true
+
+[node name="CelestialSystem2" parent="CelestialSystem" unique_id=30553615 instance=ExtResource("8_tipki")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -14179.557, 0, 14741.523)
+
+[node name="OmniLight3D" type="OmniLight3D" parent="CelestialSystem/CelestialSystem2" unique_id=83245356]
+light_energy = 3.0
+omni_range = 20000.0
+omni_attenuation = -0.1
+
+[node name="Star" parent="CelestialSystem/CelestialSystem2" unique_id=1575210087 instance=ExtResource("9_cel")]
+mass = 1000000.0
+radius = 300.0
+type = "star"
+color = Color(1, 0.85, 0.4, 1)
+is_dominant = true
+
+[node name="CelestialSystem" parent="CelestialSystem/CelestialSystem2" unique_id=1040257367 instance=ExtResource("8_tipki")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2088.998, 0, -462.1526)
+
+[node name="Celestial" parent="CelestialSystem/CelestialSystem2/CelestialSystem" unique_id=1313456684 instance=ExtResource("9_cel")]
+mass = 2000.0
+radius = 100.0

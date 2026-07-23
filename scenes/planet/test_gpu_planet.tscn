@@ -1,0 +1,36 @@
+[gd_scene format=3 uid="uid://c51mu0lf512mq"]
+
+[ext_resource type="Script" uid="uid://b5fjitb743vfj" path="res://scripts/planet/gpu_planet.gd" id="1_gp"]
+[ext_resource type="Script" uid="uid://cjg2w1cypjy4u" path="res://scripts/core/orbit_camera.gd" id="2_qb3ud"]
+[ext_resource type="Script" uid="uid://bcjua5g2udx5y" path="res://scripts/core/fps_hud.gd" id="3_ql8r7"]
+
+[sub_resource type="Environment" id="Env_main"]
+background_mode = 1
+background_color = Color(0.04, 0.04, 0.06, 1)
+glow_enabled = true
+
+[sub_resource type="Compositor" id="Compositor_ditsu"]
+
+[node name="TestGpuPlanet" type="Node3D" unique_id=1095358169]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1943057790]
+environment = SubResource("Env_main")
+compositor = SubResource("Compositor_ditsu")
+
+[node name="GpuPlanet" type="Node3D" parent="." unique_id=2024854794 node_paths=PackedStringArray("camera")]
+script = ExtResource("1_gp")
+camera = NodePath("../Camera3D")
+
+[node name="OmniLight3D" type="OmniLight3D" parent="." unique_id=1278097040]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 80, 180, 220)
+light_energy = 2.5
+omni_range = 8192.0
+omni_attenuation = 0.0
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1625129523]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 280)
+fov = 60.0
+script = ExtResource("2_qb3ud")
+
+[node name="FPSHUD" type="CanvasLayer" parent="." unique_id=1581266594]
+script = ExtResource("3_ql8r7")
