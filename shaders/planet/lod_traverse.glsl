@@ -91,7 +91,10 @@ void main() {
 	vec2 A_bary = vec2(0.0, 0.0);
 	vec2 B_bary = vec2(1.0, 0.0);
 	vec2 C_bary = vec2(0.0, 1.0);
+	// 记录父三角形(level-1)角点, 供下方 parent_split 的"父中心距离"判据用。level==0 时无父, 不用。
+	vec3 pA = A, pB = B, pC = C;
 	for (int b = level - 1; b >= 0; b--) {
+		if (b == 0) { pA = A; pB = B; pC = C; }   // 应用最后一次细分前的状态 = 父三角形
 		int digit = (idx >> (2 * b)) & 3;
 		vec3 ab = normalize(A + B);
 		vec3 bc = normalize(B + C);
@@ -128,7 +131,18 @@ void main() {
 	float dist = distance(pc.cam_pos_pad.xyz, center_world);
 	float sd_l = pc.consts.x / exp2(float(level));   // split_d(level) = C_const / 2^level
 	bool self_no_split = (level >= maxLevel) || (dist >= sd_l);
-	bool parent_split = (level == 0) || (dist < sd_l * 2.0);
+	// parent_split 必须用【父三角形中心】到相机的距离, 而不是本节点中心的 dist。
+	// 每个节点中心 ≠ 其父中心; 若用自己的 dist 判"父是否细分", 父子会在 LOD 壳边界(dist≈sd)
+	// 上产生分歧 → 出现空洞(无叶)/重叠(双叶), 表现为一圈 artifact。用父中心距离则父子判断一致。
+	bool parent_split;
+	if (level == 0) {
+		parent_split = true;
+	} else {
+		vec3 p_center_dir = normalize(pA + pB + pC);
+		vec3 p_center_world = pc.planet_center_pad.xyz + p_center_dir * pc.cam_pos_pad.w;
+		float parent_dist = distance(pc.cam_pos_pad.xyz, p_center_world);
+		parent_split = (parent_dist < pc.consts.x / exp2(float(level - 1)));   // parent_dist < sd_{level-1}
+	}
 	if (!(self_no_split && parent_split)) {
 		return;
 	}

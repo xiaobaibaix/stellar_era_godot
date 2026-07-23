@@ -294,9 +294,13 @@ void vertex() {
 		float neps = u_normal_eps;
 		vec3 d1 = normalize(d + t1 * neps);
 		vec3 d2 = normalize(d + t2 * neps);
+		// 差分基点用【d 方向的真实地形表面点】surf0, 而非 displaced。焊接顶点的 displaced 已滑到
+		// 邻居 chord 上(离开地形表面), 用它做差分会算出错误/翻转的法线 → 焊接边(正好是 LOD 壳
+		// 一圈)在方向光下发黑。用 surf0 则法线始终是平滑的地形表面法线, 与非焊接顶点一致。
+		vec3 surf0 = d * (u_radius + terrain_height(d) * u_max_height);
 		vec3 p1 = d1 * (u_radius + terrain_height(d1) * u_max_height);
 		vec3 p2 = d2 * (u_radius + terrain_height(d2) * u_max_height);
-		vec3 n = normalize(cross(p1 - displaced, p2 - displaced));
+		vec3 n = normalize(cross(p1 - surf0, p2 - surf0));
 		if (dot(n, d) < 0.0) n = -n;   // 与 terrain.gdshader 逐位一致: 强制法线外向(dot(n,d)>0)
 		// cull_front 下引擎会自动翻 NORMAL 做双面 shading, 这里先翻一次让它翻回来 → 外向法线参与光照。
 		NORMAL = -n;
