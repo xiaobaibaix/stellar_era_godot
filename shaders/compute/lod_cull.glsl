@@ -35,6 +35,23 @@ layout(set = 4, binding = 0, std140) uniform FrameData {
 // Phase 4: LOD lookup texture, 20 face × 64×64 R8UI。每 cell 存覆盖它的叶的 level。
 // 边 query 点 = mid + (1/64) * normalize(mid - 对角 bary) 外推 1 cell(详见 lodtex_selftest.gd)。
 layout(set = 5, binding = 0, r8ui) readonly uniform uimage2DArray lodtex;
+// Phase 4.5: 邻接表 60 ints, [face*3+edge] = neighbor_face index。OOB query 时跨面 sample 用。
+layout(set = 6, binding = 0, std430) readonly buffer AdjBuf { int neighbor_face[60]; } adjacency;
+
+// Phase 4.5: RAW_VERTS + FACES(与 lod_traverse.glsl 逐位一致), 用来构邻居 face 3 角点方向。
+const float PHI = 1.6180339887498948482;
+const vec3 RAW_VERTS[12] = vec3[12](
+	vec3(-1.0, PHI, 0.0), vec3(1.0, PHI, 0.0), vec3(-1.0, -PHI, 0.0), vec3(1.0, -PHI, 0.0),
+	vec3(0.0, -1.0, PHI), vec3(0.0, 1.0, PHI), vec3(0.0, -1.0, -PHI), vec3(0.0, 1.0, -PHI),
+	vec3(PHI, 0.0, -1.0), vec3(PHI, 0.0, 1.0), vec3(-PHI, 0.0, -1.0), vec3(-PHI, 0.0, 1.0)
+);
+const int FACES[60] = int[60](
+	0, 11, 5,  0, 5, 1,  0, 1, 7,  0, 7, 10, 0, 10, 11,
+	1, 5, 9,  5, 11, 4, 11, 10, 2, 10, 7, 6, 7, 1, 8,
+	3, 9, 4,  3, 4, 2,  3, 2, 6,  3, 6, 8,  3, 8, 9,
+	4, 9, 5,  2, 4, 11, 6, 2, 10, 8, 6, 7,  9, 8, 1
+);
+const int FACE_COUNT = 20;
 
 layout(push_constant, std430) uniform Push {
 	int mode;        // 0 = cull, -1 = reset counter, -2 = metadata(count → META_ROW)
@@ -46,13 +63,65 @@ layout(push_constant, std430) uniform Push {
 const int MAX_PATCHES = 4096;
 const int META_ROW = MAX_PATCHES;
 
-// Phase 4: lodtex 安全采样。OOB(u<0 || v<0 || u+v>1) → 返回 0(面外无邻居, Phase 4.5 跨面处理)。
-// 否则 cell (floor(u*64), floor(v*64)) clamp [0, 63] → lodtex[face, j, i]。
-int _sample_lodtex_safe(int face, vec2 uv) {
-	if (uv.x < 0.0 || uv.y < 0.0 || uv.x + uv.y > 1.0) return 0;
+// Phase 4: lodtex 面内采样。OOB(u<0||v<0||u+v>1) → 返回 -1(哨兵, 让调用方走跨面路径)。
+int _sample_lodtex_inface(int face, vec2 uv) {
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x + uv.y > 1.0) return -1;
 	int ci = clamp(int(floor(uv.x * 64.0)), 0, 63);
 	int cj = clamp(int(floor(uv.y * 64.0)), 0, 63);
 	return int(imageLoad(lodtex, ivec3(ci, cj, face)).x);
+}
+
+// Phase 4.5: lodtex 跨面采样。从 self patch edge midpoint 3D 方向出发, 沿"指向 neighbor face
+// center"方向走一小步, 投影到 neighbor face-bary 平面, sample lodtex[neighbor]。
+// 关键: 不能用 bary uv OOB 外推 → 3D, 因为 normalize 会让 q3 离开 face plane, 落到别处。
+// 必须直接在 3D 算"指向邻居"的方向。
+// A/B/C 是 self patch 3 角点方向(单位球)。self_edge: 0=AB, 1=BC, 2=CA。
+int _sample_lodtex_cross(int self_face, int self_edge, vec3 A, vec3 B, vec3 C) {
+	int nf = adjacency.neighbor_face[self_face * 3 + self_edge];
+	if (nf < 0) return 0;
+	// self edge midpoint 3D 方向
+	vec3 mid_3d;
+	if (self_edge == 0) mid_3d = normalize(A + B);
+	else if (self_edge == 1) mid_3d = normalize(B + C);
+	else mid_3d = normalize(C + A);
+	// neighbor face 3 角点方向 + center
+	vec3 A_n = normalize(RAW_VERTS[FACES[nf * 3]]);
+	vec3 B_n = normalize(RAW_VERTS[FACES[nf * 3 + 1]]);
+	vec3 C_n = normalize(RAW_VERTS[FACES[nf * 3 + 2]]);
+	vec3 nf_center = normalize(A_n + B_n + C_n);
+	// 从 midpoint 沿"指向 neighbor center"的切线方向走一步, 让 q3 落到 neighbor face 球面三角内。
+	// 用切线方向(扣掉 radial 分量)而非 chord, 保持 q3 在球面上。eps_3d=0.1 ≈ 5.7° 弧度,
+	// 约邻居面 1/10 大小, 足够跨过边界曲率让投影落进三角形(eps=0.01 投影会卡到边外 u_n<0)。
+	vec3 to_center = nf_center - mid_3d;
+	float radial_dot = dot(to_center, mid_3d);
+	vec3 tangent = to_center - radial_dot * mid_3d;
+	vec3 tangent_dir = normalize(tangent + vec3(1e-20));
+	float eps_3d = 0.1;
+	vec3 q3 = normalize(mid_3d + eps_3d * tangent_dir);
+	// 投影 q3 到 neighbor face-bary 平面: 解 q3-A_n = s*(B_n-A_n) + t*(C_n-A_n) 2x2 系统
+	vec3 ABn = B_n - A_n;
+	vec3 ACn = C_n - A_n;
+	vec3 AQn = q3 - A_n;
+	float a11 = dot(ABn, ABn);
+	float a12 = dot(ABn, ACn);
+	float a22 = dot(ACn, ACn);
+	float b1 = dot(AQn, ABn);
+	float b2 = dot(AQn, ACn);
+	float det = a11 * a22 - a12 * a12;
+	if (abs(det) < 1e-10) return 0;
+	float u_n = (a22 * b1 - a12 * b2) / det;
+	float v_n = (a11 * b2 - a12 * b1) / det;
+	if (u_n < 0.0 || v_n < 0.0 || u_n + v_n > 1.0) return 0;
+	int ci = clamp(int(floor(u_n * 64.0)), 0, 63);
+	int cj = clamp(int(floor(v_n * 64.0)), 0, 63);
+	return int(imageLoad(lodtex, ivec3(ci, cj, nf)).x);
+}
+
+// 综合: OOB → 跨面(用 3D 方向算 query), 否则面内(用 bary query)。
+int _sample_lodtex_smart(int face, int edge, vec2 uv, vec3 A, vec3 B, vec3 C) {
+	int inface = _sample_lodtex_inface(face, uv);
+	if (inface >= 0) return inface;
+	return _sample_lodtex_cross(face, edge, A, B, C);
 }
 
 void main() {
@@ -136,26 +205,25 @@ void main() {
 		return;
 	}
 
-	// ---- Phase 4: 算 3 边的 lodDelta(自己 - 邻居, max(0, ...)) ----
-	// 边端点 bary(已经在 t3 / t4 里):
-	//   AB: A=t3.xy, B=t3.zw;   BC: B=t3.zw, C=t4.xy;   CA: C=t4.xy, A=t3.xy
-	// 对角(用来定 outward 方向): AB→C, BC→A, CA→B
+	// ---- Phase 4 + 4.5: 算 3 边的 lodDelta(自己 - 邻居, max(0, ...)) ----
+	// 面内邻居: 直接 sample lodtex[face]。跨面邻居(OOB query): 投影到 neighbor face-bary,
+	// sample lodtex[neighbor]。A/B/C 是 self patch 3 角点方向(用于跨面 3D→bary 投影)。
 	float lod_self = float(level);
 	float eps_uv = 1.0 / 64.0;   // 整 cell 宽外推(lodtex_selftest (B) 验证)
-	// AB 边
+	// AB 边(edge_idx=0)
 	vec2 mid_ab = (A_bary + B_bary) * 0.5;
 	vec2 out_ab = mid_ab - C_bary;
-	float n_lod_ab = float(_sample_lodtex_safe(face, mid_ab + eps_uv * normalize(out_ab + vec2(1e-8))));
+	float n_lod_ab = float(_sample_lodtex_smart(face, 0, mid_ab + eps_uv * normalize(out_ab + vec2(1e-8)), A, B, C));
 	float lod_d_ab = max(0.0, lod_self - n_lod_ab);
-	// BC 边
+	// BC 边(edge_idx=1)
 	vec2 mid_bc = (B_bary + C_bary) * 0.5;
 	vec2 out_bc = mid_bc - A_bary;
-	float n_lod_bc = float(_sample_lodtex_safe(face, mid_bc + eps_uv * normalize(out_bc + vec2(1e-8))));
+	float n_lod_bc = float(_sample_lodtex_smart(face, 1, mid_bc + eps_uv * normalize(out_bc + vec2(1e-8)), A, B, C));
 	float lod_d_bc = max(0.0, lod_self - n_lod_bc);
-	// CA 边
+	// CA 边(edge_idx=2)
 	vec2 mid_ca = (C_bary + A_bary) * 0.5;
 	vec2 out_ca = mid_ca - B_bary;
-	float n_lod_ca = float(_sample_lodtex_safe(face, mid_ca + eps_uv * normalize(out_ca + vec2(1e-8))));
+	float n_lod_ca = float(_sample_lodtex_smart(face, 2, mid_ca + eps_uv * normalize(out_ca + vec2(1e-8)), A, B, C));
 	float lod_d_ca = max(0.0, lod_self - n_lod_ca);
 
 	// ---- 通过 → 原子发射到 cull_tex ----

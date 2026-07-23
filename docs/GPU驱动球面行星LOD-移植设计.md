@@ -732,3 +732,69 @@ cull metadata (count → META_ROW)
 ```
 
 新增 2 个 dispatch（reset + rasterize lodtex），各 1280 / 64 workgroup。性能影响 < 5%。
+
+---
+
+## 20. Phase 4.5 实现决策（跨面接缝焊接）
+
+Phase 4 处理面内, Phase 4.5 处理 ico 30 边跨面邻居。用户截图确认 Phase 4 完成后剩 1-2 条沿"经线"(实际是 ico 面边界)的裂缝, 就是跨面没焊。
+
+### 20.1 邻接表存储
+
+`gpu_ico.build_adjacency()` 返回 `adj[fi][ei] = {neighbor_face, neighbor_edge, flipped}`(已存在, Phase 0 验证流形)。compositor setup() 时提取 neighbor_face 字段成 PackedInt32Array(60 ints, [face*3+edge])上传为 storage buffer。cull shader `layout(set=6, binding=0, std430) readonly buffer AdjBuf { int neighbor_face[60]; } adjacency;` 只读。
+
+### 20.2 跨面 query 关键反直觉: bary 空间 "outward" ≠ 3D "across edge"
+
+踩过的坑: 先用 self bary 空间 eps outward 算 query_uv (OOB), 再 normalize(A*w+B*u+C*v) 得 3D 方向 q3, 投影到 neighbor face-bary。结果投影后 u_n<0 落到 neighbor 三角形外。
+
+根因: bary 空间 outward 是"远离 C 角", 但 normalize 让 q3 离开 face plane, 实际跑去了球面上别处。纸面上 bary OOB 应该等于 3D 跨边, 但球面+平面混合后不等于。
+
+正确做法: **直接在 3D 算 query 方向**, 不走 bary。从 self edge midpoint 3D 方向出发, 沿"指向 neighbor face center 的切线方向"走一步, 投影到 neighbor face-bary plane, sample lodtex[neighbor]。
+
+### 20.3 query 3D 计算(关键参数)
+
+```glsl
+mid_3d = normalize(A + B)  // 或 B+C / C+A, 按 edge
+nf_center = normalize(A_n + B_n + C_n)
+tangent_dir = normalize((nf_center - mid_3d) - dot(nf_center-mid_3d, mid_3d)*mid_3d)  // 切线(扣 radial)
+q3 = normalize(mid_3d + eps_3d * tangent_dir)
+```
+
+**eps_3d = 0.1**(约 5.7° 弧度, 邻居面 1/10 大小)。踩过的坑: eps=0.01 太小, q3 几乎卡在 shared edge 上, 投影后落到 face 三角形外(u_n=-0.05)。eps=0.1 投影稳稳落进(u_n=+0.04)。eps 不必更大, 否则可能越过邻居面到第三个面。
+
+### 20.4 投影: 球面 3D → neighbor face-bary 平面
+
+```glsl
+vec3 ABn = B_n - A_n; vec3 ACn = C_n - A_n; vec3 AQn = q3 - A_n;
+// 解 AQn = s*ABn + t*ACn 的 2x2 系统
+det = a11*a22 - a12*a12
+u_n = (a22*b1 - a12*b2) / det
+v_n = (a11*b2 - a12*b1) / det
+```
+
+平面投影(非球面 bary)。对 ico face 小曲面误差可忽略。`u_n<0 || v_n<0 || u_n+v_n>1` 时返回 0(投影失败 fallback)。
+
+### 20.5 OOB 触发跨面路径
+
+cull main 里 3 边各算 self bary query_uv(OOB 检测), OOB 时走 cross-face path(用 3D 计算), 否则走 face-internal path(用 bary 直接 sample)。两路独立, 面内逻辑(Phase 4)不变。
+
+### 20.6 RAW_VERTS / FACES 在 cull shader 内硬编码
+
+cull shader 加 `const vec3 RAW_VERTS[12]` 和 `const int FACES[60]`(与 lod_traverse.glsl 逐位一致), 用来构 neighbor face 3 角点方向。**没走 uniform buffer**, 因为只 60 顶点/索引, 硬编码更简单且零绑定开销。
+
+### 20.7 走过的弯路总结
+
+| 尝试 | 结果 | 教训 |
+|---|---|---|
+| bary uv OOB → normalize → 3D → 投影 | u_n<0 落到三角形外 | normalize 让 q3 离开 face plane, bary 空间 outward ≠ 3D across edge |
+| chord direction + eps=0.01 | u_n=-0.05 仍外 | eps 太小, 球面曲面把 q3 "拉回"边附近 |
+| chord direction + eps=0.1 | u_n=+0.04 进去 | 加大 eps 能跨过曲面, 但 chord 不精确 |
+| tangent direction + eps=0.1 | 同上, 更准 | tangent 保持 q3 在球面上, 推荐做法 |
+
+### 20.8 性能
+
+cull shader per patch 增加: 3 edges × (3D query 计算 + 2x2 投影解算) ≈ 30 float ops。per frame 242 patches × 30 = 7260 ops。trivial。storage buffer 60 ints = 240 bytes, 全局一份。
+
+### 20.9 跨面 weld 视觉效果
+
+完成后球面无可见裂缝。沿 ico 30 边的"经线"裂缝消失, 全球 LOD 表面连续。

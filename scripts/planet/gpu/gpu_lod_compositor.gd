@@ -108,6 +108,7 @@ func _notification(what: int) -> void:
 		_free_res(_minmax_tex); _minmax_tex = RID()
 		_free_res(_minmax_sampler); _minmax_sampler = RID()
 		_free_res(_frame_ubo); _frame_ubo = RID()
+		_free_res(_adjacency_buf); _adjacency_buf = RID()
 		_ready = false
 
 
@@ -147,8 +148,23 @@ func setup(material_rid: RID) -> bool:
 		var zeros := PackedByteArray()
 		zeros.resize(FRAME_UBO_SIZE)
 		_frame_ubo = _rd.uniform_buffer_create(FRAME_UBO_SIZE, zeros)
+	if not _adjacency_buf.is_valid():
+		_adjacency_buf = _create_adjacency_buf()
 	_ready = true
 	return true
+
+
+# Phase 4.5: 60 ints, 每 (face*3+edge) → neighbor_face index。从 GpuIco.build_adjacency() 提取。
+# 全局只此一份(ico 拓扑固定), setup() 一次创建, cull shader 只读。
+func _create_adjacency_buf() -> RID:
+	var adj := GpuIco.build_adjacency()
+	var lut := PackedInt32Array()
+	lut.resize(GpuIco.FACE_COUNT * GpuIco.EDGE_PER_FACE)
+	for fi in range(GpuIco.FACE_COUNT):
+		for ei in range(GpuIco.EDGE_PER_FACE):
+			var entry: Dictionary = adj[fi][ei]
+			lut[fi * GpuIco.EDGE_PER_FACE + ei] = int(entry.get("neighbor_face", -1))
+	return _rd.storage_buffer_create(lut.size() * 4, lut.to_byte_array())
 
 
 # GpuPlanet 烘 MinMax 后调一次, 把金字塔上传为 Texture2DArray。param 变 → 重新调。
@@ -480,13 +496,19 @@ func _ensure_cull_sets(write_idx: int) -> void:
 	u_lod.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
 	u_lod.binding = 0
 	u_lod.add_id(_lodtex[write_idx])
+	# Phase 4.5: set 6 = adjacency buffer(60 ints, 全局共享, cull 跨面 query 用)
+	var u_adj := RDUniform.new()
+	u_adj.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+	u_adj.binding = 0
+	u_adj.add_id(_adjacency_buf)
 	var s0 := UniformSetCacheRD.get_cache(_cull_shader, 0, [u_trav])
 	var s1 := UniformSetCacheRD.get_cache(_cull_shader, 1, [u_cull])
 	var s2 := UniformSetCacheRD.get_cache(_cull_shader, 2, [u_mm])
 	var s3 := UniformSetCacheRD.get_cache(_cull_shader, 3, [u_ctr])
 	var s4 := UniformSetCacheRD.get_cache(_cull_shader, 4, [u_ubo])
 	var s5 := UniformSetCacheRD.get_cache(_cull_shader, 5, [u_lod])
-	_cull_sets[write_idx] = [s0, s1, s2, s3, s4, s5]
+	var s6 := UniformSetCacheRD.get_cache(_cull_shader, 6, [u_adj])
+	_cull_sets[write_idx] = [s0, s1, s2, s3, s4, s5, s6]
 
 
 func _dispatch_traverse(write_idx: int, pc_base: PackedFloat32Array, level: float, groups: int) -> void:
@@ -512,6 +534,7 @@ func _dispatch_cull(write_idx: int, mode: int, groups: int) -> void:
 	_rd.compute_list_bind_uniform_set(cl, sets[3], 3)
 	_rd.compute_list_bind_uniform_set(cl, sets[4], 4)
 	_rd.compute_list_bind_uniform_set(cl, sets[5], 5)   # Phase 4: lodtex
+	_rd.compute_list_bind_uniform_set(cl, sets[6], 6)   # Phase 4.5: adjacency
 	_rd.compute_list_set_push_constant(cl, pc.to_byte_array(), pc.size() * 4)
 	_rd.compute_list_dispatch(cl, groups, 1, 1)
 	_rd.compute_list_end()
