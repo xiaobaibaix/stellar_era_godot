@@ -227,7 +227,9 @@ void vertex() {
 		bool on_bc = abs(u + v - 1.0) < edge_tol && u > edge_tol && v > edge_tol;
 		bool on_ca = abs(u) < edge_tol && v > edge_tol && v < 1.0 - edge_tol;
 		if (on_ab && lod_d_ab > 0.0) {
-			float seg = exp2(lod_d_ab);
+			// seg 夹到 patch_res 上限: 邻居比 log2(patch_res) 还粗时, seg 会超过分辨率, 令 u_e>1 →
+			// mix(A,B,u_e) 外插到 B 之外 → 顶点飞出成尖刺。夹住后整条边最多塌成 A-B 直线, 不外插。
+			float seg = min(exp2(lod_d_ab), u_patch_res);
 			float kf = u * u_patch_res;       // 顶点在边上的 float index
 			float km = mod(kf, seg);           // 余数 [0, seg)
 			if (km > 0.5) {                    // 内部多余顶点(km=0 是对齐 coarse 端点, 不 slide)
@@ -244,7 +246,7 @@ void vertex() {
 				h = (length(displaced) - u_radius) / u_max_height;
 			}
 		} else if (on_bc && lod_d_bc > 0.0) {
-			float seg = exp2(lod_d_bc);
+			float seg = min(exp2(lod_d_bc), u_patch_res);
 			float kf = v * u_patch_res;
 			float km = mod(kf, seg);
 			if (km > 0.5) {
@@ -261,7 +263,7 @@ void vertex() {
 				h = (length(displaced) - u_radius) / u_max_height;
 			}
 		} else if (on_ca && lod_d_ca > 0.0) {
-			float seg = exp2(lod_d_ca);
+			float seg = min(exp2(lod_d_ca), u_patch_res);
 			float kf = v * u_patch_res;
 			float km = mod(kf, seg);
 			if (km > 0.5) {

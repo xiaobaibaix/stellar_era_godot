@@ -91,8 +91,10 @@ void main() {
 	int j0 = max(0, int(floor(bmin.y * float(LODTEX_RES))));
 	int j1 = min(LODTEX_RES - 1, int(ceil(bmax.y * float(LODTEX_RES))));
 
-	// 把 level 量化成 uint(R8UI 范围 0..255, level 最大 6 远小于 255, 安全)。
-	uint lvl_u = uint(level);
+	// 存 level+1(R8UI 范围 0..255, level 最大 6 → 存 7, 安全)。
+	// 0 保留给"空/无叶"(reset 值), 从而与合法的 level 0 区分 —— 否则 cull 采到空 cell 读 0 会
+	// 误当成"邻居 level 0"→ 巨大 lodDelta → 焊接外插尖刺。cull 侧解码时 raw-1 还原 level。
+	uint lvl_u = uint(level + 1);
 
 	for (int j = j0; j <= j1; j++) {
 		for (int i = i0; i <= i1; i++) {

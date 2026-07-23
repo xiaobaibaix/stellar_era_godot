@@ -213,17 +213,22 @@ void main() {
 	// AB 边(edge_idx=0)
 	vec2 mid_ab = (A_bary + B_bary) * 0.5;
 	vec2 out_ab = mid_ab - C_bary;
-	float n_lod_ab = float(_sample_lodtex_smart(face, 0, mid_ab + eps_uv * normalize(out_ab + vec2(1e-8)), A, B, C));
+	// lodtex 现存 level+1: raw==0 表示空 cell(无叶)→ 不焊(n_lod=lod_self → lodDelta=0);
+	// raw>=1 → neighbor_level = raw-1。避免空 cell 被误当 level 0 → 巨大 lodDelta → 外插尖刺。
+	int raw_ab = _sample_lodtex_smart(face, 0, mid_ab + eps_uv * normalize(out_ab + vec2(1e-8)), A, B, C);
+	float n_lod_ab = (raw_ab <= 0) ? lod_self : float(raw_ab - 1);
 	float lod_d_ab = max(0.0, lod_self - n_lod_ab);
 	// BC 边(edge_idx=1)
 	vec2 mid_bc = (B_bary + C_bary) * 0.5;
 	vec2 out_bc = mid_bc - A_bary;
-	float n_lod_bc = float(_sample_lodtex_smart(face, 1, mid_bc + eps_uv * normalize(out_bc + vec2(1e-8)), A, B, C));
+	int raw_bc = _sample_lodtex_smart(face, 1, mid_bc + eps_uv * normalize(out_bc + vec2(1e-8)), A, B, C);
+	float n_lod_bc = (raw_bc <= 0) ? lod_self : float(raw_bc - 1);
 	float lod_d_bc = max(0.0, lod_self - n_lod_bc);
 	// CA 边(edge_idx=2)
 	vec2 mid_ca = (C_bary + A_bary) * 0.5;
 	vec2 out_ca = mid_ca - B_bary;
-	float n_lod_ca = float(_sample_lodtex_smart(face, 2, mid_ca + eps_uv * normalize(out_ca + vec2(1e-8)), A, B, C));
+	int raw_ca = _sample_lodtex_smart(face, 2, mid_ca + eps_uv * normalize(out_ca + vec2(1e-8)), A, B, C);
+	float n_lod_ca = (raw_ca <= 0) ? lod_self : float(raw_ca - 1);
 	float lod_d_ca = max(0.0, lod_self - n_lod_ca);
 
 	// ---- 通过 → 原子发射到 cull_tex ----
