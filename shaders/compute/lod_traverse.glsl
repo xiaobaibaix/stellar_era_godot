@@ -52,7 +52,7 @@ const int FACES[60] = int[60](
 	3, 9, 4,  3, 4, 2,  3, 2, 6,  3, 6, 8,  3, 8, 9,
 	4, 9, 5,  2, 4, 11, 6, 2, 10, 8, 6, 7,  9, 8, 1
 );
-const int MAX_PATCHES = 4096;
+const int MAX_PATCHES = 12288;
 const int META_ROW = MAX_PATCHES;   // patch 纹理末行(第 4096 行)存 count, 供 vertex shader 坍缩
 
 void main() {

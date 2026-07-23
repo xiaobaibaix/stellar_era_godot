@@ -20,7 +20,7 @@ class_name GpuPlanet
 extends Node3D
 
 const PATCH_TEX_SLOTS := 6           # 每 patch 6 texel(设计文档 §8.3 终极布局)
-const MAX_PATCHES := 4096            # 与 lod_traverse.glsl / terrain_gpu.gdshader META_ROW 一致
+const MAX_PATCHES := 12288           # 与 lod_traverse.glsl / terrain_gpu.gdshader META_ROW 一致(PATCH_TEX_H=12289, 留 Metal 单边 16384 上限余量)
 const PATCH_TEX_H := MAX_PATCHES + 1 # patch 纹理高(末行存 count)
 const DEFAULT_PATCH_RES := 32        # Phase 2 单叶分辨率/边(四叉树下够用; 越大越平滑越费)
 const MM_NODE_NAME := "GpuPatchMM"

@@ -24,7 +24,7 @@ shader_type spatial;
 render_mode cull_front;
 
 uniform sampler2D u_patchTex;          // 6×(MAX_PATCHES+1) RGBA32F: per-instance patch 数据 + 末行 count
-const int META_ROW = 4096;             // patch 纹理末行(=MAX_PATCHES)存可见 patch 数, 供坍缩守卫读
+const int META_ROW = 12288;            // patch 纹理末行(=MAX_PATCHES)存可见 patch 数, 供坍缩守卫读
 uniform float u_radius = 100.0;
 uniform float u_max_height = 8.0;
 uniform float u_patch_res = 32.0;       // Phase 4: patch mesh 边分辨率(_build_patch_mesh 的 n), 边检测 tol 用

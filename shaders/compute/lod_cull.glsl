@@ -60,7 +60,7 @@ layout(push_constant, std430) uniform Push {
 	int _p2;
 } pc;
 
-const int MAX_PATCHES = 4096;
+const int MAX_PATCHES = 12288;
 const int META_ROW = MAX_PATCHES;
 
 // Phase 4: lodtex 面内采样。OOB(u<0||v<0||u+v>1) → 返回 -1(哨兵, 让调用方走跨面路径)。

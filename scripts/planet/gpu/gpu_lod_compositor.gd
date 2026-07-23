@@ -26,7 +26,7 @@ extends CompositorEffect
 const TRAVERSE_SHADER_PATH := "res://shaders/compute/lod_traverse.glsl"
 const CULL_SHADER_PATH := "res://shaders/compute/lod_cull.glsl"
 const LODTEX_SHADER_PATH := "res://shaders/compute/lod_lodtex.glsl"
-const MAX_PATCHES := 4096          # 与 shader MAX_PATCHES 一致
+const MAX_PATCHES := 12288         # 与 shader MAX_PATCHES 一致(PATCH_TEX_H=12289, 留 Metal 单边 16384 上限余量)
 const PATCH_TEX_W := 6             # 每 patch 6 texel
 const PATCH_TEX_H := MAX_PATCHES + 1   # 末行存 count metadata
 const WG := 64                     # workgroup size(与 glsl local_size_x 一致)

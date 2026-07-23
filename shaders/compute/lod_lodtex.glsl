@@ -29,7 +29,7 @@ layout(push_constant, std430) uniform Push {
 	int _p2;
 } pc;
 
-const int MAX_PATCHES = 4096;
+const int MAX_PATCHES = 12288;
 const int META_ROW = MAX_PATCHES;
 const int LODTEX_RES = 64;
 const int FACE_COUNT = 20;
