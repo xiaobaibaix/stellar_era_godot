@@ -73,6 +73,12 @@ var _frame: int = 0   # 双缓冲帧计数(GpuPlanet 主线程拥有; 决定 com
 var _bake_task_id: int = -1
 var _bake_result: GpuMinMaxData
 var _bake_save_path: String = ""
+# LOD 冻结(调试用): 冻结后 _process 用快照的相机位置/参数驱动 LOD, 不再读实时相机。
+# 配合旁观相机(planet_lod_debug.gd)绕看冻结后的地形。视锥用空 → cull 全通过 → 整球可见。
+var _lod_frozen := false
+var _frozen_cam_pos: Vector3
+var _frozen_c_const: float = 0.0
+var _frozen_frustum: Array = []
 
 
 func _ready() -> void:
@@ -104,16 +110,26 @@ func _process(_delta: float) -> void:
 		return
 	var p: PlanetParams = _effective_params()
 	var write_idx: int = _frame & 1
-	var vp := camera.get_viewport()
-	var vp_h: float = float(vp.size.y) if vp != null else 1080.0
-	var fov_rad: float = deg_to_rad(camera.fov)
-	var k: float = vp_h / (2.0 * tan(fov_rad * 0.5))
-	var c_const: float = p.maxHeight * k / max(p.sseThresholdPixels, 0.001)
-	# 6 视锥平面(world-space, Godot 内向法线约定)。Camera3D.get_frustum 返回顺序:
-	# near, far, left, top, right, bottom(本项不依赖顺序, shader 全 6 平面测一遍)。
-	var frustum: Array = camera.get_frustum() if camera.is_inside_tree() else []
+	var cam_pos: Vector3
+	var c_const: float
+	var frustum: Array
+	if _lod_frozen:
+		# 冻结: 用快照的相机位置/参数; 视锥用空(cull 全通过)→ 整球可见, 旁观相机绕看不缺面。
+		cam_pos = _frozen_cam_pos
+		c_const = _frozen_c_const
+		frustum = _frozen_frustum
+	else:
+		var vp := camera.get_viewport()
+		var vp_h: float = float(vp.size.y) if vp != null else 1080.0
+		var fov_rad: float = deg_to_rad(camera.fov)
+		var k: float = vp_h / (2.0 * tan(fov_rad * 0.5))
+		c_const = p.maxHeight * k / max(p.sseThresholdPixels, 0.001)
+		cam_pos = camera.global_position
+		# 6 视锥平面(world-space, Godot 内向法线约定)。Camera3D.get_frustum 返回顺序:
+		# near, far, left, top, right, bottom(本项不依赖顺序, shader 全 6 平面测一遍)。
+		frustum = camera.get_frustum() if camera.is_inside_tree() else []
 	_lod_comp.set_frame_data({
-		"cam_pos": camera.global_position,
+		"cam_pos": cam_pos,
 		"planet_center": global_position,
 		"radius": p.radius,
 		"maxHeight": p.maxHeight,
@@ -134,6 +150,31 @@ func _process(_delta: float) -> void:
 		if _frame == 1:
 			print("[GpuPlanet] minmax NOT ready → bind fallback (20 面). 检查 set_minmax 是否失败")
 	_frame += 1
+
+
+# ---- LOD 冻结接口(供 planet_lod_debug.gd 调; 调试用) ----
+# 冻结: 快照当前相机位置/C_const, 之后 _process 用快照驱动 LOD; 视锥置空 → cull 全通过 →
+# 整球在冻结后仍全部渲染, 旁观相机可绕到任意角度看清 patch 结构, 不会因旧视锥裁剪而缺面。
+func freeze_lod() -> void:
+	if not is_instance_valid(camera):
+		return
+	var p: PlanetParams = _effective_params()
+	var vp := camera.get_viewport()
+	var vp_h: float = float(vp.size.y) if vp != null else 1080.0
+	var fov_rad: float = deg_to_rad(camera.fov)
+	var k: float = vp_h / (2.0 * tan(fov_rad * 0.5))
+	_frozen_c_const = p.maxHeight * k / max(p.sseThresholdPixels, 0.001)
+	_frozen_cam_pos = camera.global_position
+	_frozen_frustum = []   # 空视锥 → 不裁剪 → 整球可见
+	_lod_frozen = true
+
+
+func unfreeze_lod() -> void:
+	_lod_frozen = false
+
+
+func is_lod_frozen() -> bool:
+	return _lod_frozen
 
 
 # 烘 MinMax(首次 + param 变时)。命中缓存 → 主线程直接 load; 未命中 → 后台线程烘焙, 不阻塞。

@@ -17,6 +17,11 @@
 ## 无效 cell 存哨兵(MIN_SENTINEL, MAX_SENTINEL), 归约时跳过。
 ##
 ## 数值单位: 世界单位(= height_at × maxHeight), 与 radius 同量纲 → min/max 直接给径向包围盒。
+##
+## @tool: GpuPlanet/GpuLodCompositor 是 @tool, 在编辑器里也会加载缓存的 MinMax .res 并调
+## build_pyramid()。若本脚本非 @tool, 编辑器加载出的是"占位实例"(placeholder), 调方法会报
+## "Attempt to call a method on a placeholder instance" → 故本脚本必须 @tool。
+@tool
 class_name GpuMinMaxData
 extends Resource
 
