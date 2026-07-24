@@ -15,6 +15,11 @@
 ## 非 @tool: 只在运行时工作(编辑器里不自动跑, 免得干扰编辑)。
 extends GravityCharacter3D
 
+## 相机旋转控制方式。
+##   MOUSE_LOOK : 捕获鼠标, 移动鼠标即持续看向(FPS 式)。
+##   MIDDLE_DRAG: 鼠标自由(可见), 按住鼠标中键拖动才旋转相机(WASD 移动不影响相机角度)。
+enum CamControl { MOUSE_LOOK, MIDDLE_DRAG }
+
 # ---- 运动参数 ----
 @export_group("Movement")
 ## 行走速度(单位/秒)。
@@ -48,6 +53,8 @@ extends GravityCharacter3D
 ## 开(默认): 无论内置还是外部相机, 都由本控制器接管其位姿/朝向。
 ## 关: 只**读**相机朝向来决定移动方向, 相机位姿完全交给外部(它自己的脚本/rig)控制。
 @export var control_camera: bool = true
+## 相机旋转方式: MOUSE_LOOK = 捕获鼠标持续看向(FPS 式); MIDDLE_DRAG = 鼠标自由, 按住中键拖动才转相机。
+@export var cam_control: CamControl = CamControl.MIDDLE_DRAG
 @export var mouse_sensitivity: float = 0.003
 ## 相机与角色的第三人称距离(初始值)。运行时可用鼠标滚轮拉远/拉近, 在 [cam_distance_min, cam_distance_max] 间调节。
 @export var cam_distance: float = 8.0
@@ -103,6 +110,7 @@ var _cam_snap: bool = false       # 接管相机后第一帧直接放到位(不 
 var _cam_anchor_r: float = -1.0   # 平滑后的相机锚点"离球心半径"(消竖直颤抖); <0 = 未初始化
 var _cam_dist_target: float = 8.0 # 滚轮设定的目标距离(_ready 初始化为 cam_distance)
 var _cam_dist_cur: float = 8.0    # 平滑后的当前距离(每帧向 target 逼近)
+var _orbiting: bool = false       # MIDDLE_DRAG 模式: 是否正按住中键拖动旋转
 
 
 func _ready() -> void:
@@ -392,12 +400,15 @@ func set_camera_active(active: bool) -> void:
 	_cam_active = active and control_camera and _camera != null
 	if not _cam_active:
 		_cam_anchor_r = -1.0   # 交出相机驱动: 重置高度平滑, 下次接管时重新初始化(过渡结束不跳)
+		_orbiting = false
 		return
 	# 相机现在是真正的子节点(由 CameraDirector 重挂到角色下), 不再用 top_level。
 	# 控制器每帧直接设它的**世界**位姿(global_position + look_at), 所以即便挂在会转身的角色下也不会跟着转。
 	_camera.current = true
 	_cam_snap = true   # 下一帧 _process 把相机直接放到跟随位, 避免从星球内/远处 lerp 飞入
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	_orbiting = false
+	# MOUSE_LOOK: 捕获鼠标持续看向; MIDDLE_DRAG: 鼠标自由(可见), 按中键拖动时才临时捕获。
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if cam_control == CamControl.MOUSE_LOOK else Input.MOUSE_MODE_VISIBLE
 
 
 ## 返回第三人称跟随相机应处的世界位姿(供 CameraDirector 做模式切换过渡时的目标位姿; 不改动相机)。
@@ -469,18 +480,33 @@ func _unhandled_input(event: InputEvent) -> void:
 	# 只有激活(驱动相机)时才处理鼠标看向; 否则鼠标交给外部(轨道相机/CameraDirector)。
 	if not _cam_active:
 		return
-	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		_cam_yaw -= event.relative.x * mouse_sensitivity
-		_cam_pitch = clampf(_cam_pitch - event.relative.y * mouse_sensitivity,
-			deg_to_rad(cam_pitch_min_deg), deg_to_rad(cam_pitch_max_deg))
-	elif event is InputEventMouseButton and event.pressed:
-		# 滚轮拉近/拉远第三人称相机(改目标距离, _process 里平滑逼近)。上滚拉近, 下滚拉远。
-		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			_cam_dist_target = clampf(_cam_dist_target - cam_zoom_step, cam_distance_min, cam_distance_max)
-		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			_cam_dist_target = clampf(_cam_dist_target + cam_zoom_step, cam_distance_min, cam_distance_max)
+	if event is InputEventMouseButton:
+		match event.button_index:
+			MOUSE_BUTTON_WHEEL_UP:
+				# 滚轮拉近(改目标距离, _process 里平滑逼近)。
+				if event.pressed:
+					_cam_dist_target = clampf(_cam_dist_target - cam_zoom_step, cam_distance_min, cam_distance_max)
+			MOUSE_BUTTON_WHEEL_DOWN:
+				# 滚轮拉远。
+				if event.pressed:
+					_cam_dist_target = clampf(_cam_dist_target + cam_zoom_step, cam_distance_min, cam_distance_max)
+			MOUSE_BUTTON_MIDDLE:
+				# MIDDLE_DRAG 模式: 按住中键才旋转相机。拖动期间临时捕获鼠标(相对位移旋转、光标不跑出窗口),
+				# 松开恢复自由光标。MOUSE_LOOK 模式下中键不处理(交给外部)。
+				if cam_control == CamControl.MIDDLE_DRAG:
+					_orbiting = event.pressed
+					Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if event.pressed else Input.MOUSE_MODE_VISIBLE
+	elif event is InputEventMouseMotion:
+		# 旋转条件: MOUSE_LOOK 且鼠标已捕获(持续看向); 或 MIDDLE_DRAG 且正按住中键拖动。
+		var do_rotate := (cam_control == CamControl.MOUSE_LOOK and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED) \
+			or (cam_control == CamControl.MIDDLE_DRAG and _orbiting)
+		if do_rotate:
+			_cam_yaw -= event.relative.x * mouse_sensitivity
+			_cam_pitch = clampf(_cam_pitch - event.relative.y * mouse_sensitivity,
+				deg_to_rad(cam_pitch_min_deg), deg_to_rad(cam_pitch_max_deg))
 	elif event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
-		# Esc 释放/捕获鼠标, 方便调试
-		Input.mouse_mode = (Input.MOUSE_MODE_VISIBLE
-			if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
-			else Input.MOUSE_MODE_CAPTURED)
+		# 仅 MOUSE_LOOK 模式: Esc 释放/捕获鼠标, 方便调试。MIDDLE_DRAG 下光标本就自由, 无需处理。
+		if cam_control == CamControl.MOUSE_LOOK:
+			Input.mouse_mode = (Input.MOUSE_MODE_VISIBLE
+				if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+				else Input.MOUSE_MODE_CAPTURED)
