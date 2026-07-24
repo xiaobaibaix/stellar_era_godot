@@ -1,0 +1,245 @@
+# gdlint: disable=variable-name, max-line-length
+## 行星大气 + 体积云 + 体积光(godray)+ 海洋 驱动。挂在 GpuPlanet 下(或场景任意处并指定 planet)。
+##
+## 复刻已删除的旧 planet.gd 的大气/海洋接线, 但数据源改成 GpuPlanet + PlanetParams:
+##   1. 把 AtmosphereCompositor(POST_TRANSPARENT 全屏后处理: 大气散射 + 体积云 + godray)接到场景
+##      WorldEnvironment.compositor, 每帧从 params 推场景参数(半径/散射/云/太阳)给它(经 Mutex)。
+##   2. 建一个海平面球壳(shaders/ocean.gdshader), 半径 = radius + seaLevel×maxHeight; 写不透明色+深度,
+##      让大气/云能正确合成在海面之上。
+##
+## 太阳方向取自场景里的 DirectionalLight3D(其 +Z 轴 = 指向太阳, 与 Godot 对地形的光照方向一致);
+## 没有光源则用 params.sunElevation/sunAzimuth 兜底。
+##
+## 运行时驱动(**非 @tool**): 编辑器里不预览; compositor 与 ocean 均运行时创建, 不写入 .tscn(无序列化污染)。
+class_name PlanetAtmosphere
+extends Node3D
+
+const _OCEAN_SHADER_PATH := "res://shaders/ocean.gdshader"
+# 瑞利/臭氧的波长配比(移植 web): 乘以 params 的强度得到最终 RGB 散射系数。
+const _RAY_RATIO := Vector3(0.1066, 0.3245, 0.6830)
+const _OZO_RATIO := Vector3(0.35, 1.0, 0.045)
+
+## 行星(提供 params + 世界中心)。留空 → 自动用父节点(若父是 GpuPlanet)或全场景查找第一个 GpuPlanet。
+@export var planet: GpuPlanet
+## 主太阳(DirectionalLight3D)。留空 → 全场景查找第一个 DirectionalLight3D。
+@export var sun_light: DirectionalLight3D
+## 总开关(关 = 不建/不驱动大气与海洋)。
+@export var enabled: bool = true
+
+var _atmo: AtmosphereCompositor
+var _we: WorldEnvironment
+var _ocean_mesh: MeshInstance3D
+var _ocean_mat: ShaderMaterial
+var _ocean_shader: Shader
+var _sun_dir: Vector3 = Vector3(0.739, 0.443, 0.515)
+
+
+func _ready() -> void:
+	if not enabled:
+		return
+	_resolve_planet()
+	_resolve_sun()
+	_build_ocean()
+	_build_compositor()
+
+
+func _exit_tree() -> void:
+	# 摘掉大气 compositor effect(避免残留空跑)。
+	if _atmo != null and _we != null and is_instance_valid(_we) and _we.compositor != null:
+		var effs: Array[CompositorEffect] = _we.compositor.compositor_effects.duplicate()
+		effs.erase(_atmo)
+		_we.compositor.compositor_effects = effs
+	_atmo = null
+
+
+func _process(_delta: float) -> void:
+	if not enabled or planet == null or planet.params == null:
+		return
+	_update_sun()
+	_resize_ocean()
+	_apply_ocean_uniforms()
+	_push_frame()
+
+
+# ---- 解析引用 ----
+func _resolve_planet() -> void:
+	if planet != null:
+		return
+	var p := get_parent()
+	while p != null:
+		if p is GpuPlanet:
+			planet = p
+			return
+		p = p.get_parent()
+	planet = _scan(get_tree().root, "GpuPlanet") as GpuPlanet
+
+
+func _resolve_sun() -> void:
+	if sun_light != null:
+		return
+	sun_light = _scan(get_tree().root, "DirectionalLight3D") as Node3D
+
+
+func _scan(n: Node, type_name: String) -> Node:
+	if (type_name == "GpuPlanet" and n is GpuPlanet) or (type_name == "DirectionalLight3D" and n is DirectionalLight3D):
+		return n
+	for c in n.get_children():
+		var r := _scan(c, type_name)
+		if r != null:
+			return r
+	return null
+
+
+func _scan_world_env(n: Node) -> WorldEnvironment:
+	if n is WorldEnvironment:
+		return n as WorldEnvironment
+	for c in n.get_children():
+		var r := _scan_world_env(c)
+		if r != null:
+			return r
+	return null
+
+
+func _center() -> Vector3:
+	return planet.global_position if planet != null else global_position
+
+
+# ---- 海洋球壳 ----
+func _build_ocean() -> void:
+	if _ocean_shader == null:
+		_ocean_shader = load(_OCEAN_SHADER_PATH)
+	_ocean_mesh = MeshInstance3D.new()
+	_ocean_mesh.name = "OceanShell"
+	_ocean_mesh.top_level = true   # 由脚本直接设世界位姿(球心 + 半径缩放), 不受父变换影响
+	var sm := SphereMesh.new()
+	sm.radius = 1.0
+	sm.height = 2.0
+	sm.radial_segments = 128
+	sm.rings = 96
+	_ocean_mesh.mesh = sm
+	_ocean_mat = ShaderMaterial.new()
+	_ocean_mat.shader = _ocean_shader
+	_ocean_mesh.material_override = _ocean_mat
+	add_child(_ocean_mesh)
+	_ocean_mesh.owner = null   # 运行时创建, 不写入 .tscn
+
+
+func _resize_ocean() -> void:
+	if _ocean_mesh == null:
+		return
+	var p := planet.params
+	var ground_r: float = p.radius + p.seaLevel * p.maxHeight
+	# 世界: 单位球缩到 ground_r, 中心 = 行星中心。
+	_ocean_mesh.global_transform = Transform3D(Basis().scaled(Vector3.ONE * ground_r), _center())
+	_ocean_mesh.visible = p.showOcean
+
+
+func _apply_ocean_uniforms() -> void:
+	if _ocean_mat == null:
+		return
+	var p := planet.params
+	_ocean_mat.set_shader_parameter("u_deep", Vector3(p.oceanDeep.r, p.oceanDeep.g, p.oceanDeep.b))
+	_ocean_mat.set_shader_parameter("u_shallow", Vector3(p.oceanShallow.r, p.oceanShallow.g, p.oceanShallow.b))
+	_ocean_mat.set_shader_parameter("u_ambient", p.oceanAmbient)
+	_ocean_mat.set_shader_parameter("u_spec_power", p.oceanSpecPower)
+	_ocean_mat.set_shader_parameter("u_spec_strength", p.oceanSpecStrength)
+
+
+# ---- 大气 compositor ----
+func _build_compositor() -> void:
+	if _atmo != null:
+		return
+	_we = _scan_world_env(get_tree().root)
+	if _we == null:
+		push_warning("[PlanetAtmosphere] 场景无 WorldEnvironment, 大气不生效")
+		return
+	var comp: Compositor = _we.compositor
+	if comp == null:
+		comp = Compositor.new()
+		_we.compositor = comp
+	_atmo = AtmosphereCompositor.new()
+	# 追加到现有 effects(与 GpuPlanet 的 LOD/Hi-Z compositor 共存; 各按 pass 时机触发, 顺序无碍)。
+	var effs: Array[CompositorEffect] = comp.compositor_effects.duplicate()
+	effs.append(_atmo)
+	comp.compositor_effects = effs
+
+
+# ---- 太阳方向 ----
+func _update_sun() -> void:
+	var p := planet.params
+	if sun_light != null and is_instance_valid(sun_light):
+		# DirectionalLight3D: 光沿 -Z 传播 → +Z(basis.z)= 指向太阳, 与 Godot 对地形的光照方向一致。
+		_sun_dir = sun_light.global_transform.basis.z.normalized()
+	else:
+		var el := deg_to_rad(p.sunElevation)
+		var az := deg_to_rad(p.sunAzimuth)
+		_sun_dir = Vector3(cos(el) * cos(az), sin(el), cos(el) * sin(az)).normalized()
+	if _ocean_mat != null:
+		_ocean_mat.set_shader_parameter("u_sun_dir", _sun_dir)
+		_ocean_mat.set_shader_parameter("u_sun_pos", _center() + _sun_dir * 1.0e9)
+		_ocean_mat.set_shader_parameter("u_sun_is_local", 0.0)
+		_ocean_mat.set_shader_parameter("u_sun_range", 1.0e9)
+		_ocean_mat.set_shader_parameter("u_sun_atten", 0.0)
+		_ocean_mat.set_shader_parameter("u_sun_count", 1)
+
+
+# ---- 每帧推参数给大气 compositor(主线程 → 渲染线程经 Mutex) ----
+func _push_frame() -> void:
+	if _atmo == null:
+		return
+	var p := planet.params
+	var R: float = p.radius
+	var center := _center()
+	var ground_r: float = R + p.seaLevel * p.maxHeight
+	var sun_pos := center + _sun_dir * 1.0e9
+	_atmo.enabled = p.showAtmosphere   # 关 = 跳过整条后处理(含云/godray)
+	_atmo.set_frame_data({
+		"time": Time.get_ticks_msec() / 1000.0,
+		"sun_dir": _sun_dir,
+		"sun_pos": sun_pos,
+		"sun_is_local": 0.0,
+		"sun_dirs": [_sun_dir],
+		"sun_positions": [sun_pos],
+		"sun_is_locals": [0.0],
+		"sun_ranges": [1.0e9],
+		"sun_attens": [0.0],
+		"sun_count": 1,
+		"planet_center": center,
+		"rground": ground_r,
+		"ratmo": R * p.atmoScale,
+		"cbottom": R * p.cloudBottom,
+		"ctop": R * p.cloudTop,
+		"scatter_r": _RAY_RATIO * p.atmoRayleigh,
+		"scatter_m": p.atmoMie,
+		"mie_g": p.atmoMieG,
+		"ozone": _OZO_RATIO * p.atmoOzone,
+		"density_falloff": p.atmoDensityFalloff,
+		"mie_falloff": p.atmoMieFalloff,
+		"sun_intensity": p.atmoSunIntensity,
+		"exposure": p.atmoExposure,
+		"steps": p.atmoSteps,
+		"cloud_steps": p.cloudSteps,
+		"light_steps": p.atmoLightSteps,
+		"cloud_light_steps": p.cloudLightSteps,
+		"dither": p.atmoDither,
+		"shadow_softness": p.atmoShadowSoftness,
+		"twilight": p.atmoTwilight,
+		"clouds_on": 1.0 if p.showClouds else 0.0,
+		"coverage": p.cloudCoverage,
+		"cdensity": p.cloudDensity,
+		"cfreq": p.cloudFreq / R * 100.0,   # 云频率按半径归一(对齐 web)
+		"cwarp": p.cloudWarp,
+		"cwindspeed": p.cloudWindSpeed,
+		"absorb": p.cloudAbsorb,
+		"silver": p.cloudSilver,
+		"powder": p.cloudPowder,
+		"cshadow": p.cloudShadow,
+		"cterminator": p.cloudTerminatorShift,
+		"godrays_on": 1.0 if p.showGodrays else 0.0,
+		"godray_strength": p.godrayStrength,
+		"godray_density": p.godrayDensity,
+		"godray_samples": p.godraySamples,
+		"godray_threshold": p.godrayThreshold,
+		"godray_decay": 0.96,
+		"godray_weight": 0.6,
+	})

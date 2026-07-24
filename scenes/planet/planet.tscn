@@ -7,6 +7,7 @@
 [ext_resource type="PackedScene" uid="uid://beyqcputa5pgw" path="res://scenes/fps.tscn" id="5_42vvu"]
 [ext_resource type="PackedScene" uid="uid://chettq2yjg6nk" path="res://scenes/character/robot_character.tscn" id="6_robot"]
 [ext_resource type="Script" uid="uid://8blbng5p8fn2" path="res://scripts/character/camera_director.gd" id="7_camdir"]
+[ext_resource type="Script" path="res://scripts/planet/planet_atmosphere.gd" id="8_atmo"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_p4lu5"]
 sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
@@ -18,6 +19,7 @@ sky_material = SubResource("ProceduralSkyMaterial_p4lu5")
 [sub_resource type="Environment" id="Environment_q7o7h"]
 background_mode = 2
 sky = SubResource("Sky_invnv")
+tonemap_mode = 4
 glow_enabled = true
 
 [sub_resource type="Compositor" id="Compositor_gplod"]
@@ -51,6 +53,11 @@ external_camera = NodePath("../Camera3D")
 [node name="Camera3D" type="Camera3D" parent="GpuPlanet" unique_id=2085450478]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1250)
 script = ExtResource("1_invnv")
+
+[node name="PlanetAtmosphere" type="Node3D" parent="GpuPlanet" node_paths=PackedStringArray("planet", "sun_light")]
+script = ExtResource("8_atmo")
+planet = NodePath("..")
+sun_light = NodePath("../../DirectionalLight3D")
 
 [node name="LODDebug" type="Node" parent="." unique_id=1748920366]
 script = ExtResource("4_dbg")
