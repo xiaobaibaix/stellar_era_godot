@@ -4,6 +4,3 @@
 .workbuddy/
 .vscode/
 .claude/
-
-# GPU LOD 烘焙产物(按 seed hash 缓存, 可再生)
-/data/
