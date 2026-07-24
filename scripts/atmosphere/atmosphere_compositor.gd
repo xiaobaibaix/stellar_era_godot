@@ -17,8 +17,10 @@ class_name AtmosphereCompositor
 extends CompositorEffect
 
 const _SHADER_PATH := "res://shaders/atmosphere/atmosphere_compute.glsl"
+const _COMPOSITE_PATH := "res://shaders/atmosphere/composite.glsl"
 const _GODRAY_COPY_PATH := "res://shaders/atmosphere/godray_copy.glsl"
 const _GODRAY_PATH := "res://shaders/atmosphere/godray_compute.glsl"
+const _GODRAY_COMBINE_PATH := "res://shaders/atmosphere/godray_combine.glsl"
 const _LUT_PATH := "res://shaders/atmosphere/transmittance_lut_compute.glsl"
 const _LUT_W := 256
 const _LUT_H := 64
@@ -31,6 +33,16 @@ var _mutex := Mutex.new()
 var _shader_dirty := true
 var _frame: Dictionary = {}
 
+# 半分辨率大气/云: atmosphere pass 在缩放尺寸下算 L/T/cshadow → 两张 rgba16f 场纹理;
+# composite pass 全分辨率上采样合成回 color。scale=1.0 时场纹理即全分辨率(结果与旧就地合成等价)。
+var _comp_shader: RID
+var _comp_pipeline: RID
+var _comp_tried := false
+var _scat_tex: RID          # rgb=内散射 L, a=地面云影 cshadow
+var _trans_tex: RID         # rgb=逐通道透射率 T
+var _field_size := Vector2i.ZERO
+var _field_sampler: RID     # 线性 clamp, 供 composite 上采样场纹理
+
 # 体积光 God rays: copy(color→lit 快照) + godray(lit→color 径向累积)。lit = rgba16f 临时 storage 纹理。
 var _copy_shader: RID
 var _copy_pipeline: RID
@@ -40,6 +52,11 @@ var _godray_tried := false
 var _godray_ready := false
 var _lit_tex: RID
 var _lit_size := Vector2i.ZERO
+# godray 半分辨率: 径向 glow 在缩放尺寸下算 → _glow_tex, 再由 combine pass 全分辨率上采样叠加。
+var _combine_shader: RID
+var _combine_pipeline: RID
+var _glow_tex: RID
+var _glow_size := Vector2i.ZERO
 
 # 透射率 LUT(M3): 256(mu)×64(r) rgba16f(rgb=向太阳光学深度)。大气参数变则重烘; 烘后下一帧起查表。
 var _lut_shader: RID
@@ -79,9 +96,29 @@ func _notification(what: int) -> void:
 			_rd.free_rid(_godray_shader)
 			_godray_shader = RID()
 			_godray_pipeline = RID()
+		if _combine_shader.is_valid():
+			_rd.free_rid(_combine_shader)
+			_combine_shader = RID()
+			_combine_pipeline = RID()
 		if _lit_tex.is_valid():
 			_rd.free_rid(_lit_tex)
 			_lit_tex = RID()
+		if _glow_tex.is_valid():
+			_rd.free_rid(_glow_tex)
+			_glow_tex = RID()
+		if _comp_shader.is_valid():
+			_rd.free_rid(_comp_shader)
+			_comp_shader = RID()
+			_comp_pipeline = RID()
+		if _scat_tex.is_valid():
+			_rd.free_rid(_scat_tex)
+			_scat_tex = RID()
+		if _trans_tex.is_valid():
+			_rd.free_rid(_trans_tex)
+			_trans_tex = RID()
+		if _field_sampler.is_valid():
+			_rd.free_rid(_field_sampler)
+			_field_sampler = RID()
 		if _lut_shader.is_valid():
 			_rd.free_rid(_lut_shader)
 			_lut_shader = RID()
@@ -175,8 +212,29 @@ func _ensure_godray() -> bool:
 	var b := _compile_pipeline(_GODRAY_PATH)
 	_godray_shader = b[0]
 	_godray_pipeline = b[1]
-	_godray_ready = _copy_pipeline.is_valid() and _godray_pipeline.is_valid()
+	var c := _compile_pipeline(_GODRAY_COMBINE_PATH)
+	_combine_shader = c[0]
+	_combine_pipeline = c[1]
+	_godray_ready = _copy_pipeline.is_valid() and _godray_pipeline.is_valid() and _combine_pipeline.is_valid()
 	return _godray_ready
+
+
+# 取/建低分辨率 glow 纹理(storage 写 + sampling 上采样读)。尺寸变则重建。
+func _ensure_glow_tex(size: Vector2i) -> RID:
+	if _glow_tex.is_valid() and _glow_size == size:
+		return _glow_tex
+	if _glow_tex.is_valid():
+		_rd.free_rid(_glow_tex)
+		_glow_tex = RID()
+	var fmt := RDTextureFormat.new()
+	fmt.format = RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT
+	fmt.width = size.x
+	fmt.height = size.y
+	fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D
+	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
+	_glow_tex = _rd.texture_create(fmt, RDTextureView.new(), [])
+	_glow_size = size
+	return _glow_tex
 
 
 # 取/建 rgba16f 临时快照纹理(与颜色缓冲同尺寸; 尺寸变则重建)。仅作 storage image(imageLoad/Store)。
@@ -195,6 +253,51 @@ func _ensure_lit_tex(size: Vector2i) -> RID:
 	_lit_tex = _rd.texture_create(fmt, RDTextureView.new(), [])
 	_lit_size = size
 	return _lit_tex
+
+
+# 懒建全分辨率 composite pipeline(只试一次)。
+func _ensure_composite() -> bool:
+	if _comp_tried:
+		return _comp_pipeline.is_valid()
+	_comp_tried = true
+	var a := _compile_pipeline(_COMPOSITE_PATH)
+	_comp_shader = a[0]
+	_comp_pipeline = a[1]
+	return _comp_pipeline.is_valid()
+
+
+# 取/建 两张 rgba16f 场纹理(scat=L+cshadow, trans=T), storage(写)+sampling(上采样读)。尺寸变则重建。
+func _ensure_field_tex(size: Vector2i) -> bool:
+	if _scat_tex.is_valid() and _trans_tex.is_valid() and _field_size == size:
+		return true
+	if _scat_tex.is_valid():
+		_rd.free_rid(_scat_tex)
+		_scat_tex = RID()
+	if _trans_tex.is_valid():
+		_rd.free_rid(_trans_tex)
+		_trans_tex = RID()
+	var fmt := RDTextureFormat.new()
+	fmt.format = RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT
+	fmt.width = size.x
+	fmt.height = size.y
+	fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D
+	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
+	_scat_tex = _rd.texture_create(fmt, RDTextureView.new(), [])
+	_trans_tex = _rd.texture_create(fmt, RDTextureView.new(), [])
+	_field_size = size
+	return _scat_tex.is_valid() and _trans_tex.is_valid()
+
+
+func _ensure_field_sampler() -> RID:
+	if _field_sampler.is_valid():
+		return _field_sampler
+	var st := RDSamplerState.new()
+	st.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	st.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	st.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	st.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	_field_sampler = _rd.sampler_create(st)
+	return _field_sampler
 
 
 # 始终建好 256×64 rgba16f LUT 纹理(storage+sample); 保证大气 pass 的 set 3 可绑(未烘时 lut_on=0 不采样)。
@@ -381,19 +484,42 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 		var cam_pos: Vector3 = cam_xform.origin
 		var inv_proj: Projection = rsd.get_cam_projection().inverse()
 
+		# 全分辨率线程组数(composite + godray 用)
+		@warning_ignore("integer_division")
+		var xg: int = (size.x - 1) / 8 + 1
+		@warning_ignore("integer_division")
+		var yg: int = (size.y - 1) / 8 + 1
+
+		# 分辨率比例 → 大气/云 pass 的缩放尺寸(clamp 到 [0.25, 1.0]; 至少 1px)
+		var scale: float = clampf(f.get("render_scale", 0.5), 0.25, 1.0)
+		var asize := Vector2i(maxi(int(round(size.x * scale)), 1), maxi(int(round(size.y * scale)), 1))
+		@warning_ignore("integer_division")
+		var axg: int = (asize.x - 1) / 8 + 1
+		@warning_ignore("integer_division")
+		var ayg: int = (asize.y - 1) / 8 + 1
+
+		# 需要 composite pipeline + 两张场纹理; 任一不可用则本视图跳过(不写脏数据)。
+		if not _ensure_composite() or not _ensure_field_tex(asize):
+			continue
+
 		var ubo_rid: RID = _build_frame_ubo(f, cam_pos, inv_proj, cam_xform)
 
+		# ===== Pass 1: 大气/体积云 (缩放分辨率) → 写 L/T/cshadow 场纹理 =====
 		# set 0: UBO
 		var u0 := RDUniform.new()
 		u0.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
 		u0.binding = 0
 		u0.add_id(ubo_rid)
-		# set 1: color image(读+写)
-		var u1 := RDUniform.new()
-		u1.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
-		u1.binding = 0
-		u1.add_id(color_image)
-		# set 2: depth(sampler + texture)
+		# set 1: 两张输出场纹理(binding 0 = scat[L+cshadow], binding 1 = trans[T])
+		var u1a := RDUniform.new()
+		u1a.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+		u1a.binding = 0
+		u1a.add_id(_scat_tex)
+		var u1b := RDUniform.new()
+		u1b.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+		u1b.binding = 1
+		u1b.add_id(_trans_tex)
+		# set 2: depth(sampler + texture, 全分辨率场景深度)
 		var u2 := RDUniform.new()
 		u2.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
 		u2.binding = 0
@@ -407,15 +533,11 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 		u3.add_id(_lut_tex)
 
 		var set0 := UniformSetCacheRD.get_cache(_shader, 0, [u0])
-		var set1 := UniformSetCacheRD.get_cache(_shader, 1, [u1])
+		var set1 := UniformSetCacheRD.get_cache(_shader, 1, [u1a, u1b])
 		var set2 := UniformSetCacheRD.get_cache(_shader, 2, [u2])
 		var set3 := UniformSetCacheRD.get_cache(_shader, 3, [u3])
 
-		@warning_ignore("integer_division")
-		var xg: int = (size.x - 1) / 8 + 1
-		@warning_ignore("integer_division")
-		var yg: int = (size.y - 1) / 8 + 1
-		var pc := PackedFloat32Array([float(size.x), float(size.y), lut_on, 0.0])
+		var pc := PackedFloat32Array([float(asize.x), float(asize.y), lut_on, 0.0])
 
 		var cl := _rd.compute_list_begin()
 		_rd.compute_list_bind_compute_pipeline(cl, _pipeline)
@@ -424,21 +546,51 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 		_rd.compute_list_bind_uniform_set(cl, set2, 2)
 		_rd.compute_list_bind_uniform_set(cl, set3, 3)
 		_rd.compute_list_set_push_constant(cl, pc.to_byte_array(), pc.size() * 4)
-		_rd.compute_list_dispatch(cl, xg, yg, 1)
+		_rd.compute_list_dispatch(cl, axg, ayg, 1)
 		_rd.compute_list_end()
 
 		_rd.free_rid(ubo_rid)   # GPU 用完再释放(渲染设备延迟释放)
 
+		# ===== Pass 2: 全分辨率合成(上采样 L/T/cshadow, 与全分辨率场景色合成)=====
+		var exposure: float = f.get("exposure", 1.0)
+		var c0 := RDUniform.new()
+		c0.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+		c0.binding = 0
+		c0.add_id(color_image)
+		var c1 := RDUniform.new()
+		c1.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+		c1.binding = 0
+		c1.add_id(_ensure_field_sampler())
+		c1.add_id(_scat_tex)
+		var c2 := RDUniform.new()
+		c2.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+		c2.binding = 0
+		c2.add_id(_ensure_field_sampler())
+		c2.add_id(_trans_tex)
+		var cset0 := UniformSetCacheRD.get_cache(_comp_shader, 0, [c0])
+		var cset1 := UniformSetCacheRD.get_cache(_comp_shader, 1, [c1])
+		var cset2 := UniformSetCacheRD.get_cache(_comp_shader, 2, [c2])
+		var cpc := PackedFloat32Array([float(size.x), float(size.y), exposure, 0.0])
+		var clc := _rd.compute_list_begin()
+		_rd.compute_list_bind_compute_pipeline(clc, _comp_pipeline)
+		_rd.compute_list_bind_uniform_set(clc, cset0, 0)
+		_rd.compute_list_bind_uniform_set(clc, cset1, 1)
+		_rd.compute_list_bind_uniform_set(clc, cset2, 2)
+		_rd.compute_list_set_push_constant(clc, cpc.to_byte_array(), cpc.size() * 4)
+		_rd.compute_list_dispatch(clc, xg, yg, 1)
+		_rd.compute_list_end()
+
 		# —— 体积光 God rays(移植 web createGodrayPass): 大气合成后, 从太阳屏幕位置径向累积亮束 ——
+		# 径向累积在缩放分辨率下算 glow(省 (1/scale)^2), 再全分辨率上采样叠加。
 		if f.get("godrays_on", 0.0) > 0.5 and _ensure_godray():
-			_dispatch_godray(f, rsd, cam_xform, cam_pos, color_image, size, xg, yg)
+			_dispatch_godray(f, rsd, cam_xform, cam_pos, color_image, size, xg, yg, asize, axg, ayg)
 
 
 # 体积光两步: 1) copy color→lit 快照; 2) godray lit→color 径向累积。
 # sun_uv: 太阳投影到屏幕的 uv; sun_vis: 相机朝向·太阳方向的 smoothstep(太阳在背后=0)。
 # 多太阳时: 选第一个有效太阳做 godray(主光), 其余太阳的径向束暂不复刻(避免 godray 重复绘制过曝)。
 # 近场点光源: 用真实世界位置投影; 无穷远平行光: 用 cam_pos + sun_dir*1e7(模拟极远点)。
-func _dispatch_godray(f: Dictionary, rsd, cam_xform: Transform3D, cam_pos: Vector3, color_image: RID, size: Vector2i, xg: int, yg: int) -> void:
+func _dispatch_godray(f: Dictionary, rsd, cam_xform: Transform3D, cam_pos: Vector3, color_image: RID, size: Vector2i, xg: int, yg: int, asize: Vector2i, axg: int, ayg: int) -> void:
 	var default_dir: Vector3 = f.get("sun_dir", Vector3(0.739, 0.443, 0.515))
 	var dirs_arr: Array = f.get("sun_dirs", [default_dir])
 	var poss_arr: Array = f.get("sun_positions", [Vector3.ZERO])
@@ -470,9 +622,10 @@ func _dispatch_godray(f: Dictionary, rsd, cam_xform: Transform3D, cam_pos: Vecto
 	sv = sv * sv * (3.0 - 2.0 * sv)
 	if sv <= 0.001:
 		return
-	var lit: RID = _ensure_lit_tex(size)
+	var lit: RID = _ensure_lit_tex(size)          # 全分辨率快照(光束源要清晰)
+	var glow: RID = _ensure_glow_tex(asize)       # 低分辨率 glow 输出
 
-	# 1) copy color → lit(快照, 供 godray 径向读取)
+	# 1) copy color → lit(全分辨率快照, 供 godray 径向读取)
 	var cs0 := RDUniform.new()
 	cs0.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
 	cs0.binding = 0
@@ -492,11 +645,11 @@ func _dispatch_godray(f: Dictionary, rsd, cam_xform: Transform3D, cam_pos: Vecto
 	_rd.compute_list_dispatch(clc, xg, yg, 1)
 	_rd.compute_list_end()
 
-	# 2) godray lit → color(径向累积亮束, 叠加到 base)
+	# 2) godray(低分辨率): 读全分辨率 lit 径向累积 → 写低分辨率 glow(仅光束, 不含 base)
 	var gs0 := RDUniform.new()
 	gs0.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
 	gs0.binding = 0
-	gs0.add_id(color_image)
+	gs0.add_id(glow)
 	var gs1 := RDUniform.new()
 	gs1.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
 	gs1.binding = 0
@@ -504,8 +657,8 @@ func _dispatch_godray(f: Dictionary, rsd, cam_xform: Transform3D, cam_pos: Vecto
 	var gset0 := UniformSetCacheRD.get_cache(_godray_shader, 0, [gs0])
 	var gset1 := UniformSetCacheRD.get_cache(_godray_shader, 1, [gs1])
 	var gpush := PackedFloat32Array()
-	gpush.append(float(size.x))
-	gpush.append(float(size.y))
+	gpush.append(float(asize.x))          # out_size(低分辨率)
+	gpush.append(float(asize.y))
 	gpush.append(sun_uv.x)
 	gpush.append(sun_uv.y)
 	gpush.append(sv)
@@ -516,10 +669,35 @@ func _dispatch_godray(f: Dictionary, rsd, cam_xform: Transform3D, cam_pos: Vecto
 	gpush.append(f.get("godray_threshold", 0.45))
 	gpush.append(float(f.get("godray_samples", 48)))
 	gpush.append(0.0)
+	gpush.append(float(size.x))           # p2.xy = lit 全分辨率尺寸
+	gpush.append(float(size.y))
+	gpush.append(0.0)
+	gpush.append(0.0)
 	var clg := _rd.compute_list_begin()
 	_rd.compute_list_bind_compute_pipeline(clg, _godray_pipeline)
 	_rd.compute_list_bind_uniform_set(clg, gset0, 0)
 	_rd.compute_list_bind_uniform_set(clg, gset1, 1)
 	_rd.compute_list_set_push_constant(clg, gpush.to_byte_array(), gpush.size() * 4)
-	_rd.compute_list_dispatch(clg, xg, yg, 1)
+	_rd.compute_list_dispatch(clg, axg, ayg, 1)
+	_rd.compute_list_end()
+
+	# 3) combine(全分辨率): color += 双线性上采样(glow)
+	var ms0 := RDUniform.new()
+	ms0.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	ms0.binding = 0
+	ms0.add_id(color_image)
+	var ms1 := RDUniform.new()
+	ms1.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	ms1.binding = 0
+	ms1.add_id(_ensure_field_sampler())
+	ms1.add_id(glow)
+	var mset0 := UniformSetCacheRD.get_cache(_combine_shader, 0, [ms0])
+	var mset1 := UniformSetCacheRD.get_cache(_combine_shader, 1, [ms1])
+	var mpush := PackedFloat32Array([float(size.x), float(size.y), 0.0, 0.0])
+	var clm := _rd.compute_list_begin()
+	_rd.compute_list_bind_compute_pipeline(clm, _combine_pipeline)
+	_rd.compute_list_bind_uniform_set(clm, mset0, 0)
+	_rd.compute_list_bind_uniform_set(clm, mset1, 1)
+	_rd.compute_list_set_push_constant(clm, mpush.to_byte_array(), mpush.size() * 4)
+	_rd.compute_list_dispatch(clm, xg, yg, 1)
 	_rd.compute_list_end()

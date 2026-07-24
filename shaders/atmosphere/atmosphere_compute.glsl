@@ -35,7 +35,10 @@ layout(set = 0, binding = 0, std140) uniform FrameData {
 	vec4 cloud_c;              // cshadow, cterminator, 0, 0
 } fd;
 
-layout(set = 1, binding = 0, rgba16f) uniform image2D color_image;
+// 半分辨率输出: 不再就地合成到场景色, 而是把内散射 L + 逐通道透射率 T + 地面云影因子分离写出,
+// 交给全分辨率 composite pass 上采样后合成(scene 保持全分辨率清晰)。
+layout(set = 1, binding = 0, rgba16f) uniform image2D scat_image;    // rgb = 内散射 L, a = 地面云影 cshadowFac
+layout(set = 1, binding = 1, rgba16f) uniform image2D trans_image;   // rgb = 逐通道透射率 T
 layout(set = 2, binding = 0) uniform sampler2D depth_tex;
 layout(set = 3, binding = 0) uniform sampler2D lut_tex;   // 透射率 LUT(rgb=向太阳光学深度); lut_on=1 时用
 
@@ -255,9 +258,6 @@ void main() {
 		hitGround = true;
 	}
 
-	vec4 scene = imageLoad(color_image, ipix);
-	vec3 sceneColor = scene.rgb;
-
 	// 视线在大气壳内的区间
 	vec2 atmo = raySphere(ro, rd, fd.planet_center.xyz, fd.radii.y);
 	float tNear = max(atmo.x, 0.0);
@@ -300,19 +300,39 @@ void main() {
 		}
 
 		float span = tFar - tNear;
-		int Nmarch = clouds ? max(int(fd.sun_exp_twilight.w), int(fd.counts.x) * 2) : int(fd.sun_exp_twilight.w);
-		Nmarch = max(Nmarch, 1);
-		float stepU = span / float(Nmarch);
+		// 大气用粗步长(整壳均匀); 云壳用细步长(仅 [tCloudIn,tCloudOut] 区间, 无论远近都给 ~cloudSteps 个采样)。
+		// 这样: 近地(整条视线都在云里)把云采样封顶到 cloudSteps → 省算; 远观薄云壳仍拿满采样 → 不再稀疏闪烁。
+		int atmoN = max(int(fd.sun_exp_twilight.w), 1);              // atmoSteps
+		float atmoStepU = span / float(atmoN);
+		float cloudStepU = atmoStepU;
+		float tCloudIn = 1e20;
+		float tCloudOut = -1e20;
+		if (clouds) {
+			// 云密度支撑区: h=(r-cbottom)/thick ∈ [-1.3,1.2] → 上界 r ≈ cbottom + 1.2*thick(略高于 ctop)。
+			// 用这个外球求视线∩云壳区间(单区间近似; 掠射穿壳中间的空洞会被细采样, 但空洞处 cloudDensity=0 只走廉价判空)。
+			float thickB = max(fd.radii.w - fd.radii.z, 1e-4);
+			float rHi = fd.radii.z + 1.2 * thickB;
+			vec2 hHi = raySphere(ro, rd, fd.planet_center.xyz, rHi);
+			tCloudIn = clamp(max(hHi.x, tNear), tNear, tFar);
+			tCloudOut = clamp(min(hHi.y, tFar), tNear, tFar);
+			int cloudN = max(int(fd.counts.x), 1);                  // cloudSteps
+			cloudStepU = max((tCloudOut - tCloudIn) / float(cloudN), 1e-4);
+		}
 		float jitter = mix(0.5, hash12(uv * vec2(1920.0, 1080.0) + fract(fd.cam_pos_time.w)), fd.ozone_dither.w);
-		float t = tNear + stepU * jitter;
+		float t = tNear + atmoStepU * jitter;
 
 		float g2 = fd.mie_params.x;                                   // mieG (循环不变, 提前算)
 
 		for (int i = 0; i < 512; i++) {
 			if (t >= tFar) break;
-			float jit = (hash12(uv * vec2(1920.0, 1080.0) + vec2(float(i) * 7.31, float(i) * 3.17)) - 0.5) * stepU * 0.25 * fd.ozone_dither.w;
+			// 自适应步长: 云壳内走细步, 壳外走粗步; 粗步不得跨过云壳入口(否则整片云被跳过), 细步不得跨过出口。
+			bool inBand = clouds && (t >= tCloudIn - 1e-4 && t < tCloudOut);
+			float ds = inBand ? cloudStepU : atmoStepU;
+			if (clouds && !inBand && t < tCloudIn) ds = min(ds, tCloudIn - t);
+			if (inBand) ds = min(ds, tCloudOut - t);
+			ds = clamp(ds, 1e-4, tFar - t);
+			float jit = (hash12(uv * vec2(1920.0, 1080.0) + vec2(float(i) * 7.31, float(i) * 3.17)) - 0.5) * ds * 0.25 * fd.ozone_dither.w;
 			vec3 p = ro + rd * (t + jit);
-			float ds = min(stepU, tFar - t);
 
 			// 大气: 密度×ds → 消光 sigA (per-pixel, 与太阳数无关)
 			vec3 dens = densityAt(p) * ds;
@@ -365,13 +385,14 @@ void main() {
 
 				// 云内散射(每太阳各算一次自阴影 + 晨昏线)
 				if (clouds && sigC > 0.0) {
-					float cphase = 0.4 + fd.cloud_b.z * cloudPhase(mu);   // silver
-					float sunT = lightMarch(p, s);
 					// 晨昏线位移 cterminator: 正值→sunUp 有效值变小→day/amb 更早归零, 云的明暗分界线向阳侧移动(更贴近晨昏线);
 					// 负值→分界线向背阳侧延伸。默认 0 = 原行为。
 					float sunUp = dot(normalize(p - fd.planet_center.xyz), sdir) - fd.cloud_c.y;
 					float day = smoothstep(-0.12, 0.12, sunUp);
 					float amb = smoothstep(-0.4, 0.15, sunUp);
+					// 夜侧 day=0, 而 sunT 只与 day 相乘 → 直接跳过 cloudLightSteps 步自阴影 march(省整片夜半球云的光照采样, 结果不变)。
+					float sunT = (day > 0.0) ? lightMarch(p, s) : 0.0;
+					float cphase = 0.4 + fd.cloud_b.z * cloudPhase(mu);   // silver
 					float powder = mix(1.0, 1.0 - exp(-dcl * fd.cloud_a.y * 2.0), fd.cloud_b.w);
 					vec3 lit = vec3(1.7, 1.6, 1.5) * (sunT * day * cphase * powder) + vec3(0.28, 0.34, 0.45) * amb;
 					src += sigC * lit * atten;
@@ -386,12 +407,15 @@ void main() {
 				L += T * integ;
 				T *= dT;
 			}
+			// 早停: 累计透射率极低时(被厚云/深大气挡住), 后续采样贡献 <0.2%, 直接结束剩余步进(结果肉眼无变化)。
+			if (max(max(T.r, T.g), T.b) < 0.002) break;
 			t += ds;
 		}
 	}
 
-	// 精确合成: scene·(云影·T逐通道) + L, 再乘曝光(线性 HDR, 交 WorldEnvironment AgX)
-	vec3 bg = sceneColor * cshadowFac;
-	vec3 finalColor = (bg * T + L) * fd.sun_exp_twilight.y;     // exposure
-	imageStore(color_image, ipix, vec4(finalColor, scene.a));
+	// 分离写出(半分辨率): L(内散射)、T(逐通道透射率)、cshadowFac(地面云影)。
+	// 全分辨率 composite pass 会做: final = (scene·cshadow·T + L)·exposure。
+	// 曝光不在此乘, 留给 composite(避免半分辨率场把曝光烘进上采样)。
+	imageStore(scat_image, ipix, vec4(L, cshadowFac));
+	imageStore(trans_image, ipix, vec4(T, 1.0));
 }

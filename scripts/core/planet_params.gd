@@ -105,8 +105,12 @@ signal bulk_changed
 ## 曝光(最终亮度倍率, 接近 HDR 输出后)。
 @export_range(0.0, 4.0, 0.01) var atmoExposure: float = 1.0:
 	set(v): atmoExposure = v; param_changed.emit("atmoExposure")
+## 大气/体积云渲染分辨率比例(0.5 = 半分辨率, 后处理开销约降至 1/4; 1.0 = 全分辨率最清晰)。
+## 大气/云场在低分辨率算完后双线性上采样合成到全分辨率场景色上 → 场景/地形边缘仍清晰, 只有云边缘随比例变软。
+@export_range(0.25, 1.0, 0.05) var atmoRenderScale: float = 0.5:
+	set(v): atmoRenderScale = v; param_changed.emit("atmoRenderScale")
 ## 视线积分步数: 越多越精确、越慢(主光线步进)。
-@export_range(4, 64, 1) var atmoSteps: int = 24:
+@export_range(4, 64, 1) var atmoSteps: int = 16:
 	set(v): atmoSteps = v; param_changed.emit("atmoSteps")
 ## 光照(自散射/阴影)积分步数: 较少即可。
 @export_range(2, 32, 1) var atmoLightSteps: int = 8:
@@ -154,10 +158,10 @@ signal bulk_changed
 @export_range(0.0, 5.0, 0.01) var cloudWindSpeed: float = 0.6:
 	set(v): cloudWindSpeed = v; param_changed.emit("cloudWindSpeed")
 ## 云层主积分步数(越多越精细、越慢)。
-@export_range(4, 96, 1) var cloudSteps: int = 24:
+@export_range(4, 96, 1) var cloudSteps: int = 16:
 	set(v): cloudSteps = v; param_changed.emit("cloudSteps")
 ## 云光照(自阴影)积分步数。
-@export_range(2, 16, 1) var cloudLightSteps: int = 6:
+@export_range(2, 16, 1) var cloudLightSteps: int = 4:
 	set(v): cloudLightSteps = v; param_changed.emit("cloudLightSteps")
 ## 云光吸收强度(自阴影, 越大云底越暗、越显厚实)。
 @export_range(0.0, 20.0, 0.1) var cloudAbsorb: float = 1.0:
@@ -207,7 +211,7 @@ signal bulk_changed
 @export_range(0.0, 2.0, 0.01) var godrayDensity: float = 0.7:
 	set(v): godrayDensity = v; param_changed.emit("godrayDensity")
 ## 体积光采样数(越多越平滑、越慢)。
-@export_range(8, 128, 1) var godraySamples: int = 48:
+@export_range(8, 128, 1) var godraySamples: int = 32:
 	set(v): godraySamples = v; param_changed.emit("godraySamples")
 ## 体积光阈值(遮挡深度, 控制光束出现的范围)。
 @export_range(0.0, 1.0, 0.01) var godrayThreshold: float = 0.45:
