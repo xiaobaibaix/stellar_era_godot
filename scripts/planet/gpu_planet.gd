@@ -99,6 +99,8 @@ var _frozen_frustum: Array = []
 var _cam_hist_valid := false
 var _last_cam_pos: Vector3 = Vector3.ZERO
 var _last_cam_fwd: Vector3 = Vector3.ZERO
+# 遮挡剔除的高度门控状态(带滞回, 避免在门限附近开关抖动)。
+var _occlusion_gate := true
 
 
 func _ready() -> void:
@@ -196,6 +198,20 @@ func _process(_delta: float) -> void:
 			_cam_hist_valid = true
 		else:
 			_cam_hist_valid = false
+	# 遮挡剔除高度门控(仅非冻结): 相机贴近地表时关遮挡(消除 disocclusion 黑洞), 远观时开(省算)。
+	# 带滞回(低于 thr 关, 高于 thr×1.5 才重开)→ 门限附近来回移动不会开关抖动。
+	if not _lod_frozen:
+		if p.occlusionMinAltitudeFrac > 0.0:
+			var altitude: float = maxf(cam_pos.distance_to(global_position) - p.radius, 0.0)
+			var thr: float = p.occlusionMinAltitudeFrac * p.radius
+			if altitude < thr:
+				_occlusion_gate = false
+			elif altitude > thr * 1.5:
+				_occlusion_gate = true
+			# thr ~ thr×1.5 之间: 保持上次状态(滞回)
+			occlusion_on = occlusion_on and _occlusion_gate
+		else:
+			_occlusion_gate = true
 	# occluder 半径: minmax 就绪后是 radius+全局最小位移(_apply_minmax 设); 否则保守下界 radius-maxHeight。
 	var occluder_r: float = _occluder_radius if _occluder_radius > 0.0 else max(p.radius - p.maxHeight, 1.0)
 	_lod_comp.set_frame_data({

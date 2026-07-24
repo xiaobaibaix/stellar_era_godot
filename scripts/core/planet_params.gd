@@ -260,6 +260,13 @@ signal bulk_changed
 ## 1 帧延迟(快转时被挡→转出可能瞬间 pop-in, 可接受)。关掉可排查遮挡误剔。
 @export var occlusionCulling: bool = true:
 	set(v): occlusionCulling = v; param_changed.emit("occlusionCulling")
+## 遮挡剔除的最低高度门限(占半径的比例)。相机离地表高度 < 半径×此值时**自动关闭**遮挡剔除。
+## 原因: 遮挡用上一帧深度(约 1~2 帧延迟), 贴近地表快速平移时"上一帧被挡、这一帧转出来"的地形会
+## 因仍被判定遮挡而剔掉 → 露出黑洞(disocclusion pop-in)。而贴地时地平线+视锥剔除已剔掉大半, 遮挡收益低;
+## 太空/远观时遮挡收益高且几乎无 disocclusion。故按高度分档: 贴地关、远观开。带滞回避免门限附近抖动。
+## 0 = 不按高度关(始终按 occlusionCulling 开关)。建议 0.3~0.6。
+@export_range(0.0, 2.0, 0.05) var occlusionMinAltitudeFrac: float = 0.4:
+	set(v): occlusionMinAltitudeFrac = v; param_changed.emit("occlusionMinAltitudeFrac")
 ## 视锥外扩余量的安全系数(补偿 GPU 剔除的 1 帧延迟)。剔除结果比画面晚一帧, 且贴近地表、地形铺满全屏时,
 ## 紧贴屏幕边缘的 patch 稍有偏差就露出黑色空洞。此系数控制视锥外扩量 = 常驻保险带(消除静止时的边缘空洞)
 ## + 本帧相机运动量(补偿快速平移/俯仰的 1 帧延迟), 都按"相机→地平线"距离换算。静止时仍留常驻保险带。
