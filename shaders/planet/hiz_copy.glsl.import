@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://x3rklakb2nsv"
+path="res://.godot/imported/hiz_copy.glsl-4f46081612d58a6bc493a4fa2e8d5c4e.res"
+
+[deps]
+
+source_file="res://shaders/planet/hiz_copy.glsl"
+dest_files=["res://.godot/imported/hiz_copy.glsl-4f46081612d58a6bc493a4fa2e8d5c4e.res"]
+
+[params]
+

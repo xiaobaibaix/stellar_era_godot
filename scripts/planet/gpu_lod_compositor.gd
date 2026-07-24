@@ -31,8 +31,10 @@ const PATCH_TEX_W := 6             # 每 patch 6 texel
 const PATCH_TEX_H := MAX_PATCHES + 1   # 末行存 count metadata
 const WG := 64                     # workgroup size(与 glsl local_size_x 一致)
 const BAKE_RES := 256              # MinMax 烘焙分辨率(2^8=256; maxLevel 6 最细 64 细分/边 → 每 patch ~4 cell, 保守包围盒足够。512 过度精细且烘焙慢 4×)
-# FrameData UBO: frustum[6](96) + cam(16) + planet(16) + consts(16) = 144 字节
-const FRAME_UBO_SIZE := 144
+# FrameData UBO(std140): frustum[6](96) + cam(16) + planet(16) + consts(16)
+#   + cull_params(16) + hiz_params(16) + view_proj mat4(64) = 240 字节。
+# Phase 5 新增: cull_params(地平线/小三角/遮挡开关+参数)、hiz_params(金字塔元数据)、view_proj(遮挡投影)。
+const FRAME_UBO_SIZE := 240
 const LODTEX_RES := 256            # 4×2^MAX_GPU_LEVEL: 最细叶占~4×4 格, 消除三角/方格走样+query 边界抖动。必须与 lod_lodtex/lod_cull 一致
 
 var _rd: RenderingDevice
@@ -72,6 +74,17 @@ var _minmax_ready := false
 # FrameData UBO(每帧 buffer_update; cull shader set 4 用)
 var _frame_ubo: RID
 
+# Phase 5: Hi-Z 遮挡剔除。_hiz_provider = GpuHizCompositor(POST_OPAQUE 建金字塔), 本 compositor
+# (PRE_OPAQUE)读它上一帧建好的金字塔纹理。两者都跑渲染线程且同帧内 PRE 先于 POST → 读的是上帧结果。
+# 未就绪时 cull set 7 绑 1×1 占位纹理, 靠 UBO hiz_params.w(ready)=0 门控 shader 不采样。
+var _hiz_provider: CompositorEffect
+var _hiz_dummy_tex: RID           # 1×1 R32F 占位(hiz 未就绪时绑 set 7)
+var _hiz_sampler: RID             # NEAREST + clamp, textureLod 显式 mip
+var _cur_hiz_set: RID             # 本帧 cull set 7(每帧按当前绑定的 hiz 纹理取缓存)
+# 本帧算好的 view_proj(world→clip, 渲染线程从 render_data 取, 保证与深度缓冲 reverse-Z 约定一致)
+var _view_proj: Projection = Projection()
+var _hiz_info: Dictionary = {}    # {tex, width, height, mips} 或空(未就绪)
+
 # 缓存的 uniform sets(按 RID 经 UniformSetCacheRD 缓存)
 var _trav_sets: Array = [null, null]   # [write_idx] = [set0_image, set1_counter]
 var _cull_sets: Array = [null, null]   # [write_idx] = [set0..4]
@@ -109,6 +122,8 @@ func _notification(what: int) -> void:
 		_free_res(_minmax_sampler); _minmax_sampler = RID()
 		_free_res(_frame_ubo); _frame_ubo = RID()
 		_free_res(_adjacency_buf); _adjacency_buf = RID()
+		_free_res(_hiz_dummy_tex); _hiz_dummy_tex = RID()
+		_free_res(_hiz_sampler); _hiz_sampler = RID()
 		_ready = false
 
 
@@ -150,8 +165,41 @@ func setup(material_rid: RID) -> bool:
 		_frame_ubo = _rd.uniform_buffer_create(FRAME_UBO_SIZE, zeros)
 	if not _adjacency_buf.is_valid():
 		_adjacency_buf = _create_adjacency_buf()
+	if not _hiz_dummy_tex.is_valid():
+		_hiz_dummy_tex = _create_hiz_dummy_tex()
+	if not _hiz_sampler.is_valid():
+		_hiz_sampler = _create_hiz_sampler()
 	_ready = true
 	return true
+
+
+# 1×1 R32F 占位纹理: Hi-Z 未就绪(首帧 / 无 provider)时绑 cull set 7, 靠 UBO hiz_params.w=0 门控不采样。
+func _create_hiz_dummy_tex() -> RID:
+	var fmt := RDTextureFormat.new()
+	fmt.format = RenderingDevice.DATA_FORMAT_R32_SFLOAT
+	fmt.width = 1
+	fmt.height = 1
+	fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D
+	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
+	var bytes := PackedByteArray()
+	bytes.resize(4)   # 单 float 0.0(reverse-Z 远平面 → 永不遮挡; 但 ready=0 时根本不采)
+	return _rd.texture_create(fmt, RDTextureView.new(), [bytes])
+
+
+# Hi-Z 采样器: NEAREST + clamp, textureLod 显式选 mip(min-pyramid 手动归约, 不能线性插值)。
+func _create_hiz_sampler() -> RID:
+	var st := RDSamplerState.new()
+	st.min_filter = RenderingDevice.SAMPLER_FILTER_NEAREST
+	st.mag_filter = RenderingDevice.SAMPLER_FILTER_NEAREST
+	st.mip_filter = RenderingDevice.SAMPLER_FILTER_NEAREST
+	st.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	st.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	return _rd.sampler_create(st)
+
+
+# GpuPlanet 接线: 把 GpuHizCompositor 引用给本 compositor, 供 PRE_OPAQUE 读上帧金字塔。
+func set_hiz_provider(provider: CompositorEffect) -> void:
+	_hiz_provider = provider
 
 
 # Phase 4.5: 60 ints, 每 (face*3+edge) → neighbor_face index。从 GpuIco.build_adjacency() 提取。
@@ -356,7 +404,7 @@ func set_frame_data(d: Dictionary) -> void:
 	_mutex.unlock()
 
 
-func _render_callback(_effect_callback_type: int, _render_data: RenderData) -> void:
+func _render_callback(_effect_callback_type: int, render_data: RenderData) -> void:
 	_cb_count += 1
 	if not _ready or not _trav_pipeline.is_valid() or not _cull_pipeline.is_valid() or not _lodtex_pipeline.is_valid():
 		return
@@ -371,7 +419,13 @@ func _render_callback(_effect_callback_type: int, _render_data: RenderData) -> v
 	var write_idx: int = int(fd.get("write_idx", 0))
 	var max_level: int = int(fd["maxLevel"])
 
-	# 每帧更新 FrameData UBO(frustum + cam + planet + consts)
+	# Phase 5: view_proj(world→clip)从 render_data 取 —— 渲染线程算, 保证 reverse-Z 约定与深度缓冲一致
+	# (与主线程 camera.get_camera_projection 相比, 这个和 Hi-Z 深度是同一套投影)。遮挡剔除用。
+	_view_proj = _compute_view_proj(render_data)
+	# Phase 5: 查 Hi-Z provider(上一帧建好的金字塔); 未就绪 → 空 → 绑占位、ready=0。
+	_hiz_info = _query_hiz()
+
+	# 每帧更新 FrameData UBO(frustum + cam + planet + consts + Phase5 剔除参数)
 	_update_frame_ubo(fd)
 
 	# 确保 uniform sets 缓存(首帧或 minmax 变后建)
@@ -379,6 +433,7 @@ func _render_callback(_effect_callback_type: int, _render_data: RenderData) -> v
 	_ensure_lodtex_sets(write_idx)
 	if _minmax_ready:
 		_ensure_cull_sets(write_idx)
+		_cur_hiz_set = _make_hiz_set()   # set 7: 每帧按当前 hiz 纹理取(UniformSetCacheRD 去重)
 
 	# === Traverse 阶段 ===
 	var pcn: Vector3 = fd["planet_center"]
@@ -441,12 +496,77 @@ func _update_frame_ubo(fd: Dictionary) -> void:
 	floats[29] = pcn.y
 	floats[30] = pcn.z
 	floats[31] = float(fd["maxHeight"])
-	# consts: x=bake_res_log2, y=maxLevel, z=_, w=MAX_PATCHES
+	# consts: x=bake_res_log2, y=maxLevel, z=K_sse, w=MAX_PATCHES
 	floats[32] = log(float(BAKE_RES)) / log(2.0)   # bake_res_log2(自然 log 换底)
 	floats[33] = float(int(fd["maxLevel"]))
-	floats[34] = 0.0
+	floats[34] = float(fd.get("K", 0.0))           # K = vp_h/(2·tan(fov/2)); 小三角剔除的像素投影用
 	floats[35] = float(MAX_PATCHES)
+	# Phase 5 cull_params: x=horizonEnable, y=horizonOccluderRadius, z=smallTriPixels, w=occlusionEnable
+	floats[36] = 1.0 if bool(fd.get("horizonCulling", false)) else 0.0
+	floats[37] = float(fd.get("horizonOccluderRadius", float(fd["radius"])))
+	floats[38] = float(fd.get("smallTriPixels", 0.0))
+	# 遮挡开关: 需 provider 开 + 本帧金字塔就绪(hiz_ready)才真正跑; enable 仅表用户意愿。
+	floats[39] = 1.0 if bool(fd.get("occlusionCulling", false)) else 0.0
+	# Phase 5 hiz_params: x=hiz_w, y=hiz_h, z=hiz_mip_count, w=hiz_ready
+	if not _hiz_info.is_empty():
+		floats[40] = float(_hiz_info.get("width", 1))
+		floats[41] = float(_hiz_info.get("height", 1))
+		floats[42] = float(_hiz_info.get("mips", 1))
+		floats[43] = 1.0
+	else:
+		floats[40] = 1.0
+		floats[41] = 1.0
+		floats[42] = 1.0
+		floats[43] = 0.0   # 未就绪 → shader 不采样
+	# Phase 5 view_proj: mat4 列主序(4 列 × xyzw), 与 shader mat4 * vec4 一致。
+	var vp := _view_proj
+	var cols := [vp.x, vp.y, vp.z, vp.w]
+	for ci in range(4):
+		var col: Vector4 = cols[ci]
+		floats[44 + ci * 4 + 0] = col.x
+		floats[44 + ci * 4 + 1] = col.y
+		floats[44 + ci * 4 + 2] = col.z
+		floats[44 + ci * 4 + 3] = col.w
 	_rd.buffer_update(_frame_ubo, 0, FRAME_UBO_SIZE, floats.to_byte_array())
+
+
+# 渲染线程从 render_data 取 world→clip(= proj · view)。view = cam_transform.affine_inverse()。
+# 与 atmosphere_compositor 的 world_to_clip 同款(那边 godray 用), 保证与深度缓冲 reverse-Z 一致。
+func _compute_view_proj(render_data: RenderData) -> Projection:
+	if render_data == null:
+		return Projection()
+	var rsd = render_data.get_render_scene_data()
+	if rsd == null:
+		return Projection()
+	var cam_xform: Transform3D = rsd.get_cam_transform()
+	var proj: Projection = rsd.get_cam_projection()
+	return proj * Projection(cam_xform.affine_inverse())
+
+
+# 查 Hi-Z provider(GpuHizCompositor)上一帧建好的金字塔。就绪返回 {tex,width,height,mips}, 否则空。
+func _query_hiz() -> Dictionary:
+	if _hiz_provider == null or not _hiz_provider.has_method("get_hiz"):
+		return {}
+	var info: Dictionary = _hiz_provider.call("get_hiz")
+	if info.is_empty() or not info.has("tex"):
+		return {}
+	var tex: RID = info["tex"]
+	if not tex.is_valid():
+		return {}
+	return info
+
+
+# 建 cull set 7(Hi-Z 采样): 就绪绑真金字塔, 否则绑 1×1 占位。UniformSetCacheRD 按内容去重。
+func _make_hiz_set() -> RID:
+	var tex: RID = _hiz_dummy_tex
+	if not _hiz_info.is_empty():
+		tex = _hiz_info["tex"]
+	var u := RDUniform.new()
+	u.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	u.binding = 0
+	u.add_id(_hiz_sampler)
+	u.add_id(tex)
+	return UniformSetCacheRD.get_cache(_cull_shader, 7, [u])
 
 
 # 缓存 traverse uniform sets(per write_idx)
@@ -535,6 +655,8 @@ func _dispatch_cull(write_idx: int, mode: int, groups: int) -> void:
 	_rd.compute_list_bind_uniform_set(cl, sets[4], 4)
 	_rd.compute_list_bind_uniform_set(cl, sets[5], 5)   # Phase 4: lodtex
 	_rd.compute_list_bind_uniform_set(cl, sets[6], 6)   # Phase 4.5: adjacency
+	if _cur_hiz_set.is_valid():
+		_rd.compute_list_bind_uniform_set(cl, _cur_hiz_set, 7)   # Phase 5: Hi-Z(占位或真金字塔)
 	_rd.compute_list_set_push_constant(cl, pc.to_byte_array(), pc.size() * 4)
 	_rd.compute_list_dispatch(cl, groups, 1, 1)
 	_rd.compute_list_end()

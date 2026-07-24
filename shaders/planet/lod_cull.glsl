@@ -30,13 +30,20 @@ layout(set = 4, binding = 0, std140) uniform FrameData {
 	vec4 frustum[6];            // 6 视锥平面方程 = (nx,ny,nz,d), normal 内向, dot(n,p)+d>=0 表示内侧
 	vec4 cam_pos_pad;           // xyz=cam_pos(world), w=radius
 	vec4 planet_center_pad;     // xyz=planet_center(world), w=maxHeight
-	vec4 consts;                // x=bake_res_log2, y=maxLevel, z=_, w=MAX_PATCHES
+	vec4 consts;                // x=bake_res_log2, y=maxLevel, z=K_sse(=vp_h/(2·tan(fov/2))), w=MAX_PATCHES
+	// Phase 5 剔除参数:
+	vec4 cull_params;           // x=horizonEnable, y=horizonOccluderRadius, z=smallTriPixels, w=occlusionEnable
+	vec4 hiz_params;            // x=hiz_w(mip0), y=hiz_h(mip0), z=hiz_mip_count, w=hiz_ready
+	mat4 view_proj;             // world→clip(Godot reverse-Z: near→1, far→0), 遮挡投影用
 } fd;
 // Phase 4: LOD lookup texture, 20 face × 64×64 R8UI。每 cell 存覆盖它的叶的 level。
 // 边 query 点 = mid + (1/64) * normalize(mid - 对角 bary) 外推 1 cell(详见 lodtex_selftest.gd)。
 layout(set = 5, binding = 0, r8ui) readonly uniform uimage2DArray lodtex;
 // Phase 4.5: 邻接表 60 ints, [face*3+edge] = neighbor_face index。OOB query 时跨面 sample 用。
 layout(set = 6, binding = 0, std430) readonly buffer AdjBuf { int neighbor_face[60]; } adjacency;
+// Phase 5: Hi-Z 深度金字塔(上一帧 POST_OPAQUE 归约, reverse-Z min pyramid)。遮挡剔除采样。
+// 未就绪时绑 1×1 占位, 靠 fd.hiz_params.w(ready) 门控不采样。
+layout(set = 7, binding = 0) uniform sampler2D hiz_tex;
 
 // Phase 4.5: RAW_VERTS + FACES(与 lod_traverse.glsl 逐位一致), 用来构邻居 face 3 角点方向。
 const float PHI = 1.6180339887498948482;
@@ -120,6 +127,67 @@ int _sample_lodtex_smart(int face, int edge, vec2 uv, vec3 A, vec3 B, vec3 C) {
 	return _sample_lodtex_cross(face, edge, A, B, C);
 }
 
+// ---- Phase 5: 地平线剔除 ----
+// occluder = 以 planet_center 为心、Rocc 为半径的球(Rocc = radius + 全局最小径向位移 →
+// 保证内含于实心行星, 不会误剔可见 patch)。判定单点 P 是否被该球挡在背面:
+// Cesium isScaledSpacePointVisible 移植(缩放到单位球空间)。
+//   csp  = (cam - center) / Rocc                       (相机的缩放空间坐标)
+//   vhSq = dot(csp, csp) - 1                            (相机在球外 → >0; 在球内 → <0, 全可见)
+//   vt   = P/Rocc(相对 center) - csp                    (相机指向 P 的缩放向量)
+//   vtDotVc = -dot(vt, csp)
+//   occluded = vhSq<0 ? false : (vtDotVc > vhSq && vtDotVc² / dot(vt,vt) > vhSq)
+bool _point_below_horizon(vec3 P, vec3 center, float Rocc, vec3 csp, float vhSq) {
+	if (vhSq < 0.0) {
+		return false;   // 相机在 occluder 球内 → 不做地平线剔除(全可见)
+	}
+	vec3 vt = (P - center) / Rocc - csp;
+	float vtDotVc = -dot(vt, csp);
+	if (vtDotVc <= vhSq) {
+		return false;
+	}
+	return (vtDotVc * vtDotVc) / max(dot(vt, vt), 1e-20) > vhSq;
+}
+
+// ---- Phase 5: Hi-Z 遮挡剔除 ----
+// 把世界 AABB 8 角投影到屏幕, 取屏幕矩形 + 最近点深度(reverse-Z 最大 z), 选合适 mip,
+// 采矩形 4 角的 Hi-Z(min = 最远 occluder 的最近面), 若 AABB 最近点仍比它更远 → 全被挡 → cull。
+// 跨近平面(clip.w<=0)时投影不可靠 → 保守返回 false(不剔)。
+bool _occluded_hiz(vec3 bmin, vec3 bmax) {
+	vec2 uv_min = vec2(1.0e9);
+	vec2 uv_max = vec2(-1.0e9);
+	float z_near = -1.0e9;   // reverse-Z: 最近点 = 最大 z
+	for (int i = 0; i < 8; i++) {
+		vec3 p = vec3(
+			((i & 1) == 0) ? bmin.x : bmax.x,
+			((i & 2) == 0) ? bmin.y : bmax.y,
+			((i & 4) == 0) ? bmin.z : bmax.z);
+		vec4 clip = fd.view_proj * vec4(p, 1.0);
+		if (clip.w <= 1.0e-6) {
+			return false;   // 有角点在相机后/近平面上 → 不可靠, 不剔
+		}
+		vec3 ndc = clip.xyz / clip.w;
+		vec2 uv = ndc.xy * 0.5 + 0.5;
+		uv_min = min(uv_min, uv);
+		uv_max = max(uv_max, uv);
+		z_near = max(z_near, ndc.z);
+	}
+	// 夹到屏幕 [0,1]; 完全出屏交给 frustum, 这里不重复剔。
+	uv_min = clamp(uv_min, vec2(0.0), vec2(1.0));
+	uv_max = clamp(uv_max, vec2(0.0), vec2(1.0));
+	// 选 mip: 让屏幕矩形跨度 ≤ ~2 texel, 4 角采样即可覆盖。
+	float w_px = (uv_max.x - uv_min.x) * fd.hiz_params.x;
+	float h_px = (uv_max.y - uv_min.y) * fd.hiz_params.y;
+	float mip = ceil(log2(max(max(w_px, h_px), 1.0)));
+	mip = clamp(mip, 0.0, fd.hiz_params.z - 1.0);
+	// reverse-Z: 取 min = 该屏幕区域内"最远的最近面"(保守)。
+	float hz = textureLod(hiz_tex, vec2(uv_min.x, uv_min.y), mip).r;
+	hz = min(hz, textureLod(hiz_tex, vec2(uv_max.x, uv_min.y), mip).r);
+	hz = min(hz, textureLod(hiz_tex, vec2(uv_min.x, uv_max.y), mip).r);
+	hz = min(hz, textureLod(hiz_tex, vec2(uv_max.x, uv_max.y), mip).r);
+	// AABB 最近点(z_near) 仍比最远 occluder(hz) 更远 → 整个 AABB 被挡。
+	return z_near < hz;
+}
+
 void main() {
 	// ---- 特殊模式: reset / metadata(单线程, 与 lod_traverse 同模式) ----
 	if (pc.mode < 0) {
@@ -199,6 +267,45 @@ void main() {
 	}
 	if (culled) {
 		return;
+	}
+
+	// ---- Phase 5: 地平线剔除(3 角点 + 3 边中点, 都在 radius+maxH 的最高面; 全被行星本体挡 → cull) ----
+	// 用 patch 自身的 maxH(而非全局 maxHeight)→ 背面低地形更易剔; 测 6 点(角+边中)避免边中鼓出漏剔。
+	if (!sentinel && fd.cull_params.x > 0.5) {
+		float Rocc = fd.cull_params.y;
+		vec3 csp = (fd.cam_pos_pad.xyz - center) / Rocc;
+		float vhSq = dot(csp, csp) - 1.0;
+		vec3 AB = normalize(A + B);
+		vec3 BC = normalize(B + C);
+		vec3 CA = normalize(C + A);
+		float rmax = radius + maxH;
+		if (_point_below_horizon(center + A * rmax, center, Rocc, csp, vhSq)
+				&& _point_below_horizon(center + B * rmax, center, Rocc, csp, vhSq)
+				&& _point_below_horizon(center + C * rmax, center, Rocc, csp, vhSq)
+				&& _point_below_horizon(center + AB * rmax, center, Rocc, csp, vhSq)
+				&& _point_below_horizon(center + BC * rmax, center, Rocc, csp, vhSq)
+				&& _point_below_horizon(center + CA * rmax, center, Rocc, csp, vhSq)) {
+			return;
+		}
+	}
+
+	// ---- Phase 5: 小三角剔除(patch 最长边投影像素跨度 < 阈 → cull) ----
+	// proj_px = edge_world × K / dist; edge_world 用 radius+maxH 处的角点(过估 → 保守, 不误剔)。
+	if (fd.cull_params.z > 0.0) {
+		float edge = max(max(distance(A_max, B_max), distance(B_max, C_max)), distance(C_max, A_max));
+		vec3 pc_w = (A_max + B_max + C_max) * (1.0 / 3.0);
+		float dist_c = distance(fd.cam_pos_pad.xyz, pc_w);
+		float proj_px = edge * fd.consts.z / max(dist_c, 1.0e-3);
+		if (proj_px < fd.cull_params.z) {
+			return;
+		}
+	}
+
+	// ---- Phase 5: Hi-Z 遮挡剔除(上一帧深度金字塔; ready 门控) ----
+	if (!sentinel && fd.cull_params.w > 0.5 && fd.hiz_params.w > 0.5) {
+		if (_occluded_hiz(box_min, box_max)) {
+			return;
+		}
 	}
 
 	// ---- Phase 4 + 4.5: 算 3 边的 lodDelta(自己 - 邻居, max(0, ...)) ----

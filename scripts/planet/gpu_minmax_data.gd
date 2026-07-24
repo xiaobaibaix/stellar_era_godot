@@ -119,6 +119,24 @@ func _build_face_pyramid(mip0: PackedFloat32Array) -> Array:
 	return mips
 
 
+# 全局最小径向位移(世界单位, 通常 ≤ 0 表海沟)。取每面金字塔顶层(1×1 cell = 整面 min/max)的 min,
+# 再对 20 面取 min。用途: 地平线剔除的 occluder 球半径 = radius + global_min_disp —— 该球保证内含于
+# 实心行星(地形处处 ≥ 此位移), "在球背面" ⟹ "被行星挡住", 不会误剔可见 patch。
+func global_min_disp() -> float:
+	var pyr: Array = build_pyramid()
+	var gmin: float = MIN_SENTINEL
+	for fi in range(GpuIco.FACE_COUNT):
+		var fmips: Array = pyr[fi]
+		if fmips.is_empty():
+			continue
+		var top: PackedFloat32Array = fmips[fmips.size() - 1]   # 顶层 1×1: [min, max]
+		if top.size() >= 2 and top[0] < MIN_SENTINEL * 0.5:
+			gmin = min(gmin, top[0])
+	if gmin >= MIN_SENTINEL * 0.5:
+		return 0.0   # 无有效数据 → 退回 0(occluder = radius)
+	return gmin
+
+
 # 最近邻采样面 fi 指定 mip 的 (u, v) 的 (min, max)。u, v∈[0,1]。
 # 找包含 (u, v) 的 cell: i = floor(u * edge_k), j = floor(v * edge_k)。
 # 返回 (min, max); 若 cell 是哨兵(u, v 落到三角形外), 返回哨兵对。

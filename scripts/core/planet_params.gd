@@ -251,6 +251,15 @@ signal bulk_changed
 ## 直接跳过遍历与渲染, 大幅降 patch/三角数(角色模式性能主要来源)。远距观察全球时天然无剔除。
 @export var horizonCulling: bool = true:
 	set(v): horizonCulling = v; param_changed.emit("horizonCulling")
+## 小三角剔除(像素阈): patch 投影到屏幕的估算像素跨度 < 此值 → 剔除(太小不值得画)。
+## 估算 = world_size × K / dist(K = vp_h/(2·tan(fov/2))), 与 SSE 同量纲。0 = 关闭。
+## 收益: 极远/掠射角下的碎 patch 直接砍掉; 太大(>3)会在远处露洞, 建议 0.5~2。
+@export_range(0.0, 8.0, 0.1) var smallTriPixels: float = 1.0:
+	set(v): smallTriPixels = v; param_changed.emit("smallTriPixels")
+## 遮挡剔除(Hi-Z): 用上一帧深度金字塔(reverse-Z 取 min)剔掉被山体/近处地形挡住的背面 patch。
+## 1 帧延迟(快转时被挡→转出可能瞬间 pop-in, 可接受)。关掉可排查遮挡误剔。
+@export var occlusionCulling: bool = true:
+	set(v): occlusionCulling = v; param_changed.emit("occlusionCulling")
 ## 合并滞回(像素域, 适用于 SSE): 分裂阈 split_d = g_err×K/T; 合并阈 merge_d = split_d × mergeHysteresis。
 ## 两阈之间留死区 → 消除细分边界来回抖动(churn), 取代旧的 retired 合并缓存。
 @export_range(1.0, 2.0, 0.01) var mergeHysteresis: float = 1.15:
