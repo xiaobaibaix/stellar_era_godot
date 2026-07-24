@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://dc5b2avr2s27r"
+path="res://.godot/imported/godray_combine.glsl-d20aee1791e42db9b2c54ade2850564e.res"
+
+[deps]
+
+source_file="res://shaders/atmosphere/godray_combine.glsl"
+dest_files=["res://.godot/imported/godray_combine.glsl-d20aee1791e42db9b2c54ade2850564e.res"]
+
+[params]
+

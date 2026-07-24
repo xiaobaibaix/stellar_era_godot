@@ -9,25 +9,28 @@
 #version 450
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(set = 0, binding = 0, rgba16f) uniform image2D color_image;          // 写回(dst)
-layout(set = 1, binding = 0, rgba16f) uniform readonly image2D lit_image;   // 读(src, = color 快照)
+// 半分辨率化: 只输出 glow(不含 base)到低分辨率 glow 纹理, 交给 godray_combine.glsl 全分辨率上采样叠加。
+// 径向采样(samples 次 imageLoad)是 godray 的主要开销 → 在低分辨率跑省约 (1/scale)^2。
+// 采样源 lit 仍是全分辨率快照(coord∈[0,1] uv × src_size 定位), 保证光束源清晰。
+layout(set = 0, binding = 0, rgba16f) uniform image2D glow_image;           // 写(dst, 低分辨率, 仅 glow)
+layout(set = 1, binding = 0, rgba16f) uniform readonly image2D lit_image;   // 读(src, = color 快照, 全分辨率)
 
 layout(push_constant, std430) uniform Push {
-	vec2 raster_size;
+	vec2 out_size;        // 输出(glow, 低分辨率)尺寸
 	vec2 sun_uv;          // 太阳屏幕 uv([0,1])
 	vec4 p0;              // sunVis, strength, density, decay
 	vec4 p1;              // weight, threshold, samples, _pad
+	vec4 p2;              // xy = lit 全分辨率尺寸, zw 备用
 } pc;
 
 void main() {
 	ivec2 ip = ivec2(gl_GlobalInvocationID.xy);
-	if (ip.x >= int(pc.raster_size.x) || ip.y >= int(pc.raster_size.y)) {
+	if (ip.x >= int(pc.out_size.x) || ip.y >= int(pc.out_size.y)) {
 		return;
 	}
-	vec3 base = imageLoad(lit_image, ip).rgb;
 	float sun_vis = pc.p0.x;
 	if (sun_vis <= 0.001) {
-		imageStore(color_image, ip, vec4(base, 1.0));   // 太阳不在视野 → 直通
+		imageStore(glow_image, ip, vec4(0.0));   // 太阳不在视野 → 无 glow
 		return;
 	}
 	float strength = pc.p0.y;
@@ -36,8 +39,9 @@ void main() {
 	float weight = pc.p1.x;
 	float threshold = pc.p1.y;
 	int samples = int(pc.p1.z);
+	vec2 src_size = pc.p2.xy;
 
-	vec2 uv = (vec2(ip) + 0.5) / pc.raster_size;
+	vec2 uv = (vec2(ip) + 0.5) / pc.out_size;
 	vec2 delta = (uv - pc.sun_uv) * (density / float(max(samples, 1)));
 	vec2 coord = uv;
 	float illum = 1.0;
@@ -46,7 +50,7 @@ void main() {
 		if (i >= samples) break;
 		coord -= delta;
 		if (coord.x < 0.0 || coord.x > 1.0 || coord.y < 0.0 || coord.y > 1.0) break;  // 出屏即停, 不 clamp 到边缘 → 避免无尽涂抹/环形伪影
-		ivec2 sp = ivec2(clamp(coord * pc.raster_size, vec2(0.0), pc.raster_size - vec2(1.0)));
+		ivec2 sp = ivec2(clamp(coord * src_size, vec2(0.0), src_size - vec2(1.0)));
 		vec3 s = imageLoad(lit_image, sp).rgb;
 		float lum = dot(s, vec3(0.299, 0.587, 0.114));
 		s *= smoothstep(threshold, threshold + 0.35, lum);   // 只取较亮处(天空/太阳)作光源
@@ -54,6 +58,6 @@ void main() {
 		illum *= decay;
 	}
 	accum /= float(max(samples, 1));
-	vec3 outc = base + accum * strength * sun_vis;
-	imageStore(color_image, ip, vec4(outc, 1.0));
+	vec3 glow = accum * strength * sun_vis;
+	imageStore(glow_image, ip, vec4(glow, 1.0));
 }

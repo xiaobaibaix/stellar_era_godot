@@ -300,19 +300,39 @@ void main() {
 		}
 
 		float span = tFar - tNear;
-		int Nmarch = clouds ? max(int(fd.sun_exp_twilight.w), int(fd.counts.x) * 2) : int(fd.sun_exp_twilight.w);
-		Nmarch = max(Nmarch, 1);
-		float stepU = span / float(Nmarch);
+		// 大气用粗步长(整壳均匀); 云壳用细步长(仅 [tCloudIn,tCloudOut] 区间, 无论远近都给 ~cloudSteps 个采样)。
+		// 这样: 近地(整条视线都在云里)把云采样封顶到 cloudSteps → 省算; 远观薄云壳仍拿满采样 → 不再稀疏闪烁。
+		int atmoN = max(int(fd.sun_exp_twilight.w), 1);              // atmoSteps
+		float atmoStepU = span / float(atmoN);
+		float cloudStepU = atmoStepU;
+		float tCloudIn = 1e20;
+		float tCloudOut = -1e20;
+		if (clouds) {
+			// 云密度支撑区: h=(r-cbottom)/thick ∈ [-1.3,1.2] → 上界 r ≈ cbottom + 1.2*thick(略高于 ctop)。
+			// 用这个外球求视线∩云壳区间(单区间近似; 掠射穿壳中间的空洞会被细采样, 但空洞处 cloudDensity=0 只走廉价判空)。
+			float thickB = max(fd.radii.w - fd.radii.z, 1e-4);
+			float rHi = fd.radii.z + 1.2 * thickB;
+			vec2 hHi = raySphere(ro, rd, fd.planet_center.xyz, rHi);
+			tCloudIn = clamp(max(hHi.x, tNear), tNear, tFar);
+			tCloudOut = clamp(min(hHi.y, tFar), tNear, tFar);
+			int cloudN = max(int(fd.counts.x), 1);                  // cloudSteps
+			cloudStepU = max((tCloudOut - tCloudIn) / float(cloudN), 1e-4);
+		}
 		float jitter = mix(0.5, hash12(uv * vec2(1920.0, 1080.0) + fract(fd.cam_pos_time.w)), fd.ozone_dither.w);
-		float t = tNear + stepU * jitter;
+		float t = tNear + atmoStepU * jitter;
 
 		float g2 = fd.mie_params.x;                                   // mieG (循环不变, 提前算)
 
 		for (int i = 0; i < 512; i++) {
 			if (t >= tFar) break;
-			float jit = (hash12(uv * vec2(1920.0, 1080.0) + vec2(float(i) * 7.31, float(i) * 3.17)) - 0.5) * stepU * 0.25 * fd.ozone_dither.w;
+			// 自适应步长: 云壳内走细步, 壳外走粗步; 粗步不得跨过云壳入口(否则整片云被跳过), 细步不得跨过出口。
+			bool inBand = clouds && (t >= tCloudIn - 1e-4 && t < tCloudOut);
+			float ds = inBand ? cloudStepU : atmoStepU;
+			if (clouds && !inBand && t < tCloudIn) ds = min(ds, tCloudIn - t);
+			if (inBand) ds = min(ds, tCloudOut - t);
+			ds = clamp(ds, 1e-4, tFar - t);
+			float jit = (hash12(uv * vec2(1920.0, 1080.0) + vec2(float(i) * 7.31, float(i) * 3.17)) - 0.5) * ds * 0.25 * fd.ozone_dither.w;
 			vec3 p = ro + rd * (t + jit);
-			float ds = min(stepU, tFar - t);
 
 			// 大气: 密度×ds → 消光 sigA (per-pixel, 与太阳数无关)
 			vec3 dens = densityAt(p) * ds;
