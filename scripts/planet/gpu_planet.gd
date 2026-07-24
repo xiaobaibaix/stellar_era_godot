@@ -129,7 +129,7 @@ func _exit_tree() -> void:
 		_hiz_comp = null
 
 
-func _process(delta: float) -> void:
+func _process(_delta: float) -> void:
 	# 每帧: 轮询后台烘焙是否完成 → 推 LOD 帧数据 + 绑上一帧写好的纹理。
 	_poll_async_bake()
 	if _lod_comp == null or not is_instance_valid(camera) or _mat == null:
@@ -174,20 +174,23 @@ func _process(delta: float) -> void:
 		horizon_on = p.horizonCulling
 		small_tri_px = p.smallTriPixels
 		occlusion_on = p.occlusionCulling
-		# 自适应视锥外扩: 剔除结果晚一帧, 用相机角速度/线速度估算这一帧视角会扫过多远, 把 6 平面外推
-		# 相应余量(世界单位), 保住"上一帧刚被剔、这一帧进视野"的边缘 patch。静止 → 余量≈0(不损剔除)。
+		# 视锥外扩余量 = 常驻保险带 + 本帧运动量, 换算成世界单位后外推 6 平面。
+		#   常驻保险带(base_angle): 消除静止/近静止时紧贴屏幕边缘的空洞(贴近地表、地形铺满全屏时最明显)。
+		#   运动量(ang/lin, 本帧增量, 天然随帧率自适配): 补偿剔除的 1 帧延迟, 快速运动时额外多留。
+		#   d_ref 用"相机→地平线切点"距离 sqrt(dist²-R²): 贴地小(边缘 patch 近, 不必大外扩)、太空大
+		#   (随距离放大), 比 dist-to-center 更贴合可见地形的实际距离, 避免贴地时过度外扩浪费。
 		if p.cullFrustumMargin > 0.0:
-			var dt: float = maxf(delta, 1.0 / 240.0)
 			var fwd: Vector3 = -camera.global_transform.basis.z
-			var ang_speed: float = 0.0   # rad/s
-			var lin_speed: float = 0.0   # world/s
+			var ang: float = 0.0   # 本帧转过的弧度
+			var lin: float = 0.0   # 本帧移动的世界距离
 			if _cam_hist_valid:
-				ang_speed = acos(clampf(fwd.dot(_last_cam_fwd), -1.0, 1.0)) / dt
-				lin_speed = (cam_pos - _last_cam_pos).length() / dt
-			# d_ref: 边缘 patch 的代表距离(相机→星心, 夹到 [¼R, 2R])。角位移 × d_ref = 该距离处的横向世界位移。
+				ang = acos(clampf(fwd.dot(_last_cam_fwd), -1.0, 1.0))
+				lin = (cam_pos - _last_cam_pos).length()
 			var dist_c: float = cam_pos.distance_to(global_position)
-			var d_ref: float = clampf(dist_c, p.radius * 0.25, p.radius * 2.0)
-			frustum_margin = clampf(p.cullFrustumMargin * (ang_speed * d_ref + lin_speed) * dt, 0.0, p.radius)
+			var horizon_d: float = sqrt(maxf(dist_c * dist_c - p.radius * p.radius, 0.0))
+			var d_ref: float = clampf(horizon_d, p.radius * 0.1, maxf(dist_c, p.radius * 0.1))
+			var base_angle: float = 0.04   # 常驻角度保险带(~2.3°), 再乘 cullFrustumMargin 系数
+			frustum_margin = clampf(p.cullFrustumMargin * ((base_angle + ang) * d_ref + lin), 0.0, p.radius)
 			_last_cam_pos = cam_pos
 			_last_cam_fwd = fwd
 			_cam_hist_valid = true

@@ -260,11 +260,12 @@ signal bulk_changed
 ## 1 帧延迟(快转时被挡→转出可能瞬间 pop-in, 可接受)。关掉可排查遮挡误剔。
 @export var occlusionCulling: bool = true:
 	set(v): occlusionCulling = v; param_changed.emit("occlusionCulling")
-## 视锥外扩余量的安全系数(补偿 GPU 剔除的 1 帧延迟)。剔除结果比画面晚一帧, 相机贴角色快速平移/俯仰时,
-## 上一帧刚好卡边缘剔掉的 patch 这一帧已进视野 → 屏幕边缘锯齿/空洞。此系数按相机角速度/线速度自适应外扩
-## 视锥, 快速运动时多留一圈保险 patch, 静止时几乎不外扩。0 = 关闭(最省, 但快速运动有边缘缺口); 越大越不缺口
-## 但快速运动瞬间剔除效率略降。建议 1.5~3。
-@export_range(0.0, 8.0, 0.1) var cullFrustumMargin: float = 2.0:
+## 视锥外扩余量的安全系数(补偿 GPU 剔除的 1 帧延迟)。剔除结果比画面晚一帧, 且贴近地表、地形铺满全屏时,
+## 紧贴屏幕边缘的 patch 稍有偏差就露出黑色空洞。此系数控制视锥外扩量 = 常驻保险带(消除静止时的边缘空洞)
+## + 本帧相机运动量(补偿快速平移/俯仰的 1 帧延迟), 都按"相机→地平线"距离换算。静止时仍留常驻保险带。
+## 0 = 完全关闭(最省, 但会有边缘空洞); 越大越不会有空洞, 但会多留一圈屏幕外 patch(近距时略增开销)。
+## 建议 2~4; 贴近地表还看到边缘黑三角就往上调。
+@export_range(0.0, 8.0, 0.1) var cullFrustumMargin: float = 2.5:
 	set(v): cullFrustumMargin = v; param_changed.emit("cullFrustumMargin")
 ## 合并滞回(像素域, 适用于 SSE): 分裂阈 split_d = g_err×K/T; 合并阈 merge_d = split_d × mergeHysteresis。
 ## 两阈之间留死区 → 消除细分边界来回抖动(churn), 取代旧的 retired 合并缓存。
