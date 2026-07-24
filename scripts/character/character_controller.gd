@@ -79,12 +79,14 @@ var _anim: AnimationPlayer
 var _camera: Camera3D
 
 var _up: Vector3 = Vector3.UP
+var _face: Vector3 = Vector3.FORWARD   # 维护的"朝向"(切平面内单位向量); up 每帧精确对齐, 只平滑转 yaw
 var _v_up: float = 0.0            # 沿"上"的速度分量(重力/跳跃)
 var _grounded: bool = false
 var _cam_yaw: float = 0.0
 var _cam_pitch: float = -0.2
 var _cur_anim: String = ""
 var _cam_active: bool = false     # 本控制器当前是否在驱动相机(由 set_camera_active 切换)
+var _cam_snap: bool = false       # 接管相机后第一帧直接放到位(不 lerp), 避免从旧位置(可能在星球内)飞入
 
 
 func _ready() -> void:
@@ -107,6 +109,11 @@ func _ready() -> void:
 	_make_locomotion_loop()
 	# 落到地面(初始摆放不必精确; 若被放在球心附近, 用北极兜底)。
 	_snap_to_ground(true)
+	# 初始立正: 直接按重力 up 摆正朝向。否则会以场景里的 identity 姿态"趴"在地面(因为出生点的
+	# 径向 up 与角色 +Y 差 90°), 再慢慢 slerp 起来, 且在极点处 looking_at 退化 → 抖动。
+	_up = _current_up()
+	_face = _initial_face()
+	_apply_orientation()
 	# 初始相机激活: 用**内置**相机(未指定 external_camera)时自激活, 保证预制体单独拖进去也能玩;
 	# 指定了外部相机时(场景管理)默认不激活, 交给场景的 CameraDirector 调 set_camera_active 接管。
 	set_camera_active(control_camera and external_camera == null)
@@ -292,19 +299,41 @@ func _project_on_tangent(v: Vector3) -> Vector3:
 
 
 func _orient(delta: float, v_tan: Vector3) -> void:
-	var face: Vector3
-	if v_tan.length() > 0.3:
-		face = v_tan.normalized()
+	# 1) 把 _face 重新投影到当前切平面(绕球走动时 up 变了, 保持 _face ⟂ up)。
+	var f := _face - _up * _face.dot(_up)
+	if f.length() < 1.0e-4:
+		f = _initial_face()
 	else:
-		face = _project_on_tangent(-global_transform.basis.z)
-	# 目标 basis: -Z 指向 face, Y = up
-	var target := Basis.looking_at(face, _up)
-	var q_cur := global_transform.basis.get_rotation_quaternion()
-	var q_tgt := target.get_rotation_quaternion()
-	var q := q_cur.slerp(q_tgt, clampf(align_speed * delta, 0.0, 1.0))
+		f = f.normalized()
+	# 2) 移动时把 _face 朝移动方向"限速"旋转(绕 up 转 yaw), 不用 slerp 整个 basis → up 不滞后、不抖。
+	if v_tan.length() > 0.5:
+		var want := v_tan - _up * v_tan.dot(_up)
+		if want.length() > 1.0e-4:
+			want = want.normalized()
+			var ang := f.signed_angle_to(want, _up)
+			var step := clampf(ang, -align_speed * delta, align_speed * delta)
+			f = f.rotated(_up, step)
+	_face = f
+	# 3) 每帧按 (_face, _up) 精确重建 basis: Y 恰为 up(立正, 不趴), -Z 为 _face。
+	_apply_orientation()
+
+
+# 用 _face + _up 精确构造角色 basis(Y=up 立正, -Z=_face 朝向)。_face 已保证 ⟂ up。
+func _apply_orientation() -> void:
+	var b := Basis.looking_at(_face, _up)
 	var t := global_transform
-	t.basis = Basis(q)
+	t.basis = b
 	global_transform = t
+
+
+# 初始朝向: 取一个落在当前切平面(⟂ up)内的前向。依次尝试当前 -Z / +X / 任意, 直到非退化。
+func _initial_face() -> Vector3:
+	var candidates := [-global_transform.basis.z, global_transform.basis.x, Vector3.RIGHT, Vector3.FORWARD]
+	for c in candidates:
+		var t: Vector3 = c - _up * c.dot(_up)
+		if t.length() > 1.0e-4:
+			return t.normalized()
+	return _up.cross(Vector3.UP).normalized()
 
 
 # ---- 动画状态机 ----
@@ -338,6 +367,7 @@ func set_camera_active(active: bool) -> void:
 		return
 	_camera.top_level = true
 	_camera.current = true
+	_cam_snap = true   # 下一帧 _process 把相机直接放到跟随位, 避免从星球内/远处 lerp 飞入
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
@@ -366,7 +396,11 @@ func _process(delta: float) -> void:
 	var look := (Quaternion(right, _cam_pitch) * dir).normalized()
 	var head := global_position + up * cam_height
 	var cam_pos := head - look * cam_distance
-	_camera.global_position = _camera.global_position.lerp(cam_pos, clampf(12.0 * delta, 0.0, 1.0))
+	if _cam_snap:
+		_camera.global_position = cam_pos   # 接管首帧直接就位
+		_cam_snap = false
+	else:
+		_camera.global_position = _camera.global_position.lerp(cam_pos, clampf(12.0 * delta, 0.0, 1.0))
 	_camera.look_at(head, up)
 
 

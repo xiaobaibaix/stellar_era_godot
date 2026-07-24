@@ -39,7 +39,7 @@ transform = Transform3D(-0.8660254, -0.43301278, 0.25, 0, 0.49999997, 0.86602545
 shadow_enabled = true
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=2085450478]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 254.51886)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1250)
 script = ExtResource("1_invnv")
 
 [node name="GpuPlanet" type="Node3D" parent="." unique_id=1899334455 node_paths=PackedStringArray("camera")]
@@ -55,9 +55,10 @@ script = ExtResource("4_dbg")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 110)
 external_camera = NodePath("../Camera3D")
 
-[node name="CameraDirector" type="Node" parent="." unique_id=1618938564 node_paths=PackedStringArray("character", "orbit_camera")]
+[node name="CameraDirector" type="Node" parent="." unique_id=1618938564 node_paths=PackedStringArray("character", "orbit_camera", "planet")]
 script = ExtResource("7_camdir")
 character = NodePath("../RobotCharacter")
 orbit_camera = NodePath("../Camera3D")
+planet = NodePath("../GpuPlanet")
 
 [node name="Label" parent="." unique_id=584958529 instance=ExtResource("5_42vvu")]

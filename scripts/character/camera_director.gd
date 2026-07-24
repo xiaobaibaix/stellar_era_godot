@@ -16,7 +16,9 @@ enum Mode { CHARACTER, PLANET }
 ## 挂 character_controller.gd 的角色节点(需提供 set_camera_active(bool))。
 @export var character: Node
 ## 聚焦星球的轨道相机(OrbitCamera; 也就是全场景共用的那台相机)。
-@export var orbit_camera: Camera3D
+@export var orbit_camera: OrbitCamera
+## 星球(用于把轨道相机的聚焦目标/距离按半径自适应, 避免相机落进星球内部)。
+@export var planet: GpuPlanet
 ## 切换键(默认 M)。
 @export var toggle_key: Key = KEY_M
 ## 起始模式。
@@ -59,9 +61,25 @@ func _apply_mode() -> void:
 		orbit_camera.set_process(not to_character)
 		orbit_camera.set_process_unhandled_input(not to_character)
 		if not to_character:
+			_focus_planet()              # 按半径把聚焦目标/距离调好, 避免相机落进星球里
 			orbit_camera.current = true   # 回到星球模式确保它是渲染相机
 	# 角色相机驱动: 角色模式交给角色(内部会设 current + 捕获鼠标), 星球模式收回。
 	if character != null and character.has_method("set_camera_active"):
 		character.set_camera_active(to_character)
 	# 鼠标模式: 第三人称要捕获看向; 轨道要可见以便左键拖拽。
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if to_character else Input.MOUSE_MODE_VISIBLE
+
+
+# 把轨道相机的聚焦目标/最小距离按星球半径自适应, 保证相机始终在星球外部(半径变了也不会落进球里)。
+func _focus_planet() -> void:
+	if orbit_camera == null or planet == null:
+		return
+	var r: float = 100.0
+	if planet.params != null:
+		r = planet.params.radius
+	orbit_camera.target = planet.global_position
+	orbit_camera.min_distance = maxf(orbit_camera.min_distance, r * 1.1)   # 禁止缩放进球内
+	orbit_camera.max_distance = maxf(orbit_camera.max_distance, r * 8.0)
+	# 当前距离若在球内/贴脸, 拉到球外一个合适的观察距离(保留用户已有的更远缩放)。
+	if orbit_camera.distance < r * 1.2:
+		orbit_camera.set_orbit(planet.global_position, r * 2.5)
