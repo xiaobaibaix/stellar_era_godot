@@ -47,6 +47,22 @@ func set_orbit(p_target: Vector3, p_dist: float) -> void:
 	_cur_dist = p_dist
 
 
+## 当前 yaw/pitch/distance 对应的相机世界位姿(供模式切换过渡的目标位姿; 不改动自身)。
+## 与 _process 的构造一致(组合旋转), 保证过渡结束交接给本相机时不跳。
+func get_desired_transform() -> Transform3D:
+	var b := Basis.IDENTITY
+	b = b.rotated(Vector3.UP, yaw)
+	b = b.rotated(b.x, -pitch)
+	return Transform3D(b, target + b.z * distance)
+
+
+## 把平滑中间量(_cur_*)对齐到目标值。过渡结束把驱动交回本相机前调, 避免接管后再 lerp 造成跳变。
+func snap_to_target() -> void:
+	_cur_yaw = yaw
+	_cur_pitch = pitch
+	_cur_dist = distance
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
 		yaw -= event.relative.x * rotate_speed

@@ -377,12 +377,29 @@ func _update_animation(speed: float) -> void:
 func set_camera_active(active: bool) -> void:
 	_cam_active = active and control_camera and _camera != null
 	if not _cam_active:
+		_cam_anchor_r = -1.0   # 交出相机驱动: 重置高度平滑, 下次接管时重新初始化(过渡结束不跳)
 		return
 	# 相机现在是真正的子节点(由 CameraDirector 重挂到角色下), 不再用 top_level。
 	# 控制器每帧直接设它的**世界**位姿(global_position + look_at), 所以即便挂在会转身的角色下也不会跟着转。
 	_camera.current = true
 	_cam_snap = true   # 下一帧 _process 把相机直接放到跟随位, 避免从星球内/远处 lerp 飞入
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+## 返回第三人称跟随相机应处的世界位姿(供 CameraDirector 做模式切换过渡时的目标位姿; 不改动相机)。
+func get_follow_transform() -> Transform3D:
+	var up := _current_up()
+	var dir := _camera_horizontal_dir()
+	var right := dir.cross(up).normalized()
+	var look := (Quaternion(right, _cam_pitch) * dir).normalized()
+	var head := global_position + up * cam_height
+	var rel := head - _center
+	var hr := rel.length()
+	var hdir := (rel / hr) if hr > 1.0e-4 else up
+	var ar := _cam_anchor_r if _cam_anchor_r > 0.0 else hr
+	var anchor := _center + hdir * ar
+	var cam_pos := anchor - look * cam_distance
+	return Transform3D(Basis.looking_at(look, up), cam_pos)
 
 
 func is_camera_active() -> bool:
