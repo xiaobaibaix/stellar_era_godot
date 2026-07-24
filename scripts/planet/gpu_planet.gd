@@ -95,6 +95,10 @@ var _frozen_cam_pos: Vector3
 var _frozen_c_const: float = 0.0
 var _frozen_k: float = 0.0        # 冻结时的 K(小三角剔除像素投影用)
 var _frozen_frustum: Array = []
+# 相机运动历史(用于自适应视锥外扩余量, 补偿剔除 1 帧延迟)。
+var _cam_hist_valid := false
+var _last_cam_pos: Vector3 = Vector3.ZERO
+var _last_cam_fwd: Vector3 = Vector3.ZERO
 
 
 func _ready() -> void:
@@ -125,7 +129,7 @@ func _exit_tree() -> void:
 		_hiz_comp = null
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	# 每帧: 轮询后台烘焙是否完成 → 推 LOD 帧数据 + 绑上一帧写好的纹理。
 	_poll_async_bake()
 	if _lod_comp == null or not is_instance_valid(camera) or _mat == null:
@@ -144,9 +148,11 @@ func _process(_delta: float) -> void:
 	var horizon_on: bool = false
 	var small_tri_px: float = 0.0
 	var occlusion_on: bool = false
+	var frustum_margin: float = 0.0   # 视锥外扩余量(世界单位; 补偿剔除 1 帧延迟, 随相机运动自适应)
 	if _lod_frozen:
 		# 冻结: 用快照的相机位置/参数 + 快照的视锥。剔除**保留**(按冻结相机的视角)→ 旁观相机可绕到
 		# 任意角度检视"被剔成什么样"(视锥/地平线/小三角/遮挡的洞)。遮挡用冻结的 Hi-Z 金字塔(见下)。
+		# 冻结时不外扩(要看精确的冻结视锥); 清运动历史, 解冻后重新起算避免一帧巨跳。
 		cam_pos = _frozen_cam_pos
 		c_const = _frozen_c_const
 		k_sse = _frozen_k
@@ -154,6 +160,7 @@ func _process(_delta: float) -> void:
 		horizon_on = p.horizonCulling
 		small_tri_px = p.smallTriPixels
 		occlusion_on = p.occlusionCulling
+		_cam_hist_valid = false
 	else:
 		var vp := camera.get_viewport()
 		var vp_h: float = float(vp.size.y) if vp != null else 1080.0
@@ -167,6 +174,25 @@ func _process(_delta: float) -> void:
 		horizon_on = p.horizonCulling
 		small_tri_px = p.smallTriPixels
 		occlusion_on = p.occlusionCulling
+		# 自适应视锥外扩: 剔除结果晚一帧, 用相机角速度/线速度估算这一帧视角会扫过多远, 把 6 平面外推
+		# 相应余量(世界单位), 保住"上一帧刚被剔、这一帧进视野"的边缘 patch。静止 → 余量≈0(不损剔除)。
+		if p.cullFrustumMargin > 0.0:
+			var dt: float = maxf(delta, 1.0 / 240.0)
+			var fwd: Vector3 = -camera.global_transform.basis.z
+			var ang_speed: float = 0.0   # rad/s
+			var lin_speed: float = 0.0   # world/s
+			if _cam_hist_valid:
+				ang_speed = acos(clampf(fwd.dot(_last_cam_fwd), -1.0, 1.0)) / dt
+				lin_speed = (cam_pos - _last_cam_pos).length() / dt
+			# d_ref: 边缘 patch 的代表距离(相机→星心, 夹到 [¼R, 2R])。角位移 × d_ref = 该距离处的横向世界位移。
+			var dist_c: float = cam_pos.distance_to(global_position)
+			var d_ref: float = clampf(dist_c, p.radius * 0.25, p.radius * 2.0)
+			frustum_margin = clampf(p.cullFrustumMargin * (ang_speed * d_ref + lin_speed) * dt, 0.0, p.radius)
+			_last_cam_pos = cam_pos
+			_last_cam_fwd = fwd
+			_cam_hist_valid = true
+		else:
+			_cam_hist_valid = false
 	# occluder 半径: minmax 就绪后是 radius+全局最小位移(_apply_minmax 设); 否则保守下界 radius-maxHeight。
 	var occluder_r: float = _occluder_radius if _occluder_radius > 0.0 else max(p.radius - p.maxHeight, 1.0)
 	_lod_comp.set_frame_data({
@@ -183,6 +209,7 @@ func _process(_delta: float) -> void:
 		"horizonOccluderRadius": occluder_r,
 		"smallTriPixels": small_tri_px,
 		"occlusionCulling": occlusion_on,
+		"frustumMargin": frustum_margin,
 		"lod_frozen": _lod_frozen,
 	})
 	# Phase 5: 驱动 Hi-Z compositor。

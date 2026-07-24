@@ -475,13 +475,16 @@ func _update_frame_ubo(fd: Dictionary) -> void:
 	# → 打包时翻 N → 内向: vec4(-N.xyz, +d)。同一几何平面, 内向 N'=−N 时 d'=−d;
 	# shader plane.w = -d' = +d。详见 cull_selftest.gd (A)(验证内向 + vec4(N,-d) + 测 <0 这套约定)。
 	var frustum: Array = fd.get("frustum", [])
+	# 视锥外扩余量(世界单位): 内向法线约定下, plane.w += margin 把平面沿外向法线外推 margin →
+	# 视锥整体放大一圈。补偿剔除 1 帧延迟(相机快速运动时保住边缘刚进视野的 patch)。
+	var fmargin: float = float(fd.get("frustumMargin", 0.0))
 	for i in range(6):
 		if i < frustum.size():
 			var p: Plane = frustum[i]
 			floats[i * 4 + 0] = -p.normal.x   # 翻 N: 外向 → 内向
 			floats[i * 4 + 1] = -p.normal.y
 			floats[i * 4 + 2] = -p.normal.z
-			floats[i * 4 + 3] = p.d           # = -d_inward (d_inward = -d_outward)
+			floats[i * 4 + 3] = p.d + fmargin  # = -d_inward + 外扩余量(沿外向法线放大视锥)
 		else:
 			floats[i * 4 + 0] = 0.0
 			floats[i * 4 + 1] = 0.0
