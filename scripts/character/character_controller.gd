@@ -49,7 +49,15 @@ extends GravityCharacter3D
 ## 关: 只**读**相机朝向来决定移动方向, 相机位姿完全交给外部(它自己的脚本/rig)控制。
 @export var control_camera: bool = true
 @export var mouse_sensitivity: float = 0.003
+## 相机与角色的第三人称距离(初始值)。运行时可用鼠标滚轮拉远/拉近, 在 [cam_distance_min, cam_distance_max] 间调节。
 @export var cam_distance: float = 8.0
+## 滚轮缩放的最近/最远距离。
+@export var cam_distance_min: float = 3.0
+@export var cam_distance_max: float = 40.0
+## 每格滚轮改变的距离量。
+@export var cam_zoom_step: float = 2.0
+## 缩放平滑速率(帧率无关; 越大越跟手, 越小越缓)。
+@export var cam_zoom_smooth: float = 14.0
 @export var cam_height: float = 2.2
 ## 相机整体跟随平滑(帧率无关速率, 越大越紧跟、越小越飘)。主要用来抹掉 60Hz 物理步进的水平台阶感。
 @export var cam_follow_smooth: float = 18.0
@@ -93,11 +101,17 @@ var _cur_anim: String = ""
 var _cam_active: bool = false     # 本控制器当前是否在驱动相机(由 set_camera_active 切换)
 var _cam_snap: bool = false       # 接管相机后第一帧直接放到位(不 lerp), 避免从旧位置(可能在星球内)飞入
 var _cam_anchor_r: float = -1.0   # 平滑后的相机锚点"离球心半径"(消竖直颤抖); <0 = 未初始化
+var _cam_dist_target: float = 8.0 # 滚轮设定的目标距离(_ready 初始化为 cam_distance)
+var _cam_dist_cur: float = 8.0    # 平滑后的当前距离(每帧向 target 逼近)
 
 
 func _ready() -> void:
 	_resolve_planet()
 	_read_planet()
+	# 相机距离初始化(夹进 [min, max]); target 与 cur 同步, 避免开局插值。
+	cam_distance = clampf(cam_distance, cam_distance_min, cam_distance_max)
+	_cam_dist_target = cam_distance
+	_cam_dist_cur = cam_distance
 	# 找模型/动画/相机(路径无关, 靠名字/类型查找, 换预制体结构也不怕)。
 	_model = get_node_or_null("Model")
 	if _model == null:
@@ -398,7 +412,7 @@ func get_follow_transform() -> Transform3D:
 	var hdir := (rel / hr) if hr > 1.0e-4 else up
 	var ar := _cam_anchor_r if _cam_anchor_r > 0.0 else hr
 	var anchor := _center + hdir * ar
-	var cam_pos := anchor - look * cam_distance
+	var cam_pos := anchor - look * _cam_dist_cur
 	return Transform3D(Basis.looking_at(look, up), cam_pos)
 
 
@@ -436,10 +450,12 @@ func _process(delta: float) -> void:
 	var snapping := _cam_snap or _cam_anchor_r < 0.0
 	if snapping:
 		_cam_anchor_r = hr
+		_cam_dist_cur = _cam_dist_target   # 接管首帧: 距离直接到位, 不插值
 	else:
 		_cam_anchor_r = lerpf(_cam_anchor_r, hr, 1.0 - exp(-cam_height_smooth * delta))
+		_cam_dist_cur = lerpf(_cam_dist_cur, _cam_dist_target, 1.0 - exp(-cam_zoom_smooth * delta))
 	var anchor := _center + hdir * _cam_anchor_r
-	var desired := anchor - look * cam_distance
+	var desired := anchor - look * _cam_dist_cur
 	# 相机位置再整体平滑一次(帧率无关): 主要吸收 60Hz 物理步进, 让水平跟随顺滑不台阶。
 	if snapping:
 		_camera.global_position = desired
@@ -457,6 +473,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		_cam_yaw -= event.relative.x * mouse_sensitivity
 		_cam_pitch = clampf(_cam_pitch - event.relative.y * mouse_sensitivity,
 			deg_to_rad(cam_pitch_min_deg), deg_to_rad(cam_pitch_max_deg))
+	elif event is InputEventMouseButton and event.pressed:
+		# 滚轮拉近/拉远第三人称相机(改目标距离, _process 里平滑逼近)。上滚拉近, 下滚拉远。
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			_cam_dist_target = clampf(_cam_dist_target - cam_zoom_step, cam_distance_min, cam_distance_max)
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			_cam_dist_target = clampf(_cam_dist_target + cam_zoom_step, cam_distance_min, cam_distance_max)
 	elif event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
 		# Esc 释放/捕获鼠标, 方便调试
 		Input.mouse_mode = (Input.MOUSE_MODE_VISIBLE
