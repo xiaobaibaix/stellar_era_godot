@@ -52,7 +52,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		yaw -= event.relative.x * rotate_speed
 		var sgn := -1.0 if invert_y else 1.0
 		pitch -= event.relative.y * rotate_speed * sgn
-		pitch = clamp(pitch, -1.55, 1.55)
+		# 现在朝向靠组合旋转(不再 look_at UP), 极点不再退化, 可放宽到接近 ±90°(正俯视/仰视)。
+		pitch = clamp(pitch, -1.5707, 1.5707)
 	elif event is InputEventMouseButton and event.is_pressed():
 		match event.button_index:
 			MOUSE_BUTTON_WHEEL_UP:
@@ -71,7 +72,11 @@ func _process(_delta: float) -> void:
 		_cur_yaw = yaw
 		_cur_pitch = pitch
 		_cur_dist = distance
-	var cp := cos(_cur_pitch)
-	var offset := Vector3(cp * sin(_cur_yaw) * _cur_dist, sin(_cur_pitch) * _cur_dist, cp * cos(_cur_yaw) * _cur_dist)
-	global_position = target + offset
-	look_at(target, Vector3.UP)
+	# 用 yaw/pitch 直接【组合旋转】构造相机朝向(绕世界 Y 转 yaw, 再绕本地 X 转 pitch), 取代
+	# look_at(target, UP)。look_at 在视线接近世界 UP(俯视/仰视到极点)时会退化 → 相机翻滚/抖动
+	# ("极点问题"); 组合旋转在任意俯仰角都良定义, 且 right 轴恒水平(地平线不歪), 彻底消除极点问题。
+	# 数学上 b.z 与旧 offset 方向逐位相同 → 相机位置不变, 只是朝向在极点处稳定。
+	var b := Basis.IDENTITY
+	b = b.rotated(Vector3.UP, _cur_yaw)
+	b = b.rotated(b.x, -_cur_pitch)
+	global_transform = Transform3D(b, target + b.z * _cur_dist)

@@ -76,16 +76,18 @@ func _apply_mode() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if to_character else Input.MOUSE_MODE_VISIBLE
 
 
-# 把轨道相机的聚焦目标/最小距离按星球半径自适应, 保证相机始终在星球外部(半径变了也不会落进球里)。
+# 切到星球视角: 相机绕【球心】旋转(不是角色)。按半径把目标/距离调好, 保证相机在星球外部、
+# 缩放不进球内(半径变了也自适应)。角色相对星球很小, 整球视角下会小到看不见, 属正常。
 func _focus_planet() -> void:
-	if orbit_camera == null or planet == null:
+	if orbit_camera == null:
 		return
+	var center: Vector3 = planet.global_position if planet != null else Vector3.ZERO
 	var r: float = 100.0
-	if planet.params != null:
+	if planet != null and planet.params != null:
 		r = planet.params.radius
-	orbit_camera.target = planet.global_position
-	orbit_camera.min_distance = maxf(orbit_camera.min_distance, r * 1.1)   # 禁止缩放进球内
+	orbit_camera.target = center
+	orbit_camera.min_distance = maxf(r * 1.1, 2.0)      # 禁止缩放进球内
 	orbit_camera.max_distance = maxf(orbit_camera.max_distance, r * 8.0)
-	# 当前距离若在球内/贴脸, 拉到球外一个合适的观察距离(保留用户已有的更远缩放)。
+	# 距离若在球内/太近, 拉到能看到整颗星球的观察距离(保留用户已有的更远缩放)。
 	if orbit_camera.distance < r * 1.2:
-		orbit_camera.set_orbit(planet.global_position, r * 2.5)
+		orbit_camera.set_orbit(center, r * 2.5)
