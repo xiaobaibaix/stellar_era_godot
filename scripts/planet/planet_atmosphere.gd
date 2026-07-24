@@ -231,6 +231,7 @@ func _push_frame() -> void:
 		"mie_falloff": p.atmoMieFalloff,
 		"sun_intensity": p.atmoSunIntensity,
 		"exposure": p.atmoExposure,
+		"render_scale": p.atmoRenderScale,   # 大气/云 pass 分辨率比例(0.5=半分辨率省 ~4x)
 		"steps": p.atmoSteps,
 		"cloud_steps": p.cloudSteps,
 		"light_steps": p.atmoLightSteps,

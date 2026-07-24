@@ -17,6 +17,7 @@ class_name AtmosphereCompositor
 extends CompositorEffect
 
 const _SHADER_PATH := "res://shaders/atmosphere/atmosphere_compute.glsl"
+const _COMPOSITE_PATH := "res://shaders/atmosphere/composite.glsl"
 const _GODRAY_COPY_PATH := "res://shaders/atmosphere/godray_copy.glsl"
 const _GODRAY_PATH := "res://shaders/atmosphere/godray_compute.glsl"
 const _LUT_PATH := "res://shaders/atmosphere/transmittance_lut_compute.glsl"
@@ -30,6 +31,16 @@ var _depth_sampler: RID
 var _mutex := Mutex.new()
 var _shader_dirty := true
 var _frame: Dictionary = {}
+
+# 半分辨率大气/云: atmosphere pass 在缩放尺寸下算 L/T/cshadow → 两张 rgba16f 场纹理;
+# composite pass 全分辨率上采样合成回 color。scale=1.0 时场纹理即全分辨率(结果与旧就地合成等价)。
+var _comp_shader: RID
+var _comp_pipeline: RID
+var _comp_tried := false
+var _scat_tex: RID          # rgb=内散射 L, a=地面云影 cshadow
+var _trans_tex: RID         # rgb=逐通道透射率 T
+var _field_size := Vector2i.ZERO
+var _field_sampler: RID     # 线性 clamp, 供 composite 上采样场纹理
 
 # 体积光 God rays: copy(color→lit 快照) + godray(lit→color 径向累积)。lit = rgba16f 临时 storage 纹理。
 var _copy_shader: RID
@@ -82,6 +93,19 @@ func _notification(what: int) -> void:
 		if _lit_tex.is_valid():
 			_rd.free_rid(_lit_tex)
 			_lit_tex = RID()
+		if _comp_shader.is_valid():
+			_rd.free_rid(_comp_shader)
+			_comp_shader = RID()
+			_comp_pipeline = RID()
+		if _scat_tex.is_valid():
+			_rd.free_rid(_scat_tex)
+			_scat_tex = RID()
+		if _trans_tex.is_valid():
+			_rd.free_rid(_trans_tex)
+			_trans_tex = RID()
+		if _field_sampler.is_valid():
+			_rd.free_rid(_field_sampler)
+			_field_sampler = RID()
 		if _lut_shader.is_valid():
 			_rd.free_rid(_lut_shader)
 			_lut_shader = RID()
@@ -195,6 +219,51 @@ func _ensure_lit_tex(size: Vector2i) -> RID:
 	_lit_tex = _rd.texture_create(fmt, RDTextureView.new(), [])
 	_lit_size = size
 	return _lit_tex
+
+
+# 懒建全分辨率 composite pipeline(只试一次)。
+func _ensure_composite() -> bool:
+	if _comp_tried:
+		return _comp_pipeline.is_valid()
+	_comp_tried = true
+	var a := _compile_pipeline(_COMPOSITE_PATH)
+	_comp_shader = a[0]
+	_comp_pipeline = a[1]
+	return _comp_pipeline.is_valid()
+
+
+# 取/建 两张 rgba16f 场纹理(scat=L+cshadow, trans=T), storage(写)+sampling(上采样读)。尺寸变则重建。
+func _ensure_field_tex(size: Vector2i) -> bool:
+	if _scat_tex.is_valid() and _trans_tex.is_valid() and _field_size == size:
+		return true
+	if _scat_tex.is_valid():
+		_rd.free_rid(_scat_tex)
+		_scat_tex = RID()
+	if _trans_tex.is_valid():
+		_rd.free_rid(_trans_tex)
+		_trans_tex = RID()
+	var fmt := RDTextureFormat.new()
+	fmt.format = RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT
+	fmt.width = size.x
+	fmt.height = size.y
+	fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D
+	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
+	_scat_tex = _rd.texture_create(fmt, RDTextureView.new(), [])
+	_trans_tex = _rd.texture_create(fmt, RDTextureView.new(), [])
+	_field_size = size
+	return _scat_tex.is_valid() and _trans_tex.is_valid()
+
+
+func _ensure_field_sampler() -> RID:
+	if _field_sampler.is_valid():
+		return _field_sampler
+	var st := RDSamplerState.new()
+	st.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	st.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	st.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	st.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	_field_sampler = _rd.sampler_create(st)
+	return _field_sampler
 
 
 # 始终建好 256×64 rgba16f LUT 纹理(storage+sample); 保证大气 pass 的 set 3 可绑(未烘时 lut_on=0 不采样)。
@@ -381,19 +450,42 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 		var cam_pos: Vector3 = cam_xform.origin
 		var inv_proj: Projection = rsd.get_cam_projection().inverse()
 
+		# 全分辨率线程组数(composite + godray 用)
+		@warning_ignore("integer_division")
+		var xg: int = (size.x - 1) / 8 + 1
+		@warning_ignore("integer_division")
+		var yg: int = (size.y - 1) / 8 + 1
+
+		# 分辨率比例 → 大气/云 pass 的缩放尺寸(clamp 到 [0.25, 1.0]; 至少 1px)
+		var scale: float = clampf(f.get("render_scale", 0.5), 0.25, 1.0)
+		var asize := Vector2i(maxi(int(round(size.x * scale)), 1), maxi(int(round(size.y * scale)), 1))
+		@warning_ignore("integer_division")
+		var axg: int = (asize.x - 1) / 8 + 1
+		@warning_ignore("integer_division")
+		var ayg: int = (asize.y - 1) / 8 + 1
+
+		# 需要 composite pipeline + 两张场纹理; 任一不可用则本视图跳过(不写脏数据)。
+		if not _ensure_composite() or not _ensure_field_tex(asize):
+			continue
+
 		var ubo_rid: RID = _build_frame_ubo(f, cam_pos, inv_proj, cam_xform)
 
+		# ===== Pass 1: 大气/体积云 (缩放分辨率) → 写 L/T/cshadow 场纹理 =====
 		# set 0: UBO
 		var u0 := RDUniform.new()
 		u0.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
 		u0.binding = 0
 		u0.add_id(ubo_rid)
-		# set 1: color image(读+写)
-		var u1 := RDUniform.new()
-		u1.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
-		u1.binding = 0
-		u1.add_id(color_image)
-		# set 2: depth(sampler + texture)
+		# set 1: 两张输出场纹理(binding 0 = scat[L+cshadow], binding 1 = trans[T])
+		var u1a := RDUniform.new()
+		u1a.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+		u1a.binding = 0
+		u1a.add_id(_scat_tex)
+		var u1b := RDUniform.new()
+		u1b.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+		u1b.binding = 1
+		u1b.add_id(_trans_tex)
+		# set 2: depth(sampler + texture, 全分辨率场景深度)
 		var u2 := RDUniform.new()
 		u2.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
 		u2.binding = 0
@@ -407,15 +499,11 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 		u3.add_id(_lut_tex)
 
 		var set0 := UniformSetCacheRD.get_cache(_shader, 0, [u0])
-		var set1 := UniformSetCacheRD.get_cache(_shader, 1, [u1])
+		var set1 := UniformSetCacheRD.get_cache(_shader, 1, [u1a, u1b])
 		var set2 := UniformSetCacheRD.get_cache(_shader, 2, [u2])
 		var set3 := UniformSetCacheRD.get_cache(_shader, 3, [u3])
 
-		@warning_ignore("integer_division")
-		var xg: int = (size.x - 1) / 8 + 1
-		@warning_ignore("integer_division")
-		var yg: int = (size.y - 1) / 8 + 1
-		var pc := PackedFloat32Array([float(size.x), float(size.y), lut_on, 0.0])
+		var pc := PackedFloat32Array([float(asize.x), float(asize.y), lut_on, 0.0])
 
 		var cl := _rd.compute_list_begin()
 		_rd.compute_list_bind_compute_pipeline(cl, _pipeline)
@@ -424,10 +512,39 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 		_rd.compute_list_bind_uniform_set(cl, set2, 2)
 		_rd.compute_list_bind_uniform_set(cl, set3, 3)
 		_rd.compute_list_set_push_constant(cl, pc.to_byte_array(), pc.size() * 4)
-		_rd.compute_list_dispatch(cl, xg, yg, 1)
+		_rd.compute_list_dispatch(cl, axg, ayg, 1)
 		_rd.compute_list_end()
 
 		_rd.free_rid(ubo_rid)   # GPU 用完再释放(渲染设备延迟释放)
+
+		# ===== Pass 2: 全分辨率合成(上采样 L/T/cshadow, 与全分辨率场景色合成)=====
+		var exposure: float = f.get("exposure", 1.0)
+		var c0 := RDUniform.new()
+		c0.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+		c0.binding = 0
+		c0.add_id(color_image)
+		var c1 := RDUniform.new()
+		c1.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+		c1.binding = 0
+		c1.add_id(_ensure_field_sampler())
+		c1.add_id(_scat_tex)
+		var c2 := RDUniform.new()
+		c2.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+		c2.binding = 0
+		c2.add_id(_ensure_field_sampler())
+		c2.add_id(_trans_tex)
+		var cset0 := UniformSetCacheRD.get_cache(_comp_shader, 0, [c0])
+		var cset1 := UniformSetCacheRD.get_cache(_comp_shader, 1, [c1])
+		var cset2 := UniformSetCacheRD.get_cache(_comp_shader, 2, [c2])
+		var cpc := PackedFloat32Array([float(size.x), float(size.y), exposure, 0.0])
+		var clc := _rd.compute_list_begin()
+		_rd.compute_list_bind_compute_pipeline(clc, _comp_pipeline)
+		_rd.compute_list_bind_uniform_set(clc, cset0, 0)
+		_rd.compute_list_bind_uniform_set(clc, cset1, 1)
+		_rd.compute_list_bind_uniform_set(clc, cset2, 2)
+		_rd.compute_list_set_push_constant(clc, cpc.to_byte_array(), cpc.size() * 4)
+		_rd.compute_list_dispatch(clc, xg, yg, 1)
+		_rd.compute_list_end()
 
 		# —— 体积光 God rays(移植 web createGodrayPass): 大气合成后, 从太阳屏幕位置径向累积亮束 ——
 		if f.get("godrays_on", 0.0) > 0.5 and _ensure_godray():

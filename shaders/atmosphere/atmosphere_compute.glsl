@@ -35,7 +35,10 @@ layout(set = 0, binding = 0, std140) uniform FrameData {
 	vec4 cloud_c;              // cshadow, cterminator, 0, 0
 } fd;
 
-layout(set = 1, binding = 0, rgba16f) uniform image2D color_image;
+// 半分辨率输出: 不再就地合成到场景色, 而是把内散射 L + 逐通道透射率 T + 地面云影因子分离写出,
+// 交给全分辨率 composite pass 上采样后合成(scene 保持全分辨率清晰)。
+layout(set = 1, binding = 0, rgba16f) uniform image2D scat_image;    // rgb = 内散射 L, a = 地面云影 cshadowFac
+layout(set = 1, binding = 1, rgba16f) uniform image2D trans_image;   // rgb = 逐通道透射率 T
 layout(set = 2, binding = 0) uniform sampler2D depth_tex;
 layout(set = 3, binding = 0) uniform sampler2D lut_tex;   // 透射率 LUT(rgb=向太阳光学深度); lut_on=1 时用
 
@@ -255,9 +258,6 @@ void main() {
 		hitGround = true;
 	}
 
-	vec4 scene = imageLoad(color_image, ipix);
-	vec3 sceneColor = scene.rgb;
-
 	// 视线在大气壳内的区间
 	vec2 atmo = raySphere(ro, rd, fd.planet_center.xyz, fd.radii.y);
 	float tNear = max(atmo.x, 0.0);
@@ -390,8 +390,9 @@ void main() {
 		}
 	}
 
-	// 精确合成: scene·(云影·T逐通道) + L, 再乘曝光(线性 HDR, 交 WorldEnvironment AgX)
-	vec3 bg = sceneColor * cshadowFac;
-	vec3 finalColor = (bg * T + L) * fd.sun_exp_twilight.y;     // exposure
-	imageStore(color_image, ipix, vec4(finalColor, scene.a));
+	// 分离写出(半分辨率): L(内散射)、T(逐通道透射率)、cshadowFac(地面云影)。
+	// 全分辨率 composite pass 会做: final = (scene·cshadow·T + L)·exposure。
+	// 曝光不在此乘, 留给 composite(避免半分辨率场把曝光烘进上采样)。
+	imageStore(scat_image, ipix, vec4(L, cshadowFac));
+	imageStore(trans_image, ipix, vec4(T, 1.0));
 }
