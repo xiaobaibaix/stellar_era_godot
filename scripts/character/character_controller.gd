@@ -62,8 +62,9 @@ extends GravityCharacter3D
 @export var anim_jump: String = "Robot_Jump"
 ## 切换到跑步动画的速度阈值。
 @export var run_anim_threshold: float = 10.0
-## 美术朝向修正(度, 绕自身 Y)。若机器人"倒着走"就设 180。
-@export var model_yaw_offset_deg: float = 0.0
+## 美术朝向修正(度, 绕自身 Y)。Quaternius 机器人美术朝向为 +Z, 而 Godot 前方是 -Z, 故默认 180
+## 让模型正面对准移动方向(否则会"倒着走 / 前后左右都反")。若换了朝 -Z 的模型就设 0。
+@export var model_yaw_offset_deg: float = 180.0
 
 # ---- 内部状态 ----
 var _planet: GpuPlanet
@@ -83,6 +84,7 @@ var _grounded: bool = false
 var _cam_yaw: float = 0.0
 var _cam_pitch: float = -0.2
 var _cur_anim: String = ""
+var _cam_active: bool = false     # 本控制器当前是否在驱动相机(由 set_camera_active 切换)
 
 
 func _ready() -> void:
@@ -99,18 +101,15 @@ func _ready() -> void:
 		_camera = get_node_or_null("Camera3D") as Camera3D
 		if _camera == null:
 			_camera = find_child("Camera3D", true, false) as Camera3D
-	# 仅当由本控制器驱动相机时, 才脱离父变换(自己掌控世界位姿, 不被角色转身带着转)+ 接管画面。
-	if _camera != null and control_camera:
-		_camera.top_level = true
-		_camera.current = true
 	# 应用美术朝向修正。
 	if _model != null and absf(model_yaw_offset_deg) > 0.001:
 		_model.rotation = Vector3(0.0, deg_to_rad(model_yaw_offset_deg), 0.0)
 	_make_locomotion_loop()
 	# 落到地面(初始摆放不必精确; 若被放在球心附近, 用北极兜底)。
 	_snap_to_ground(true)
-	if _camera != null and control_camera:
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	# 初始相机激活: 用**内置**相机(未指定 external_camera)时自激活, 保证预制体单独拖进去也能玩;
+	# 指定了外部相机时(场景管理)默认不激活, 交给场景的 CameraDirector 调 set_camera_active 接管。
+	set_camera_active(control_camera and external_camera == null)
 
 
 # ---- 星球解析(自动查找, 零耦合) ----
@@ -215,10 +214,10 @@ func _physics_process(delta: float) -> void:
 
 	# --- 水平朝向参考 ---
 	var fwd_t: Vector3
-	if _camera != null and control_camera:
+	if _cam_active:
 		fwd_t = _camera_horizontal_dir()                                # 我们驱动的相机: 用内部 yaw
 	elif _camera != null:
-		fwd_t = _project_on_tangent(-_camera.global_transform.basis.z)  # 外部驱动的相机: 读它的实际朝向
+		fwd_t = _project_on_tangent(-_camera.global_transform.basis.z)  # 外部/轨道相机: 读它的实际朝向
 	else:
 		fwd_t = _project_on_tangent(-global_transform.basis.z)          # 无相机: 用当前朝向
 	var right_t := fwd_t.cross(_up).normalized()
@@ -329,6 +328,23 @@ func _update_animation(speed: float) -> void:
 	_cur_anim = want
 
 
+## 由外部(如 CameraDirector)调用, 接管/交还本控制器对相机的驱动。
+## active=true : 脱离父变换 + 设为当前相机 + 捕获鼠标 + 每帧第三人称跟随驱动。
+## active=false: 停止驱动、不再碰鼠标(相机位姿交给外部, 如轨道相机)。
+## 注: control_camera=false(外部完全自驱)时本方法不接管相机, 仅保证不干扰。
+func set_camera_active(active: bool) -> void:
+	_cam_active = active and control_camera and _camera != null
+	if not _cam_active:
+		return
+	_camera.top_level = true
+	_camera.current = true
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func is_camera_active() -> bool:
+	return _cam_active
+
+
 # ---- 内置第三人称相机(重力对齐, 独立朝向) ----
 func _camera_horizontal_dir() -> Vector3:
 	# 以世界参考在切平面上取一个稳定的"前"方向, 再按 _cam_yaw 绕 up 旋转。
@@ -340,8 +356,8 @@ func _camera_horizontal_dir() -> Vector3:
 
 
 func _process(delta: float) -> void:
-	# 只有"由本控制器驱动"时才摆放相机; 外部驱动模式下什么都不做。
-	if _camera == null or not control_camera:
+	# 只有本控制器处于激活(驱动相机)状态时才摆放相机; 否则相机交给外部(轨道相机/CameraDirector)。
+	if not _cam_active:
 		return
 	var up := _current_up()
 	var dir := _camera_horizontal_dir()
@@ -355,8 +371,8 @@ func _process(delta: float) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	# 只有驱动相机时才处理鼠标看向; 外部驱动模式把鼠标交给外部脚本。
-	if _camera == null or not control_camera:
+	# 只有激活(驱动相机)时才处理鼠标看向; 否则鼠标交给外部(轨道相机/CameraDirector)。
+	if not _cam_active:
 		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_cam_yaw -= event.relative.x * mouse_sensitivity

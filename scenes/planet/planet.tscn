@@ -5,6 +5,8 @@
 [ext_resource type="Script" uid="uid://7boxikbjeden" path="res://scripts/core/planet_params.gd" id="4_2vvio"]
 [ext_resource type="Script" uid="uid://rgcdpm1go5yq" path="res://scripts/planet/planet_lod_debug.gd" id="4_dbg"]
 [ext_resource type="PackedScene" uid="uid://beyqcputa5pgw" path="res://scenes/fps.tscn" id="5_42vvu"]
+[ext_resource type="PackedScene" uid="uid://chettq2yjg6nk" path="res://scenes/character/robot_character.tscn" id="6_robot"]
+[ext_resource type="Script" uid="uid://8blbng5p8fn2" path="res://scripts/character/camera_director.gd" id="7_camdir"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_p4lu5"]
 sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
@@ -22,6 +24,8 @@ glow_enabled = true
 
 [sub_resource type="Resource" id="Resource_25nq4"]
 script = ExtResource("4_2vvio")
+radius = 500.0
+maxHeight = 40.0
 metadata/_custom_type_script = "uid://7boxikbjeden"
 
 [node name="Node" type="Node" unique_id=710792981]
@@ -46,5 +50,14 @@ patch_resolution = 8
 
 [node name="LODDebug" type="Node" parent="." unique_id=1748920366]
 script = ExtResource("4_dbg")
+
+[node name="RobotCharacter" parent="." unique_id=1570974038 node_paths=PackedStringArray("external_camera") instance=ExtResource("6_robot")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 110)
+external_camera = NodePath("../Camera3D")
+
+[node name="CameraDirector" type="Node" parent="." unique_id=1618938564 node_paths=PackedStringArray("character", "orbit_camera")]
+script = ExtResource("7_camdir")
+character = NodePath("../RobotCharacter")
+orbit_camera = NodePath("../Camera3D")
 
 [node name="Label" parent="." unique_id=584958529 instance=ExtResource("5_42vvu")]
