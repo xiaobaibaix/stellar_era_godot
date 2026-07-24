@@ -421,7 +421,10 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 
 	# Phase 5: view_proj(world→clip)从 render_data 取 —— 渲染线程算, 保证 reverse-Z 约定与深度缓冲一致
 	# (与主线程 camera.get_camera_projection 相比, 这个和 Hi-Z 深度是同一套投影)。遮挡剔除用。
-	_view_proj = _compute_view_proj(render_data)
+	# 冻结时**不更新** → 保留冻结前最后一帧(冻结相机)的投影, 与冻住的 Hi-Z 金字塔匹配 →
+	# 遮挡剔除定格在冻结视角(旁观相机绕看被遮挡剔除的洞)。
+	if not bool(fd.get("lod_frozen", false)):
+		_view_proj = _compute_view_proj(render_data)
 	# Phase 5: 查 Hi-Z provider(上一帧建好的金字塔); 未就绪 → 空 → 绑占位、ready=0。
 	_hiz_info = _query_hiz()
 

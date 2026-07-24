@@ -83,6 +83,7 @@ var _bake_save_path: String = ""
 var _lod_frozen := false
 var _frozen_cam_pos: Vector3
 var _frozen_c_const: float = 0.0
+var _frozen_k: float = 0.0        # 冻结时的 K(小三角剔除像素投影用)
 var _frozen_frustum: Array = []
 
 
@@ -125,15 +126,20 @@ func _process(_delta: float) -> void:
 	var c_const: float
 	var k_sse: float = 0.0
 	var frustum: Array
-	# Phase 5 剔除开关: 冻结调试时全关(cull 全通过 → 整球可见, 旁观相机绕看不缺面)。
+	# Phase 5 剔除开关(冻结与否都按 params 驱动; 冻结时用快照相机, 便于旁观检视被剔结果)。
 	var horizon_on: bool = false
 	var small_tri_px: float = 0.0
 	var occlusion_on: bool = false
 	if _lod_frozen:
-		# 冻结: 用快照的相机位置/参数; 视锥用空(cull 全通过)→ 整球可见, 旁观相机绕看不缺面。
+		# 冻结: 用快照的相机位置/参数 + 快照的视锥。剔除**保留**(按冻结相机的视角)→ 旁观相机可绕到
+		# 任意角度检视"被剔成什么样"(视锥/地平线/小三角/遮挡的洞)。遮挡用冻结的 Hi-Z 金字塔(见下)。
 		cam_pos = _frozen_cam_pos
 		c_const = _frozen_c_const
+		k_sse = _frozen_k
 		frustum = _frozen_frustum
+		horizon_on = p.horizonCulling
+		small_tri_px = p.smallTriPixels
+		occlusion_on = p.occlusionCulling
 	else:
 		var vp := camera.get_viewport()
 		var vp_h: float = float(vp.size.y) if vp != null else 1080.0
@@ -163,10 +169,15 @@ func _process(_delta: float) -> void:
 		"horizonOccluderRadius": occluder_r,
 		"smallTriPixels": small_tri_px,
 		"occlusionCulling": occlusion_on,
+		"lod_frozen": _lod_frozen,
 	})
-	# Phase 5: 驱动 Hi-Z compositor(遮挡关 / 冻结时不建金字塔, 零开销)。
+	# Phase 5: 驱动 Hi-Z compositor。
+	#   非冻结 + 遮挡开 → 每帧重建金字塔。
+	#   冻结 → 停止重建 → 冻住冻结瞬间(冻结相机最后一帧)的金字塔; cull 用冻结的 view_proj 采它,
+	#          于是遮挡剔除也定格在冻结视角, 旁观相机可绕看被遮挡剔除的洞。
+	#   遮挡关 → 不建。
 	if _hiz_comp != null:
-		_hiz_comp.set_active(occlusion_on)
+		_hiz_comp.set_active(occlusion_on and not _lod_frozen)
 	# minmax 未就绪时 cull 被跳过 → cull_tex 全 0 → vertex 坍缩无渲染(灰屏);
 	# 此时保持绑 fallback(20 面 Phase-1 风格), 让用户看到东西而不是空屏。
 	# 一旦 set_minmax 成功(下帧起), cull 写出有效 count, 切到 cull_tex 真正的 GPU LOD。
@@ -182,8 +193,9 @@ func _process(_delta: float) -> void:
 
 
 # ---- LOD 冻结接口(供 planet_lod_debug.gd 调; 调试用) ----
-# 冻结: 快照当前相机位置/C_const, 之后 _process 用快照驱动 LOD; 视锥置空 → cull 全通过 →
-# 整球在冻结后仍全部渲染, 旁观相机可绕到任意角度看清 patch 结构, 不会因旧视锥裁剪而缺面。
+# 冻结: 快照当前相机位置/C_const/K/视锥, 之后 _process 用快照驱动 LOD **和全部剔除**(视锥/地平线/
+# 小三角/遮挡)。遮挡的 Hi-Z 金字塔也一并冻住(停止重建)。于是 LOD + 剔除结果定格在冻结相机视角,
+# 旁观相机(planet_lod_debug.gd)可绕到任意角度检视"被剔成什么样"(缺面 = 被剔的 patch)。
 func freeze_lod() -> void:
 	if not is_instance_valid(camera):
 		return
@@ -193,8 +205,10 @@ func freeze_lod() -> void:
 	var fov_rad: float = deg_to_rad(camera.fov)
 	var k: float = vp_h / (2.0 * tan(fov_rad * 0.5))
 	_frozen_c_const = p.maxHeight * k / max(p.sseThresholdPixels, 0.001)
+	_frozen_k = k
 	_frozen_cam_pos = camera.global_position
-	_frozen_frustum = []   # 空视锥 → 不裁剪 → 整球可见
+	# 快照**真实**视锥(不再置空): 冻结后仍按冻结相机做剔除, 旁观相机绕看能看到被剔的洞。
+	_frozen_frustum = camera.get_frustum() if camera.is_inside_tree() else []
 	_lod_frozen = true
 
 
