@@ -38,27 +38,27 @@ compositor = SubResource("Compositor_gplod")
 transform = Transform3D(-0.8660254, -0.43301278, 0.25, 0, 0.49999997, 0.86602545, -0.50000006, 0.75, -0.43301266, 0, 0, 0)
 shadow_enabled = true
 
-[node name="Camera3D" type="Camera3D" parent="." unique_id=2085450478]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1250)
-script = ExtResource("1_invnv")
-
 [node name="GpuPlanet" type="Node3D" parent="." unique_id=1899334455 node_paths=PackedStringArray("camera")]
 script = ExtResource("3_gp")
 params = SubResource("Resource_25nq4")
-camera = NodePath("../Camera3D")
+camera = NodePath("Camera3D")
 patch_resolution = 8
+
+[node name="RobotCharacter" parent="GpuPlanet" unique_id=1570974038 node_paths=PackedStringArray("external_camera") instance=ExtResource("6_robot")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 110)
+external_camera = NodePath("../Camera3D")
+
+[node name="Camera3D" type="Camera3D" parent="GpuPlanet" unique_id=2085450478]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1250)
+script = ExtResource("1_invnv")
 
 [node name="LODDebug" type="Node" parent="." unique_id=1748920366]
 script = ExtResource("4_dbg")
 
-[node name="RobotCharacter" parent="." unique_id=1570974038 node_paths=PackedStringArray("external_camera") instance=ExtResource("6_robot")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 110)
-external_camera = NodePath("../Camera3D")
-
 [node name="CameraDirector" type="Node" parent="." unique_id=1618938564 node_paths=PackedStringArray("character", "orbit_camera", "planet")]
 script = ExtResource("7_camdir")
-character = NodePath("../RobotCharacter")
-orbit_camera = NodePath("../Camera3D")
+character = NodePath("../GpuPlanet/RobotCharacter")
+orbit_camera = NodePath("../GpuPlanet/Camera3D")
 planet = NodePath("../GpuPlanet")
 
 [node name="Label" parent="." unique_id=584958529 instance=ExtResource("5_42vvu")]

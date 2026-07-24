@@ -15,7 +15,3 @@ shape = SubResource("Capsule_char")
 
 [node name="Model" parent="." unique_id=620872380 instance=ExtResource("2_robot")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.9, 0)
-
-[node name="Camera3D" type="Camera3D" parent="." unique_id=2068372274]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 8)
-far = 500000.0

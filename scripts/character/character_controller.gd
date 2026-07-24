@@ -51,6 +51,11 @@ extends GravityCharacter3D
 @export var mouse_sensitivity: float = 0.003
 @export var cam_distance: float = 8.0
 @export var cam_height: float = 2.2
+## 相机整体跟随平滑(帧率无关速率, 越大越紧跟、越小越飘)。主要用来抹掉 60Hz 物理步进的水平台阶感。
+@export var cam_follow_smooth: float = 18.0
+## 相机"离球心高度"的平滑(越小越平滑)。专门吸收角色贴地时的竖直起伏/颤抖(下坡尤其明显)——
+## 这样水平方向照常紧跟, 而竖直方向被低通, 画面不再随地形上下抖。太小会让跳跃时相机竖直跟得偏慢。
+@export var cam_height_smooth: float = 6.0
 @export var cam_pitch_min_deg: float = -60.0
 @export var cam_pitch_max_deg: float = 75.0
 
@@ -87,6 +92,7 @@ var _cam_pitch: float = -0.2
 var _cur_anim: String = ""
 var _cam_active: bool = false     # 本控制器当前是否在驱动相机(由 set_camera_active 切换)
 var _cam_snap: bool = false       # 接管相机后第一帧直接放到位(不 lerp), 避免从旧位置(可能在星球内)飞入
+var _cam_anchor_r: float = -1.0   # 平滑后的相机锚点"离球心半径"(消竖直颤抖); <0 = 未初始化
 
 
 func _ready() -> void:
@@ -97,12 +103,19 @@ func _ready() -> void:
 	if _model == null:
 		_model = _find_first_child_node3d_except_camera()
 	_anim = find_child("AnimationPlayer", true, false) as AnimationPlayer
-	# 相机解析: 外部指定优先, 否则用内置 Camera3D 子节点。
+	# 相机解析: 外部指定优先(场景那台), 否则找子 Camera3D, 都没有再运行时建一个(单独拖预制体也能玩)。
+	# 预制体本身不再内置 Camera3D 节点 —— 避免和场景相机并存造成"两个相机"的困惑。
 	_camera = external_camera
 	if _camera == null:
 		_camera = get_node_or_null("Camera3D") as Camera3D
 		if _camera == null:
 			_camera = find_child("Camera3D", true, false) as Camera3D
+	if _camera == null and control_camera:
+		var auto_cam := Camera3D.new()
+		auto_cam.name = "AutoCamera"
+		auto_cam.far = 500000.0
+		add_child(auto_cam)
+		_camera = auto_cam
 	# 应用美术朝向修正。
 	if _model != null and absf(model_yaw_offset_deg) > 0.001:
 		_model.rotation = Vector3(0.0, deg_to_rad(model_yaw_offset_deg), 0.0)
@@ -365,7 +378,8 @@ func set_camera_active(active: bool) -> void:
 	_cam_active = active and control_camera and _camera != null
 	if not _cam_active:
 		return
-	_camera.top_level = true
+	# 相机现在是真正的子节点(由 CameraDirector 重挂到角色下), 不再用 top_level。
+	# 控制器每帧直接设它的**世界**位姿(global_position + look_at), 所以即便挂在会转身的角色下也不会跟着转。
 	_camera.current = true
 	_cam_snap = true   # 下一帧 _process 把相机直接放到跟随位, 避免从星球内/远处 lerp 飞入
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -392,16 +406,30 @@ func _process(delta: float) -> void:
 	var up := _current_up()
 	var dir := _camera_horizontal_dir()
 	var right := dir.cross(up).normalized()
-	# 俯仰
+	# 鼠标看向(look)不平滑, 保持跟手。
 	var look := (Quaternion(right, _cam_pitch) * dir).normalized()
+
+	# 锚点 = 角色头部, 但把"离球心的高度"单独做帧率无关低通:
+	#   角色贴地时是被夹到 center + dir*(radius + h*maxHeight); 颤抖只发生在【半径】上(地形起伏),
+	#   方向 dir 随水平移动平滑变化。所以只平滑半径 → 竖直不抖, 水平照常紧跟(不产生跟随延迟)。
 	var head := global_position + up * cam_height
-	var cam_pos := head - look * cam_distance
-	if _cam_snap:
-		_camera.global_position = cam_pos   # 接管首帧直接就位
-		_cam_snap = false
+	var rel := head - _center
+	var hr := rel.length()
+	var hdir := (rel / hr) if hr > 1.0e-4 else up
+	var snapping := _cam_snap or _cam_anchor_r < 0.0
+	if snapping:
+		_cam_anchor_r = hr
 	else:
-		_camera.global_position = _camera.global_position.lerp(cam_pos, clampf(12.0 * delta, 0.0, 1.0))
-	_camera.look_at(head, up)
+		_cam_anchor_r = lerpf(_cam_anchor_r, hr, 1.0 - exp(-cam_height_smooth * delta))
+	var anchor := _center + hdir * _cam_anchor_r
+	var desired := anchor - look * cam_distance
+	# 相机位置再整体平滑一次(帧率无关): 主要吸收 60Hz 物理步进, 让水平跟随顺滑不台阶。
+	if snapping:
+		_camera.global_position = desired
+	else:
+		_camera.global_position = _camera.global_position.lerp(desired, 1.0 - exp(-cam_follow_smooth * delta))
+	_camera.look_at(anchor, up)
+	_cam_snap = false
 
 
 func _unhandled_input(event: InputEvent) -> void:

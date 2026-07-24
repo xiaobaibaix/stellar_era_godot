@@ -56,6 +56,12 @@ func get_mode() -> int:
 
 func _apply_mode() -> void:
 	var to_character := _mode == Mode.CHARACTER
+	# 把相机**重挂**到当前聚焦对象下: 角色模式 → 挂到角色; 星球模式 → 挂回星球。
+	# keep_global_transform=true → 世界位姿不变, 切换不跳。于是"聚焦谁相机就在谁身上", 驱动权随之交接。
+	if orbit_camera != null:
+		var new_parent: Node = character if to_character else planet
+		if new_parent != null and orbit_camera.get_parent() != new_parent:
+			orbit_camera.reparent(new_parent, true)
 	# 轨道相机: 角色模式关掉(停自我摆位 + 停左键/滚轮), 星球模式开。
 	if orbit_camera != null:
 		orbit_camera.set_process(not to_character)
