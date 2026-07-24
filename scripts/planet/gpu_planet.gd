@@ -51,7 +51,17 @@ func _connect_params_signal() -> void:
 		params.connect("param_changed", _on_param_changed)
 
 ## 驱动 LOD 的相机(@tool 编辑器 get_viewport 相机不可靠, 用显式引用)。Phase 2 必填。
+## 编辑器预览: 在场景里拖动这个 Camera3D 节点, LOD + 剔除会按它的位置/视锥实时更新, 而你从
+## 编辑器自由视角(不同于该相机)观察 → 就能看到星球被剔成什么样(视锥外/背面/被遮挡的洞)。
 @export var camera: Camera3D
+
+## 编辑器内预览剔除(@tool): 开 → 编辑器视口也跑 LOD + 剔除, 拖动 camera 节点即时可见效果。
+## 关 → 编辑器里停掉 compositor(省编辑器算力; 运行时不受影响, 始终开)。
+## 提示: 想不拖动也持续刷新, 在 3D 视口右上"透视"菜单勾选"持续更新(Update Continuously)"。
+@export var preview_in_editor: bool = true:
+	set(v):
+		preview_in_editor = v
+		_apply_preview_enabled()
 
 ## 每叶三角形 patch 边分辨率。
 @export_range(8, 64, 1) var patch_resolution: int = DEFAULT_PATCH_RES:
@@ -119,6 +129,10 @@ func _process(_delta: float) -> void:
 	# 每帧: 轮询后台烘焙是否完成 → 推 LOD 帧数据 + 绑上一帧写好的纹理。
 	_poll_async_bake()
 	if _lod_comp == null or not is_instance_valid(camera) or _mat == null:
+		return
+	# 编辑器预览关: compositor 已被 _apply_preview_enabled 禁用; 绑 fallback(基础 20 面)避免读到空 cull_tex。
+	if Engine.is_editor_hint() and not preview_in_editor:
+		_mat.set_shader_parameter("u_patchTex", _patch_tex_fallback)
 		return
 	var p: PlanetParams = _effective_params()
 	var write_idx: int = _frame & 1
@@ -396,6 +410,10 @@ func _setup_lod_compositor() -> void:
 	if comp == null:
 		comp = Compositor.new()
 		we.compositor = comp
+	# 清理历史遗留: 早期版本每次 setup 都 append 一个 GpuLodCompositor 到场景的 Compositor 资源,
+	# 在编辑器保存时被序列化进 .tscn → 反复重开累积一堆空跑的旧 effect(planet.tscn 里曾有 5 个)。
+	# 这里先剔掉所有我方类型的 effect, 再挂新建的, 保证同类只 1 份。配合 PRE/POST_SAVE 钩子(不入盘)。
+	_purge_planet_effects(comp)
 	_lod_comp = (_GpuLodCompositor_script as GDScript).new() as GpuLodCompositor
 	if not _lod_comp.setup(_mat.get_rid()):
 		push_error("[GpuPlanet] GpuLodCompositor.setup 失败(compute shader 编译错误?)")
@@ -410,6 +428,59 @@ func _setup_lod_compositor() -> void:
 	var effs: Array[CompositorEffect] = comp.compositor_effects.duplicate()
 	effs.append(_lod_comp)
 	effs.append(_hiz_comp)
+	comp.compositor_effects = effs
+	_apply_preview_enabled()   # 编辑器里按 preview_in_editor 决定是否启用
+
+
+# 剔掉 Compositor 里所有本插件类型(GpuLodCompositor / GpuHizCompositor)的 effect。
+func _purge_planet_effects(comp: Compositor) -> void:
+	if comp == null:
+		return
+	var kept: Array[CompositorEffect] = []
+	var changed := false
+	for e in comp.compositor_effects:
+		if e is GpuLodCompositor or e is GpuHizCompositor:
+			changed = true
+			continue
+		kept.append(e)
+	if changed:
+		comp.compositor_effects = kept
+
+
+# 编辑器里按 preview_in_editor 开关 compositor; 运行时始终开。
+func _apply_preview_enabled() -> void:
+	var on: bool = (not Engine.is_editor_hint()) or preview_in_editor
+	if _lod_comp != null:
+		_lod_comp.enabled = on
+	if _hiz_comp != null:
+		_hiz_comp.enabled = on
+
+
+# 编辑器保存前/后: 把动态挂的 effect 摘下/挂回, 避免它们被序列化进 .tscn(否则重开累积垃圾)。
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_EDITOR_PRE_SAVE:
+		_detach_planet_effects()
+	elif what == NOTIFICATION_EDITOR_POST_SAVE:
+		_reattach_planet_effects()
+
+
+func _detach_planet_effects() -> void:
+	var we: WorldEnvironment = _find_world_environment()
+	if we == null or we.compositor == null:
+		return
+	_purge_planet_effects(we.compositor)
+
+
+func _reattach_planet_effects() -> void:
+	var we: WorldEnvironment = _find_world_environment()
+	if we == null or we.compositor == null or _lod_comp == null:
+		return
+	var comp: Compositor = we.compositor
+	var effs: Array[CompositorEffect] = comp.compositor_effects.duplicate()
+	if not effs.has(_lod_comp):
+		effs.append(_lod_comp)
+	if _hiz_comp != null and not effs.has(_hiz_comp):
+		effs.append(_hiz_comp)
 	comp.compositor_effects = effs
 
 
