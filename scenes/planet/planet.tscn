@@ -1,5 +1,6 @@
 [gd_scene format=3 uid="uid://bm7socvdit1js"]
 
+[ext_resource type="Texture2D" uid="uid://1dvcnsbflecp" path="res://assets/picture/GalaxyBackground.hdr" id="1_ihcuv"]
 [ext_resource type="Script" uid="uid://cjg2w1cypjy4u" path="res://scripts/core/orbit_camera.gd" id="1_invnv"]
 [ext_resource type="Script" uid="uid://b5fjitb743vfj" path="res://scripts/planet/gpu_planet.gd" id="3_gp"]
 [ext_resource type="Script" uid="uid://7boxikbjeden" path="res://scripts/core/planet_params.gd" id="4_2vvio"]
@@ -7,18 +8,17 @@
 [ext_resource type="PackedScene" uid="uid://beyqcputa5pgw" path="res://scenes/fps.tscn" id="5_42vvu"]
 [ext_resource type="PackedScene" uid="uid://chettq2yjg6nk" path="res://scenes/character/robot_character.tscn" id="6_robot"]
 [ext_resource type="Script" uid="uid://8blbng5p8fn2" path="res://scripts/character/camera_director.gd" id="7_camdir"]
-[ext_resource type="Script" path="res://scripts/planet/planet_atmosphere.gd" id="8_atmo"]
+[ext_resource type="Script" uid="uid://u6rsgrn3apim" path="res://scripts/planet/planet_atmosphere.gd" id="8_atmo"]
 
-[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_p4lu5"]
-sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
-ground_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+[sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_vvtdt"]
+panorama = ExtResource("1_ihcuv")
 
-[sub_resource type="Sky" id="Sky_invnv"]
-sky_material = SubResource("ProceduralSkyMaterial_p4lu5")
+[sub_resource type="Sky" id="Sky_un7fp"]
+sky_material = SubResource("PanoramaSkyMaterial_vvtdt")
 
 [sub_resource type="Environment" id="Environment_q7o7h"]
 background_mode = 2
-sky = SubResource("Sky_invnv")
+sky = SubResource("Sky_un7fp")
 tonemap_mode = 4
 glow_enabled = true
 
@@ -54,7 +54,7 @@ external_camera = NodePath("../Camera3D")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1250)
 script = ExtResource("1_invnv")
 
-[node name="PlanetAtmosphere" type="Node3D" parent="GpuPlanet" node_paths=PackedStringArray("planet", "sun_light")]
+[node name="PlanetAtmosphere" type="Node3D" parent="GpuPlanet" unique_id=2088287272 node_paths=PackedStringArray("planet", "sun_light")]
 script = ExtResource("8_atmo")
 planet = NodePath("..")
 sun_light = NodePath("../../DirectionalLight3D")

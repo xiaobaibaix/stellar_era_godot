@@ -191,6 +191,20 @@ func _push_frame() -> void:
 	var R: float = p.radius
 	var center := _center()
 	var ground_r: float = R + p.seaLevel * p.maxHeight
+	# --- 自适应壳层几何(随地形/半径缩放, 不再直接吃 cloudBottom×R 这种小比例) ---
+	# 地形峰值(maxHeight×1.2 留冗余) → 云底必须高过峰值, 否则云被埋进山里。
+	var peak: float = R + p.maxHeight * 1.2
+	# 云底: 取 "半径比例" 与 "峰值+四分之一 maxHeight 间隙" 的较大者。
+	var cbottom: float = maxf(R * p.cloudBottom, peak + p.maxHeight * 0.25)
+	# 云层厚度: 至少 0.8×maxHeight, 保证薄壳半径下云层仍有可见体积。
+	var thickness: float = maxf(R * (p.cloudTop - p.cloudBottom), p.maxHeight * 0.8)
+	var ctop: float = cbottom + thickness
+	# 大气壳: 取 atmoScale×R 与 "云顶+半个 maxHeight" 的较大者, 确保云被包在大气壳内。
+	var ratmo: float = maxf(R * p.atmoScale, ctop + p.maxHeight * 0.5)
+	# 散射的光学深度 ∝ 系数 × 壳厚(世界单位积分)。壳被地形撑厚后会过度变暗,
+	# 用 thick_k 把系数按 "参考壳厚 / 实际壳厚" 收回, 让散射浓度跨半径一致。
+	var ref_thick: float = R * maxf(p.atmoScale - 1.0, 0.01)
+	var thick_k: float = clampf(ref_thick / maxf(ratmo - ground_r, 1.0), 0.05, 1.0)
 	var sun_pos := center + _sun_dir * 1.0e9
 	_atmo.enabled = p.showAtmosphere   # 关 = 跳过整条后处理(含云/godray)
 	_atmo.set_frame_data({
@@ -206,13 +220,13 @@ func _push_frame() -> void:
 		"sun_count": 1,
 		"planet_center": center,
 		"rground": ground_r,
-		"ratmo": R * p.atmoScale,
-		"cbottom": R * p.cloudBottom,
-		"ctop": R * p.cloudTop,
-		"scatter_r": _RAY_RATIO * p.atmoRayleigh,
-		"scatter_m": p.atmoMie,
+		"ratmo": ratmo,
+		"cbottom": cbottom,
+		"ctop": ctop,
+		"scatter_r": _RAY_RATIO * p.atmoRayleigh * thick_k,
+		"scatter_m": p.atmoMie * thick_k,
 		"mie_g": p.atmoMieG,
-		"ozone": _OZO_RATIO * p.atmoOzone,
+		"ozone": _OZO_RATIO * p.atmoOzone * thick_k,
 		"density_falloff": p.atmoDensityFalloff,
 		"mie_falloff": p.atmoMieFalloff,
 		"sun_intensity": p.atmoSunIntensity,
