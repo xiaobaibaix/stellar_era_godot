@@ -47,11 +47,11 @@ camera = NodePath("Camera3D")
 patch_resolution = 8
 
 [node name="RobotCharacter" parent="GpuPlanet" unique_id=1570974038 node_paths=PackedStringArray("external_camera") instance=ExtResource("6_robot")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 110)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 155.23427, 0)
 external_camera = NodePath("../Camera3D")
 
 [node name="Camera3D" type="Camera3D" parent="GpuPlanet" unique_id=2085450478]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1250)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 272.574, 737.9434)
 script = ExtResource("1_invnv")
 
 [node name="PlanetAtmosphere" type="Node3D" parent="GpuPlanet" unique_id=2088287272 node_paths=PackedStringArray("planet", "sun_light")]
