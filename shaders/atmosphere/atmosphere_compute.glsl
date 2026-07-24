@@ -365,13 +365,14 @@ void main() {
 
 				// 云内散射(每太阳各算一次自阴影 + 晨昏线)
 				if (clouds && sigC > 0.0) {
-					float cphase = 0.4 + fd.cloud_b.z * cloudPhase(mu);   // silver
-					float sunT = lightMarch(p, s);
 					// 晨昏线位移 cterminator: 正值→sunUp 有效值变小→day/amb 更早归零, 云的明暗分界线向阳侧移动(更贴近晨昏线);
 					// 负值→分界线向背阳侧延伸。默认 0 = 原行为。
 					float sunUp = dot(normalize(p - fd.planet_center.xyz), sdir) - fd.cloud_c.y;
 					float day = smoothstep(-0.12, 0.12, sunUp);
 					float amb = smoothstep(-0.4, 0.15, sunUp);
+					// 夜侧 day=0, 而 sunT 只与 day 相乘 → 直接跳过 cloudLightSteps 步自阴影 march(省整片夜半球云的光照采样, 结果不变)。
+					float sunT = (day > 0.0) ? lightMarch(p, s) : 0.0;
+					float cphase = 0.4 + fd.cloud_b.z * cloudPhase(mu);   // silver
 					float powder = mix(1.0, 1.0 - exp(-dcl * fd.cloud_a.y * 2.0), fd.cloud_b.w);
 					vec3 lit = vec3(1.7, 1.6, 1.5) * (sunT * day * cphase * powder) + vec3(0.28, 0.34, 0.45) * amb;
 					src += sigC * lit * atten;
@@ -386,6 +387,8 @@ void main() {
 				L += T * integ;
 				T *= dT;
 			}
+			// 早停: 累计透射率极低时(被厚云/深大气挡住), 后续采样贡献 <0.2%, 直接结束剩余步进(结果肉眼无变化)。
+			if (max(max(T.r, T.g), T.b) < 0.002) break;
 			t += ds;
 		}
 	}
